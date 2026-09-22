@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api, events } from "../api";
 import type { Session, WindowRole } from "../types";
 import { Dropdown } from "./Menu";
+import { PanelsMenu } from "./PanelsMenu";
 import { Prompt } from "./Prompt";
 
 interface Props {
@@ -86,6 +87,7 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
         {active && <button onClick={() => void remove()} title="Remove this workspace">－</button>}
         {active && <button onClick={() => setRenaming(true)} title="Rename this workspace">✎</button>}
         <span className="switcher-path">{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>
+        {role === "workspace" && <PanelsMenu />}
         <button onClick={onSettings} title="Settings (Ctrl+,)">⚙</button>
         <button onClick={() => void api.focusWindow(other).catch(report)} title="Focus the other window (Ctrl+Shift+Space)">
           {other === "terminal" ? "Terminal ▸" : "◂ Workspace"}
@@ -96,6 +98,7 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           <button className="close" onClick={() => void api.windowClose()} title="Close (the app stays in the tray)">✕</button>
         </span>
       </header>
+      {!maximized && <ResizeEdges />}
       {renaming && active && (
         <Prompt
           title="Workspace name"
@@ -104,6 +107,31 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           onSubmit={(name) => { setRenaming(false); void api.renameWorkspace(active.id, name).catch(report); }}
         />
       )}
+    </>
+  );
+}
+
+const EDGES = [
+  ["n", "North"], ["s", "South"], ["e", "East"], ["w", "West"],
+  ["ne", "NorthEast"], ["nw", "NorthWest"], ["se", "SouthEast"], ["sw", "SouthWest"],
+] as const;
+
+/**
+ * The resize band of an undecorated window. The webview takes every pointer
+ * event before the GTK window sees it, so the band is drawn here and the drag
+ * is handed to the compositor (CHR-05).
+ */
+function ResizeEdges() {
+  return (
+    <>
+      {EDGES.map(([cls, direction]) => (
+        <div
+          key={cls}
+          className={`resize-edge resize-${cls}`}
+          data-tauri-drag-region="false"
+          onMouseDown={(e) => { if (e.button !== 0) return; e.preventDefault(); void api.windowStartResize(direction).catch(report); }}
+        />
+      ))}
     </>
   );
 }

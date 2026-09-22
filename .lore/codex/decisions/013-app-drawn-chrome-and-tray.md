@@ -54,9 +54,11 @@ and minimise, maximise and close right-aligned in that order (CHR-03).
 The title row carries `data-tauri-drag-region="deep"`, so Tauri's injected drag
 script starts a compositor-side move from a press anywhere inside it other than
 a button or an input, and toggles maximised on a double click (CHR-02, CHR-04).
-tao hit-tests pointer motion and button presses against a five-pixel band at
-every edge and corner of an undecorated resizable window, which is what resizes
-it (CHR-05). A right-click on an empty part of the title row calls
+The frontend draws the resize band itself — five-pixel edges and ten-pixel
+corners, fixed over the page — and a press on it calls the window API's
+`startResizeDragging`, which hands the resize to the compositor (CHR-05). tao
+hit-tests the same band at the GTK level, but the webview consumes every pointer
+event before the GTK window sees it, so that path never fires here. A right-click on an empty part of the title row calls
 `windows::show_window_menu`, which hands GDK a synthetic button event carrying
 the seat's pointer so `xdg_toplevel.show_window_menu` has the button serial it
 requires (CHR-07).

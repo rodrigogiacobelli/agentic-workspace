@@ -79,8 +79,9 @@ double-clicking it or dragging it makes it permanent.
 the area in that direction, on its centre to move it there, and drag any divider
 to resize. The Files, Search, Git and Outline panels move the same way — onto
 any edge of any region, or into another region's tab strip — so a panel can sit
-left, right or below the editor. Editor splits belong to the workspace; panel
-placement belongs to the app.
+left, right or below the editor. A panel closed from its tab comes back from
+the title row's *View* menu or its hotkey. Editor splits belong to the
+workspace; panel placement belongs to the app.
 
 **Custom views.** A view is a named list of shortcuts into the workspace. Send
 files and folders to it from the file tree and they sit at its root whatever

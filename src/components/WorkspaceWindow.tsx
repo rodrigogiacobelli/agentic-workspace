@@ -264,7 +264,7 @@ function RegionView({ region, layout, update, unstaged, render }: {
             </div>
           );
         })}
-        <button className="panel-hide" onClick={() => update(hidePanel(layout, region.active))} title="Hide this panel (its hotkey brings it back)">×</button>
+        <button className="panel-hide" onClick={() => update(hidePanel(layout, region.active))} title="Hide this panel — the View menu or its hotkey brings it back">×</button>
       </div>
       {render(region.active)}
       {zone.overlay}

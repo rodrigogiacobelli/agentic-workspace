@@ -11,6 +11,9 @@ import type {
 
 export type OutputChunk = ArrayBuffer | Uint8Array | number[];
 
+/** An edge or corner of the window, as the window API names them. */
+export type ResizeDirection = "North" | "South" | "East" | "West" | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
+
 export interface OpenAt {
   workspaceId: string;
   path: string;
@@ -58,6 +61,8 @@ export const api = {
   windowToggleMaximize: () => getCurrentWindow().toggleMaximize(),
   windowClose: () => getCurrentWindow().close(),
   windowMaximized: () => getCurrentWindow().isMaximized(),
+  /** Hands a resize from the window's edge to the compositor (CHR-05). */
+  windowStartResize: (direction: ResizeDirection) => getCurrentWindow().startResizeDragging(direction),
   /** The compositor's window menu, at a point in this window. */
   showWindowMenu: (x: number, y: number) => invoke<void>("show_window_menu", { x, y }),
   getSettings: () => invoke<Settings>("get_settings"),

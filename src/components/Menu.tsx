@@ -29,6 +29,27 @@ export function ContextMenu({ x, y, onClose, children }: { x: number; y: number;
   );
 }
 
+/** A button that opens a menu of actions beneath itself. */
+export function MenuButton({ label, title, className, children }: { label: ReactNode; title?: string; className?: string; children: ReactNode }) {
+  const [open, setOpen] = useState<{ x: number; y: number } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const toggle = () => {
+    if (open) { setOpen(null); return; }
+    const r = button.current?.getBoundingClientRect();
+    if (r) setOpen({ x: r.left, y: r.bottom + 2 });
+  };
+  return (
+    <>
+      <button ref={button} className={`${className ?? ""}${open ? " open" : ""}`} onClick={toggle} title={title} aria-haspopup="menu" aria-expanded={!!open}>{label}</button>
+      {open && (
+        <ContextMenu x={open.x} y={open.y} onClose={() => setOpen(null)}>
+          <div onClick={() => setOpen(null)}>{children}</div>
+        </ContextMenu>
+      )}
+    </>
+  );
+}
+
 export interface Option {
   id: string;
   label: string;
