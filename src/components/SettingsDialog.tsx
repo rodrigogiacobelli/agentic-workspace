@@ -88,6 +88,10 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
             {isImported(current.theme) && <button onClick={() => void removeTheme()} title="Remove this imported theme">Remove</button>}
           </span>
         </label>
+        <label className="setting">
+          <span>Panel tabs</span>
+          <Dropdown value={current.panelTabs} options={[{ id: "text", label: "Words" }, { id: "icons", label: "Icons" }]} onChange={(id) => set({ panelTabs: id as "text" | "icons" })} />
+        </label>
         <h3>Raise from anywhere</h3>
         {text("Preferred key (portal syntax, e.g. CTRL+ALT+a)", current.globalHotkey, (v) => set({ globalHotkey: v }))}
         <div className="setting">

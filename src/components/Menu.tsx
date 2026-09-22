@@ -72,6 +72,72 @@ export function SubMenu({ label, children }: { label: ReactNode; children: React
   );
 }
 
+export interface Row {
+  id: string;
+  name: ReactNode;
+  detail?: string;
+  selected?: boolean;
+  onPick: () => void;
+  onRename?: () => void;
+  onRemove?: () => void;
+}
+
+interface RowMenuProps {
+  /** What the closed control shows. */
+  label: ReactNode;
+  title?: string;
+  className?: string;
+  rows: Row[];
+  /** A row at the bottom that adds something. */
+  footer?: { label: ReactNode; onClick: () => void };
+  empty?: string;
+  minWidth?: number;
+}
+
+/** A selector whose rows carry their own rename and remove actions on the right. */
+export function RowMenu({ label, title, className, rows, footer, empty, minWidth = 280 }: RowMenuProps) {
+  const [open, setOpen] = useState<{ x: number; y: number; width: number } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const toggle = () => {
+    if (open) { setOpen(null); return; }
+    const r = button.current?.getBoundingClientRect();
+    if (r) setOpen({ x: r.left, y: r.bottom + 2, width: Math.max(r.width, minWidth) });
+  };
+  return (
+    <>
+      <button ref={button} className={`dropdown${className ? ` ${className}` : ""}${open ? " open" : ""}`} onClick={toggle} title={title} aria-haspopup="menu" aria-expanded={!!open}>
+        <span className="dropdown-value">{label}</span>
+        <span className="dropdown-caret">▾</span>
+      </button>
+      {open && (
+        <ContextMenu x={open.x} y={open.y} onClose={() => setOpen(null)}>
+          <div className="row-menu" style={{ minWidth: open.width }}>
+            {rows.map((r) => (
+              <div key={r.id} className={`row${r.selected ? " selected" : ""}`} onClick={() => { setOpen(null); r.onPick(); }} title={r.detail}>
+                <span className="row-name">{r.name}</span>
+                {r.detail && <span className="row-detail">{r.detail}</span>}
+                {(r.onRename || r.onRemove) && (
+                  <span className="row-actions" onClick={(e) => e.stopPropagation()}>
+                    {r.onRename && <button title="Rename" onClick={() => { setOpen(null); r.onRename!(); }}>✎</button>}
+                    {r.onRemove && <button title="Remove" onClick={() => { setOpen(null); r.onRemove!(); }}>✕</button>}
+                  </span>
+                )}
+              </div>
+            ))}
+            {rows.length === 0 && empty && <div className="palette-empty">{empty}</div>}
+            {footer && (
+              <>
+                <hr />
+                <button className="row-footer" onClick={() => { setOpen(null); footer.onClick(); }}>{footer.label}</button>
+              </>
+            )}
+          </div>
+        </ContextMenu>
+      )}
+    </>
+  );
+}
+
 export interface Option {
   id: string;
   label: string;

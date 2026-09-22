@@ -36,6 +36,8 @@ pub struct Settings {
     pub global_hotkey: String,
     /// Language overrides keyed by absolute file path.
     pub languages: HashMap<String, String>,
+    /// How a panel's tab reads: `text` or `icons`.
+    pub panel_tabs: String,
     /// Where the Files, Search, Git and Outline panels sit, as the frontend
     /// lays them out; the application's, not a workspace's (DOCK-08). Null
     /// until a panel is first moved.
@@ -73,6 +75,7 @@ impl Default for Settings {
             asset_links: "markdown".into(),
             global_hotkey: "CTRL+ALT+a".into(),
             languages: HashMap::new(),
+            panel_tabs: "text".into(),
             panel_layout: serde_json::Value::Null,
             workspaces: HashMap::new(),
         }
@@ -101,12 +104,8 @@ pub fn load(data_dir: &Path) -> Settings {
 }
 
 fn save(data_dir: &Path, settings: &Settings) -> Result<()> {
-    let path = data_dir.join(FILE);
-    let tmp = data_dir.join(format!(".{FILE}.tmp-{}", std::process::id()));
     let text = serde_json::to_string_pretty(settings).context("serialising settings")?;
-    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
+    crate::store::write_atomic(&data_dir.join(FILE), &text)
 }
 
 #[tauri::command]

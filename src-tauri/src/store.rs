@@ -2,7 +2,8 @@
 
 use crate::state::{Session, SESSION_VERSION};
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const FILE: &str = "session.json";
 
@@ -48,12 +49,30 @@ fn set_aside(path: &Path, reason: String) -> Loaded {
     Loaded::Unreadable { moved_to, reason }
 }
 
-/// Writes the session atomically: a temporary file beside it, then a rename.
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A temporary name beside `path` that no other write shares. Two threads
+/// saving the same file at once — the periodic save and a publish — would
+/// otherwise write one temporary file and rename it out from under each other.
+pub fn tmp_path(path: &Path) -> PathBuf {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!(".{name}.tmp-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)))
+}
+
+/// Writes text atomically: a temporary file beside the target, then a rename.
+pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    let tmp = tmp_path(path);
+    let result = std::fs::write(&tmp, text)
+        .with_context(|| format!("writing {}", tmp.display()))
+        .and_then(|_| std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Writes the session atomically.
 pub fn save(data_dir: &Path, session: &Session) -> Result<()> {
-    let path = data_dir.join(FILE);
-    let tmp = data_dir.join(format!(".{FILE}.tmp-{}", std::process::id()));
     let text = serde_json::to_string_pretty(session).context("serialising the session")?;
-    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
+    write_atomic(&data_dir.join(FILE), &text)
 }

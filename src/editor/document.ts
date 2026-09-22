@@ -279,8 +279,12 @@ export class Doc {
         view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: "start" }) });
       }
     }
-    if (this.root.parentElement !== container) container.replaceChildren(this.root);
-    this.active().focus();
+    // Focus moves to the document only when it is newly shown; a re-mount of
+    // what is already on screen must not take it from an input elsewhere.
+    if (this.root.parentElement !== container) {
+      container.replaceChildren(this.root);
+      this.active().focus();
+    }
   }
 
   unmount(): void {

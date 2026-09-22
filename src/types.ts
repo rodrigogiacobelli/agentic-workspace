@@ -152,6 +152,8 @@ export interface Settings {
   assetLinks: "markdown" | "citation";
   globalHotkey: string;
   languages: Record<string, string>;
+  /** How a panel's tab reads. */
+  panelTabs: "text" | "icons";
   panelLayout: PanelLayout | null;
   workspaces: Record<string, WorkspaceSettings>;
 }

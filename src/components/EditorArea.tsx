@@ -3,6 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { LANGUAGES, languageFor } from "../editor/languages";
 import * as settings from "../settings";
 import type { EditorGroup, EditorTab, LayoutGroup, Workspace } from "../types";
@@ -87,12 +88,16 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
 
+  // Mounts when the active tab changes or its document was dropped from the
+  // registry — never on every session update, which would refocus the editor
+  // while something else is being typed into.
+  const mounted = activeId ? !!editors.get(activeId) : false;
   useEffect(() => {
     if (shownRef.current && shownRef.current !== activeId) editors.unmount(shownRef.current);
     shownRef.current = tab && !tab.diff ? activeId : null;
     const container = host.current;
     if (tab && !tab.diff && container) void editors.mount(ws, tab, container).catch(report);
-  }, [activeId, ws, tab]);
+  }, [activeId, ws.id, mounted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => { if (shownRef.current) editors.unmount(shownRef.current); }, []);
 
@@ -119,6 +124,7 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
 
   const entry = tab && !tab.diff ? editors.get(tab.id) : undefined;
   const doc = entry && "doc" in entry ? entry.doc : undefined;
+  const media = entry && "media" in entry ? entry.media : null;
 
   return (
     <div
@@ -154,9 +160,10 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
         <>
           {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
           {doc && <Banner doc={doc} />}
-          <div className="editor-host" ref={host}>
+          <div className="editor-host" ref={host} hidden={!!media}>
             {group.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
           </div>
+          {media && tab && <MediaView ws={ws} path={tab.path} kind={media} />}
           {entry && "binary" in entry && tab && (
             <div className="binary-notice">
               <p>{tab.path} is not a text file.</p>
@@ -167,6 +174,18 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
         </>
       )}
       {zone.overlay}
+    </div>
+  );
+}
+
+/** An image, an audio file or a video opened from the tree, shown as itself. */
+function MediaView({ ws, path, kind }: { ws: Workspace; path: string; kind: "image" | "audio" | "video" }) {
+  const url = convertFileSrc(`${ws.path}/${path}`);
+  return (
+    <div className="media-view">
+      {kind === "image" && <img src={url} alt={path} title={path} />}
+      {kind === "audio" && <audio src={url} controls title={path} />}
+      {kind === "video" && <video src={url} controls title={path} />}
     </div>
   );
 }

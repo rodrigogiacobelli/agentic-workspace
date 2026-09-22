@@ -33,9 +33,9 @@ pub fn write_file(state: tauri::State<AppState>, workspace_id: String, path: Str
 }
 
 fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let dir = path.parent().context("the path has no parent directory")?;
-    let name = path.file_name().context("the path has no file name")?.to_string_lossy();
-    let tmp = dir.join(format!(".{name}.aw-tmp-{}", std::process::id()));
+    path.parent().context("the path has no parent directory")?;
+    path.file_name().context("the path has no file name")?;
+    let tmp = crate::store::tmp_path(path);
     let existing = std::fs::metadata(path).ok();
 
     let result = (|| -> Result<()> {

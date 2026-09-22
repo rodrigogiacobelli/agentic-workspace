@@ -9,6 +9,7 @@ import { PANELS, defaultLayout, dropPanel, hidePanel, leafKey, normalize, placeP
 import { EditorArea, closeTab, groupOrder } from "./EditorArea";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
+import { Icon } from "./icons";
 import { Outline } from "./Outline";
 import { Palette, type PaletteItem } from "./Palette";
 import { SearchPanel } from "./SearchPanel";
@@ -35,9 +36,11 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   // The panel layout is the application's, kept with the settings; the
   // settings dialog can reset it or show a hidden panel from any window.
   const [layout, setLayout] = useState<PanelLayout>(() => normalize(settings.get()?.panelLayout ?? defaultLayout()));
+  const [iconTabs, setIconTabs] = useState(settings.get()?.panelTabs === "icons");
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
   useEffect(() => settings.subscribe((s) => {
+    setIconTabs(s.panelTabs === "icons");
     const next = normalize(s.panelLayout ?? defaultLayout());
     if (!same(next, layoutRef.current)) setLayout(next);
   }), []);
@@ -201,7 +204,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
           leaf.kind === "editor" ? (
             <EditorLeaf layout={layout} update={update}><EditorArea ws={ws} onGitChanged={refreshGit} /></EditorLeaf>
           ) : (
-            <RegionView region={leaf} layout={layout} update={update} unstaged={unstaged} render={renderPanel} />
+            <RegionView region={leaf} layout={layout} update={update} unstaged={unstaged} icons={iconTabs} render={renderPanel} />
           )
         }
         onResize={(path, sizes) => update(resizeSplit(layout, path, sizes))}
@@ -234,11 +237,13 @@ function EditorLeaf({ layout, update, children }: { layout: PanelLayout; update:
 }
 
 /** One tabbed stack of panels. Its tabs are dragged to move a panel (DOCK-01). */
-function RegionView({ region, layout, update, unstaged, render }: {
+function RegionView({ region, layout, update, unstaged, icons, render }: {
   region: Region;
   layout: PanelLayout;
   update: (l: PanelLayout) => void;
   unstaged: number;
+  /** Tabs read as icons rather than words. */
+  icons: boolean;
   render: (id: PanelId) => React.ReactNode;
 }) {
   const zone = useDropZone(
@@ -278,9 +283,10 @@ function RegionView({ region, layout, update, unstaged, render }: {
               onDragOver={(e) => { if (isPanel(e)) { e.preventDefault(); e.stopPropagation(); setOver(i); } }}
               onDrop={(e) => dropAt(e, i)}
               onClick={() => update(setActivePanel(layout, region.id, id))}
-              title={panel?.hotkey}
+              title={`${panel?.label ?? id} (${panel?.hotkey ?? ""})`}
             >
-              {panel?.label ?? id}{id === "git" && unstaged ? ` (${unstaged})` : ""}
+              {icons && panel ? <Icon name={panel.icon} /> : (panel?.label ?? id)}
+              {id === "git" && unstaged ? <span className="tab-count">{icons ? unstaged : `(${unstaged})`}</span> : null}
             </div>
           );
         })}

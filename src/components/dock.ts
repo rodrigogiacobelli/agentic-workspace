@@ -4,15 +4,16 @@
 // the application's, not a workspace's (DOCK-08).
 
 import type { DockLeaf, DockNode, PanelId, PanelLayout, Region } from "../types";
+import type { IconName } from "./icons";
 import type { SplitNode, Zone } from "./SplitTree";
 
 export type { DockLeaf, DockNode, PanelId, PanelLayout, Region };
 
-export const PANELS: { id: PanelId; label: string; hotkey: string }[] = [
-  { id: "files", label: "Files", hotkey: "Ctrl+Shift+E" },
-  { id: "search", label: "Search", hotkey: "Ctrl+Shift+F" },
-  { id: "git", label: "Git", hotkey: "Ctrl+Shift+G" },
-  { id: "outline", label: "Outline", hotkey: "Ctrl+Shift+O" },
+export const PANELS: { id: PanelId; label: string; hotkey: string; icon: IconName }[] = [
+  { id: "files", label: "Files", hotkey: "Ctrl+Shift+E", icon: "folder" },
+  { id: "search", label: "Search", hotkey: "Ctrl+Shift+F", icon: "search" },
+  { id: "git", label: "Git", hotkey: "Ctrl+Shift+G", icon: "git" },
+  { id: "outline", label: "Outline", hotkey: "Ctrl+Shift+O", icon: "outline" },
 ];
 
 let counter = 0;

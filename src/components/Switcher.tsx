@@ -1,10 +1,11 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, events } from "../api";
 import { report } from "../notice";
 import type { Session, WindowRole, Workspace } from "../types";
-import { ContextMenu } from "./Menu";
+import { Icon } from "./icons";
+import { RowMenu } from "./Menu";
 import { PanelsMenu } from "./PanelsMenu";
 import { Prompt } from "./Prompt";
 
@@ -18,9 +19,10 @@ interface Props {
 }
 
 /**
- * The one row both windows carry in place of the compositor's title bar:
- * which workspace is active, the way to the other window, and the window
- * controls. Empty parts of it drag the window and double-click maximises it.
+ * The one row both windows carry in place of the compositor's title bar: the
+ * path on the left, the workspace selector in the middle, and the View menu,
+ * settings, the other window and the window controls on the right. Empty
+ * parts of it drag the window and double-click maximises it.
  */
 export function Switcher({ session, role, unsaved, onSettings }: Props) {
   const active = session.workspaces.find((w) => w.id === session.active);
@@ -57,6 +59,8 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
     if (yes) await api.removeWorkspace(w.id).catch(report);
   };
 
+  const label = active ? `${active.name}${active.available ? "" : " (unavailable)"}` : "No workspace";
+
   return (
     <>
       <header
@@ -69,26 +73,48 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           void api.showWindowMenu(e.clientX, e.clientY).catch(() => {});
         }}
       >
-        <WorkspaceMenu session={session} onAdd={() => void addFolder()} onRename={setRenaming} onRemove={(w) => void remove(w)} />
-        {session.workspaces.some((w) => w.attention && w.id !== session.active) && (
-          <span className="attention-badge" title="A background workspace has new terminal output">●</span>
-        )}
-        {active?.git?.isRepo && (
-          <span className="switcher-branch" title={active.git.state ? `${active.git.state} in progress` : "Current branch"}>
-            ⑂ {active.git.detached ? "detached @ " : ""}{active.git.branch ?? ""}{active.git.state ? ` · ${active.git.state}` : ""}
+        <div className="switcher-left">
+          <span className="switcher-path" title={active?.path}>{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>
+          {active?.git?.isRepo && (
+            <span className="switcher-branch" title={active.git.state ? `${active.git.state} in progress` : "Current branch"}>
+              ⑂ {active.git.detached ? "detached @ " : ""}{active.git.branch ?? ""}{active.git.state ? ` · ${active.git.state}` : ""}
+            </span>
+          )}
+        </div>
+        <div className="switcher-center">
+          <RowMenu
+            className="switcher-select"
+            label={label}
+            title={active?.path}
+            minWidth={340}
+            rows={session.workspaces.map((w) => ({
+              id: w.id,
+              name: `${w.attention && w.id !== session.active ? "● " : ""}${w.name}${w.available ? "" : " (unavailable)"}`,
+              detail: w.path,
+              selected: w.id === session.active,
+              onPick: () => { if (w.id !== session.active) void api.switchWorkspace(w.id).catch(report); },
+              onRename: () => setRenaming(w),
+              onRemove: () => void remove(w),
+            }))}
+            footer={{ label: "＋ Add folder…", onClick: () => void addFolder() }}
+            empty="No workspaces yet"
+          />
+          {session.workspaces.some((w) => w.attention && w.id !== session.active) && (
+            <span className="attention-badge" title="A background workspace has new terminal output">●</span>
+          )}
+        </div>
+        <div className="switcher-right">
+          {role === "workspace" && <PanelsMenu />}
+          <button onClick={onSettings} title="Settings (Ctrl+,)">⚙</button>
+          <button onClick={() => void api.focusWindow(other).catch(report)} title={`${other === "terminal" ? "Terminal window" : "Workspace window"} (Ctrl+Shift+Space)`}>
+            <Icon name={other === "terminal" ? "terminal" : "workspace"} />
+          </button>
+          <span className="win-controls">
+            <button onClick={() => void api.windowMinimize()} title="Minimise">−</button>
+            <button onClick={() => void api.windowToggleMaximize()} title={maximized ? "Restore" : "Maximise"}>{maximized ? "❐" : "□"}</button>
+            <button className="close" onClick={() => void api.windowClose()} title="Close (the app stays in the tray)">✕</button>
           </span>
-        )}
-        <span className="switcher-path">{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>
-        {role === "workspace" && <PanelsMenu />}
-        <button onClick={onSettings} title="Settings (Ctrl+,)">⚙</button>
-        <button onClick={() => void api.focusWindow(other).catch(report)} title="Focus the other window (Ctrl+Shift+Space)">
-          {other === "terminal" ? "Terminal ▸" : "◂ Workspace"}
-        </button>
-        <span className="win-controls">
-          <button onClick={() => void api.windowMinimize()} title="Minimise">−</button>
-          <button onClick={() => void api.windowToggleMaximize()} title={maximized ? "Restore" : "Maximise"}>{maximized ? "❐" : "□"}</button>
-          <button className="close" onClick={() => void api.windowClose()} title="Close (the app stays in the tray)">✕</button>
-        </span>
+        </div>
       </header>
       {!maximized && <ResizeEdges />}
       {renaming && (
@@ -98,59 +124,6 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           onClose={() => setRenaming(null)}
           onSubmit={(name) => { const w = renaming; setRenaming(null); void api.renameWorkspace(w.id, name).catch(report); }}
         />
-      )}
-    </>
-  );
-}
-
-/**
- * The workspace selector: every workspace with its path, rename and remove
- * on the right of each row, and a row at the bottom that adds a folder.
- */
-function WorkspaceMenu({ session, onAdd, onRename, onRemove }: {
-  session: Session;
-  onAdd: () => void;
-  onRename: (w: Workspace) => void;
-  onRemove: (w: Workspace) => void;
-}) {
-  const [open, setOpen] = useState<{ x: number; y: number; width: number } | null>(null);
-  const button = useRef<HTMLButtonElement>(null);
-  const active = session.workspaces.find((w) => w.id === session.active);
-  const toggle = () => {
-    if (open) { setOpen(null); return; }
-    const r = button.current?.getBoundingClientRect();
-    if (r) setOpen({ x: r.left, y: r.bottom + 2, width: Math.max(r.width, 320) });
-  };
-  const label = active ? `${active.name}${active.available ? "" : " (unavailable)"}` : "No workspace";
-  return (
-    <>
-      <button ref={button} className={`dropdown switcher-select${open ? " open" : ""}`} onClick={toggle} title={active?.path} aria-haspopup="menu" aria-expanded={!!open}>
-        <span className="dropdown-value">{label}</span>
-        <span className="dropdown-caret">▾</span>
-      </button>
-      {open && (
-        <ContextMenu x={open.x} y={open.y} onClose={() => setOpen(null)}>
-          <div className="ws-menu" style={{ minWidth: open.width }}>
-            {session.workspaces.map((w) => (
-              <div
-                key={w.id}
-                className={`ws-row${w.id === session.active ? " selected" : ""}`}
-                onClick={() => { setOpen(null); if (w.id !== session.active) void api.switchWorkspace(w.id).catch(report); }}
-                title={w.path}
-              >
-                <span className="ws-name">{w.attention && w.id !== session.active ? "● " : ""}{w.name}{w.available ? "" : " (unavailable)"}</span>
-                <span className="ws-path">{w.path}</span>
-                <span className="ws-actions" onClick={(e) => e.stopPropagation()}>
-                  <button title="Rename" onClick={() => { setOpen(null); onRename(w); }}>✎</button>
-                  <button title="Remove from the list" onClick={() => { setOpen(null); onRemove(w); }}>✕</button>
-                </span>
-              </div>
-            ))}
-            {session.workspaces.length === 0 && <div className="palette-empty">No workspaces yet</div>}
-            <hr />
-            <button className="ws-add" onClick={() => { setOpen(null); onAdd(); }}>＋ Add folder…</button>
-          </div>
-        </ContextMenu>
       )}
     </>
   );

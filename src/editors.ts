@@ -4,6 +4,7 @@
 import { api } from "./api";
 import { Doc, type DocHooks, type Mode } from "./editor/document";
 import { languageFor } from "./editor/languages";
+import { mediaKind } from "./editor/preview";
 import * as settings from "./settings";
 import type { EditorGroup, EditorTab, Workspace } from "./types";
 
@@ -19,7 +20,8 @@ export function allTabIds(workspaces: Workspace[]): Set<string> {
   return new Set(workspaces.flatMap((w) => w.groups.flatMap((g) => g.editors.map((e) => e.id))));
 }
 
-export type Entry = { doc: Doc } | { binary: string };
+/** An open tab: a text document, media shown as itself, or a file the editor declines. */
+export type Entry = { doc: Doc } | { binary: string } | { media: "image" | "audio" | "video" };
 
 const registry = new Map<string, Entry>();
 const listeners = new Set<() => void>();
@@ -61,6 +63,13 @@ export function dirtyCount(): number {
 export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElement): Promise<Entry> {
   let entry = registry.get(tab.id);
   if (!entry) {
+    const kind = mediaKind(tab.path);
+    if (kind !== "file") {
+      entry = { media: kind };
+      registry.set(tab.id, entry);
+      notify();
+      return entry;
+    }
     let text: string;
     try {
       text = await api.readFile(ws.id, tab.path);

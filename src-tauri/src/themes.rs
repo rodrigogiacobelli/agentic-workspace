@@ -375,11 +375,7 @@ pub fn list(data_dir: &Path) -> Vec<Theme> {
 fn save(data_dir: &Path, theme: &Theme) -> Result<()> {
     let d = dir(data_dir);
     std::fs::create_dir_all(&d)?;
-    let path = d.join(format!("{}.json", theme.id));
-    let tmp = d.join(format!(".{}.tmp", theme.id));
-    std::fs::write(&tmp, serde_json::to_string_pretty(theme)?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    crate::store::write_atomic(&d.join(format!("{}.json", theme.id)), &serde_json::to_string_pretty(theme)?)
 }
 
 /// Reads every theme a `.json` or `.vsix` holds. A failure leaves the store

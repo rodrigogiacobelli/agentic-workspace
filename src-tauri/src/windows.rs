@@ -199,12 +199,9 @@ pub fn save(app: &AppHandle) {
         store.dirty = false;
         store.geometry.clone()
     };
-    let path = state.data_dir.join(FILE);
-    let tmp = state.data_dir.join(format!(".{FILE}.tmp-{}", std::process::id()));
     let result = serde_json::to_string_pretty(&snapshot)
         .context("serialising window geometry")
-        .and_then(|text| std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display())))
-        .and_then(|_| std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display())));
+        .and_then(|text| crate::store::write_atomic(&state.data_dir.join(FILE), &text));
     if let Err(e) = result {
         crate::session::notice(app, format!("Could not save window geometry: {e:#}"));
     }
