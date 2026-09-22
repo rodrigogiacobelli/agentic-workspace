@@ -1,25 +1,41 @@
 ---
 id: standards-repository
 title: Repository standard
-summary: Where files belong in this repository — the git-ignored working
-  directory for throwaway output, the clean-worktree rule, the split between
-  docs/, the codex and CLAUDE.md, and the commit conventions.
+summary: Where files belong in this repository — the two destinations for written
+  material, the git-ignored working directory that holds everything transient, the
+  clean-worktree rule, the stability of acceptance-criteria ids, and the commit conventions.
 related:
-  - standards-testing
-  - 004-central-settings-store
+- standards-testing
+- 004-central-settings-store
 ---
 
 # Repository standard
 
-## Throwaway files go in `working/`
+## Two destinations, and no third
 
-`working/` at the repository root holds everything transient: scratch scripts,
-experiment output, one-off analysis, screenshots, draft text, downloaded
-samples. The root `.gitignore` excludes `**/working/**`, so nothing in it is
-ever committed.
+Written material goes to one of two places:
 
-Nothing transient is written anywhere else — not at the repository root, not in
-`docs/`, not beside source.
+| Destination | Holds | Version controlled |
+|---|---|---|
+| `.lore/codex/` | Documentation — what is true about the system, and why it is shaped that way | Yes |
+| `working/` | Everything else — transient, in-flight, throwaway | No |
+
+There is no `docs/` directory. Two files sit at the repository root as
+fixtures: `README.md`, which describes the product to someone who has not seen
+it, and `CLAUDE.md`, which says how to work here.
+
+A file that is neither codex documentation nor one of those two fixtures
+belongs in `working/`.
+
+## `working/` is git-ignored
+
+`working/` holds scratch scripts, experiment output, one-off analysis,
+screenshots, drafts, downloaded samples, and the in-flight specification. The
+root `.gitignore` excludes `**/working/**`, so nothing in it is committed and
+nothing in it survives a fresh clone.
+
+Nothing transient is written anywhere else — not at the repository root, not
+beside source.
 
 ## The worktree is left clean
 
@@ -27,29 +43,23 @@ A piece of work ends with `git status` clean: no untracked scratch files, no
 half-applied edits, no commented-out blocks kept for later. Work kept for later
 belongs in a commit on a branch, in `working/`, or in a Lore mission.
 
-## Where knowledge belongs
+## The specification is in-flight, the codex is durable
 
-Four locations, and each holds one thing:
+`working/acceptance-criteria.md` holds specified behaviour as Given / When /
+Then criteria, each with a stable id and a priority. It describes a system that
+does not exist, which is why it sits outside the codex: the codex records what
+is true today, and `.lore/codex/conceptual/` and `.lore/codex/technical/` stay
+empty until there is a running system to describe.
 
-| Location | Holds | Test |
-|---|---|---|
-| `README.md` | What the product is, for someone who has not seen it | Would a stranger need it? |
-| `docs/acceptance-criteria.md` | Specified behaviour, as Given / When / Then with stable ids | Is it a behaviour someone could verify? |
-| `.lore/codex/` | What is true about the system, and why it is shaped that way | Would deleting it lose information? |
-| `CLAUDE.md` | How to work in this repository | Is it an instruction to the reader rather than a fact about the system? |
+As behaviour is built, its facts move into those layers. The specification
+shrinks as the codex grows.
 
-The codex holds no duplicate of the other three. A codex document that needs a
-behaviour cites its acceptance-criteria id.
+## Acceptance-criteria ids are permanent handles
 
-`.lore/codex/conceptual/` and `.lore/codex/technical/` hold facts about a
-running system. They stay empty until there is one.
-
-## Acceptance criteria ids are stable
-
-An id in `docs/acceptance-criteria.md` — `ED-07`, `BR-08`, `PLT-04` — is a
-permanent handle. Criteria are added with new ids and removed by deletion. An
-existing id is never reassigned to a different behaviour, because commits,
-missions and codex documents cite it.
+An id — `ED-07`, `BR-08`, `PLT-04` — is cited from commit messages, Lore
+missions and codex documents. Criteria are added with new ids and removed by
+deletion. An existing id is never reassigned to a different behaviour, because
+a citation elsewhere would then point at something it never described.
 
 ## Commits
 

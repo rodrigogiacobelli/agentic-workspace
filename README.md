@@ -4,8 +4,7 @@ A native Linux desktop app for running several agent-driven projects at once —
 without losing the one you just switched away from.
 
 > **Status: specification.** The design is settled and written down; no code
-> exists yet. [`docs/acceptance-criteria.md`](docs/acceptance-criteria.md) is
-> the spec, and `.lore/codex/` holds the decisions behind it.
+> exists yet. `.lore/codex/` holds the decisions behind it.
 
 ---
 
@@ -32,10 +31,10 @@ back.
   ┌─ Workspace window ──────────┐   ┌─ Terminal window ───────────┐
   │ agentic-workspace      ▾    │   │ agentic-workspace      ▾    │
   ├─────────┬───────────────────┤   ├─────────────────────────────┤
-  │ docs/   │ # Rite Design     │   │ [claude] [server] [git] +   │
-  │  ac.md  │                   │   │                             │
-  │ README  │ A rite is proce…  │   │ > refactor the parser       │
-  │ .lore/  │                   │   │ ✓ edited src/parse.rs       │
+  │ .lore/  │ # Rite Design     │   │ [claude] [server] [git] +   │
+  │ src/    │                   │   │                             │
+  │ notes/  │ A rite is proce…  │   │ > refactor the parser       │
+  │ README  │                   │   │ ✓ edited src/parse.rs       │
   └─────────┴───────────────────┘   └─────────────────────────────┘
        ↑ switch either window, both follow
 ```
@@ -90,10 +89,13 @@ desktops are best-effort; other operating systems are out of scope.
 
 | Where | What |
 |---|---|
-| [`docs/acceptance-criteria.md`](docs/acceptance-criteria.md) | The full spec — every behaviour as Given/When/Then, grouped and prioritised |
+| `.lore/codex/vision/` | What the product is for |
 | `.lore/codex/decisions/` | ADRs — why each shape was chosen, and what was rejected |
 | `.lore/codex/standards/` | The rules the code has to comply with |
-| `.lore/codex/vision/` | What the product is for |
+
+The in-flight specification — every behaviour as Given/When/Then — lives at
+`working/acceptance-criteria.md`, which is not version controlled. Its facts
+move into the codex as they are built.
 
 Project knowledge lives in Lore. `lore codex list` is the index.
 

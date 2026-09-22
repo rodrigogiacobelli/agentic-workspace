@@ -1,18 +1,17 @@
 ---
 id: vision-agentic-workspace
 title: Agentic Workspace — product vision
-summary: What Agentic Workspace is for — holding several agent-driven projects
-  open at once so switching between them costs nothing, the switching cost that
-  motivates it, the shape that answers it, and the boundaries that keep it from
-  becoming an IDE.
+summary: What Agentic Workspace is for — holding several agent-driven projects open
+  at once so switching between them costs nothing, the switching cost that motivates
+  it, the shape that answers it, and the boundaries that keep it from becoming an
+  IDE.
 related:
-  - 001-two-os-windows
-  - 002-backend-owned-terminal-sessions
-  - 007-workspace-is-one-directory
-  - 006-no-language-intelligence
+- 001-two-os-windows
+- 002-backend-owned-terminal-sessions
+- 007-workspace-is-one-directory
+- 006-no-language-intelligence
 binds:
-  - docs/acceptance-criteria.md
-  - README.md
+- README.md
 ---
 
 # Agentic Workspace — product vision
@@ -74,7 +73,11 @@ recorded decision rather than a matter of scheduling:
 
 ## Where the detail lives
 
-`docs/acceptance-criteria.md` holds every specified behaviour as a Given / When
-/ Then criterion with a stable id and a priority. The `decisions/` layer holds
-the reasoning behind each settled shape. This document holds neither — it states
-what the product is for.
+The `decisions/` layer holds the reasoning behind each settled shape, and the
+`standards/` layer holds the rules the work complies with. This document holds
+neither — it states what the product is for.
+
+Specified behaviour lives outside the codex while it is unbuilt, as
+Given / When / Then criteria in `working/acceptance-criteria.md`. Each criterion
+carries a stable id. As behaviour is built, its facts move into the
+`conceptual/` and `technical/` layers, which stay empty until then.

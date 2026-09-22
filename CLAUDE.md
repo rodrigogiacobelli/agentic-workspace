@@ -239,12 +239,20 @@ read the code.
 
 | Path | What |
 |---|---|
-| `docs/acceptance-criteria.md` | The spec. Every behaviour as Given/When/Then, with an id and a P0/P1/P2 priority. Cite ids (`ED-07`, `BR-08`) when you discuss behaviour |
 | `.lore/codex/vision/` | What the product is for |
 | `.lore/codex/decisions/` | ADRs. Read the relevant one before changing a settled shape |
 | `.lore/codex/standards/` | The rules code has to comply with |
 | `README.md` | The outward-facing description |
-| `working/` | Throwaway. Git-ignored |
+| `CLAUDE.md` | This file. How to work here |
+| `working/` | Throwaway, git-ignored. Holds `acceptance-criteria.md`, the in-flight spec |
+
+**Documentation goes to the codex. Everything else is throwaway and goes to
+`working/`.** There is no `docs/` directory and no third location.
+
+`working/acceptance-criteria.md` is the in-flight specification: every
+behaviour as Given/When/Then with an id and a P0/P1/P2 priority. Cite ids
+(`ED-07`, `BR-08`) when you discuss behaviour. It is not version controlled —
+as behaviour is built, its facts move into codex documents, which are.
 
 `.lore/codex/conceptual/` and `.lore/codex/technical/` are deliberately empty.
 The codex records what is true today, and no system exists yet. Write those
@@ -255,7 +263,7 @@ layers as the code lands, not before.
 **Throwaway files go in `working/`.** Scratch scripts, experiment output,
 one-off analysis, anything you would otherwise drop in `/tmp` and want to keep
 for the session. It is git-ignored. Never leave scratch files at the repository
-root, in `docs/`, or beside source.
+root or beside source.
 
 **Leave the worktree clean.** No stray files, no commented-out blocks, no
 half-applied edits at the end of a piece of work.
