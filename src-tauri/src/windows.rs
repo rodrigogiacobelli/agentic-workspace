@@ -152,6 +152,43 @@ pub fn show_all(app: &AppHandle) {
     }
 }
 
+/// Opens the compositor's window menu — move to desktop, keep above and the
+/// rest — at a point in the window, as a right-click on a title bar would.
+/// Wayland's `xdg_toplevel.show_window_menu` needs the serial of a real
+/// button press, which GDK keeps from the click the webview just received;
+/// a synthetic button event carrying the seat's pointer hands it over.
+#[tauri::command]
+pub fn show_window_menu(window: WebviewWindow, x: f64, y: f64) -> Result<(), String> {
+    use gtk::prelude::*;
+    let gtk_window = window.gtk_window().map_err(|e| format!("{e:#}"))?;
+    let gdk_window = gtk_window.window().ok_or("the window is not realised")?;
+    let pointer = gdk_window
+        .display()
+        .default_seat()
+        .and_then(|seat| seat.pointer())
+        .ok_or("no pointer device")?;
+    let mut event = gtk::gdk::Event::new(gtk::gdk::EventType::ButtonPress);
+    event.set_device(Some(&pointer));
+    // Safe: the event is a freshly allocated GdkEventButton, and the window
+    // reference it takes is kept alive by `gdk_window` for the call.
+    unsafe {
+        use glib::translate::{ToGlibPtr, ToGlibPtrMut};
+        let raw: *mut gtk::gdk::ffi::GdkEvent = event.to_glib_none_mut().0;
+        let button = &mut (*raw).button;
+        button.window = gdk_window.to_glib_none().0;
+        glib::gobject_ffi::g_object_ref(button.window as *mut glib::gobject_ffi::GObject);
+        button.x = x;
+        button.y = y;
+        button.button = 3;
+        button.time = gtk::gdk::ffi::GDK_CURRENT_TIME as u32;
+    }
+    if gdk_window.show_window_menu(&mut event) {
+        Ok(())
+    } else {
+        Err("the compositor did not open a window menu".into())
+    }
+}
+
 pub fn save(app: &AppHandle) {
     let state = app.state::<AppState>();
     let snapshot = {

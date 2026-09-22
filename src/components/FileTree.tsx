@@ -11,8 +11,8 @@ interface Props {
   ws: Workspace;
   /** A single click opens a preview tab; a double click or a new file opens a permanent one. */
   onOpen: (path: string, preview: boolean) => void;
-  /** Inserts a citation of the path into the active document. */
-  onQuote: (path: string) => void;
+  /** Inserts a citation of each path into the active document, one per line. */
+  onQuote: (paths: string[]) => void;
   selected: string | null;
   onSelect: (path: string | null) => void;
   gitStatus?: StatusEntry[];
@@ -51,6 +51,7 @@ type Dialog =
   | { kind: "rename-view"; view: View };
 
 const NEW_VIEW = "__new-view";
+const ENTRY_MIME = "application/x-agentic-view-entry";
 
 function dirOf(path: string): string {
   const i = path.lastIndexOf("/");
@@ -74,6 +75,11 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
   const [filter, setFilter] = useState("");
   const [allFiles, setAllFiles] = useState<string[] | null>(null);
   const [viewEntries, setViewEntries] = useState<Entry[] | null>(null);
+  /** Ctrl+click adds rows to a selection that Quote to AI cites together (CITE-13). */
+  const [multi, setMulti] = useState<Set<string>>(new Set());
+  /** Every row drawn in this render, in tree order. */
+  const order = useRef<string[]>([]);
+  const [dragOver, setDragOver] = useState<string | null>(null);
   const inflight = useRef(new Set<string>());
   const view = ws.views.find((v) => v.id === ws.activeView) ?? null;
   const entriesKey = view?.entries.join("\n") ?? "";
@@ -159,15 +165,40 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
     }
   };
 
+  // A view's root rows are reordered by dragging one above another (VIEW-12).
+  const reorderTo = (dragged: string, target: string) => {
+    if (!view || dragged === target) return;
+    const paths = view.entries.filter((p) => p !== dragged);
+    const at = paths.indexOf(target);
+    paths.splice(at < 0 ? paths.length : at, 0, dragged);
+    void api.viewReorder(ws.id, view.id, paths).catch(report);
+  };
+
   const row = (e: Entry, depth: number, expanded: boolean, onClick: () => void, viewRoot = false) => (
+    order.current.push(e.path),
     <div
-      className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected === e.path ? " selected" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
+      className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected === e.path || multi.has(e.path) ? " selected" : ""}${dragOver === e.path ? " drop-before" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
       style={{ paddingLeft: 8 + depth * 14 }}
-      onClick={onClick}
+      onClick={(ev) => {
+        if (ev.ctrlKey) {
+          setMulti((m) => { const next = new Set(m); if (next.has(e.path)) next.delete(e.path); else next.add(e.path); if (selected && !next.has(selected)) next.add(selected); return next; });
+          onSelect(e.path);
+          return;
+        }
+        setMulti(new Set());
+        onClick();
+      }}
       onDoubleClick={() => { if (!e.isDir && !e.missing) onOpen(e.path, false); }}
-      draggable={!e.isDir && !e.missing}
-      onDragStart={(ev) => { ev.dataTransfer.setData(FILE_MIME, e.path); ev.dataTransfer.effectAllowed = "copyMove"; }}
-      onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); onSelect(e.path); setMenu({ x: ev.clientX, y: ev.clientY, entry: e, viewRoot }); }}
+      draggable={viewRoot || (!e.isDir && !e.missing)}
+      onDragStart={(ev) => {
+        if (!e.isDir && !e.missing) ev.dataTransfer.setData(FILE_MIME, e.path);
+        if (viewRoot) ev.dataTransfer.setData(ENTRY_MIME, e.path);
+        ev.dataTransfer.effectAllowed = "copyMove";
+      }}
+      onDragOver={(ev) => { if (viewRoot && ev.dataTransfer.types.includes(ENTRY_MIME)) { ev.preventDefault(); ev.stopPropagation(); setDragOver(e.path); } }}
+      onDragLeave={() => { if (dragOver === e.path) setDragOver(null); }}
+      onDrop={(ev) => { const dragged = ev.dataTransfer.getData(ENTRY_MIME); setDragOver(null); if (viewRoot && dragged) { ev.preventDefault(); ev.stopPropagation(); reorderTo(dragged, e.path); } }}
+      onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); if (!multi.has(e.path)) { setMulti(new Set()); onSelect(e.path); } setMenu({ x: ev.clientX, y: ev.clientY, entry: e, viewRoot }); }}
       title={e.missing ? `Missing: ${e.path}` : e.path}
     >
       <span className="tree-chevron">{e.isDir ? (expanded ? "▾" : "▸") : ""}</span>
@@ -266,6 +297,15 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
 
   const sendTargets = (path: string) => ws.views.filter((v) => !v.entries.includes(path));
   const citation = (e: Entry) => (e.isDir ? `${e.path}/` : e.path);
+  /** What Quote to AI cites: the multi-selection in tree order, or the one row. */
+  const quoteTargets = (e: Entry): string[] => {
+    if (multi.size > 1 && multi.has(e.path)) {
+      const isDir = (p: string) => viewEntries?.find((x) => x.path === p)?.isDir || [...listings.values()].flat().some((x) => x.path === p && x.isDir);
+      return order.current.filter((p) => multi.has(p)).map((p) => (isDir(p) ? `${p}/` : p));
+    }
+    return [citation(e)];
+  };
+  order.current = [];
 
   return (
     <div className="sidebar-body">
@@ -318,7 +358,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
           {menu.entry && !menu.entry.missing && (
             <>
               <hr />
-              <button onClick={() => { onQuote(citation(menu.entry!)); setMenu(null); }}>Quote to AI</button>
+              <button onClick={() => { onQuote(quoteTargets(menu.entry!)); setMenu(null); }}>Quote to AI{multi.size > 1 && multi.has(menu.entry.path) ? ` (${multi.size} files)` : ""}</button>
               {sendTargets(menu.entry.path).map((v) => (
                 <button key={v.id} onClick={() => { void api.viewAdd(ws.id, v.id, menu.entry!.path).catch(report); setMenu(null); }}>Send to {v.name} view</button>
               ))}

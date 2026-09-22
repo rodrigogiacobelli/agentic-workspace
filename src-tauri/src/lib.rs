@@ -235,6 +235,7 @@ pub fn run() {
             git::git_prune_worktrees,
             git::git_remote,
             session::focus_window,
+            windows::show_window_menu,
             session::quit,
             pty::terminal_open,
             pty::terminal_close,

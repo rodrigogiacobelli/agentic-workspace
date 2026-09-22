@@ -58,6 +58,8 @@ export const api = {
   windowToggleMaximize: () => getCurrentWindow().toggleMaximize(),
   windowClose: () => getCurrentWindow().close(),
   windowMaximized: () => getCurrentWindow().isMaximized(),
+  /** The compositor's window menu, at a point in this window. */
+  showWindowMenu: (x: number, y: number) => invoke<void>("show_window_menu", { x, y }),
   getSettings: () => invoke<Settings>("get_settings"),
   importThemes: (path: string) => invoke<ImportedTheme[]>("import_themes", { path }),
   listThemes: () => invoke<ImportedTheme[]>("list_themes"),

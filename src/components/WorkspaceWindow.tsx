@@ -171,11 +171,11 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   };
 
   // Quote to AI: a citation into the active document, whatever the link setting (CITE-01, CITE-05).
-  const quote = (path: string) => {
+  const quote = (paths: string[]) => {
     const id = editors.activeEditorId(ws);
     const doc = id ? editors.doc(id) : undefined;
     if (!doc) { report("Open a document to quote into first."); return; }
-    doc.insertCitation(path);
+    doc.insertCitation(paths);
   };
 
   // Files with work-tree changes or not yet tracked; what is only staged does not count (FIX-06).

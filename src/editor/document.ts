@@ -587,13 +587,15 @@ export class Doc {
 
   /**
    * Inserts `@/path` at the caret, on its line, with one space before it when
-   * the caret is not already after whitespace (CITE-01).
+   * the caret is not already after whitespace (CITE-01). Several paths go one
+   * per line, in the order given (CITE-13).
    */
-  insertCitation(path: string): void {
+  insertCitation(path: string | string[]): void {
     const view = this.active();
     const pos = view.state.selection.main.head;
     const before = pos > view.state.doc.lineAt(pos).from ? view.state.doc.sliceString(pos - 1, pos) : "";
-    const insert = `${before && !/\s/.test(before) ? " " : ""}@/${path}`;
+    const cited = (Array.isArray(path) ? path : [path]).map((p) => `@/${p}`).join("\n");
+    const insert = `${before && !/\s/.test(before) ? " " : ""}${cited}`;
     view.dispatch({ changes: { from: pos, to: view.state.selection.main.to, insert }, selection: { anchor: pos + insert.length }, scrollIntoView: true });
     view.focus();
   }

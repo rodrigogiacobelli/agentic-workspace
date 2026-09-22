@@ -57,7 +57,16 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
 
   return (
     <>
-      <header className="switcher" data-tauri-drag-region="deep">
+      <header
+        className="switcher"
+        data-tauri-drag-region="deep"
+        onContextMenu={(e) => {
+          // KWin's own menu — move to desktop, keep above — as on any title bar (CHR-07).
+          if ((e.target as HTMLElement).closest("button, input")) return;
+          e.preventDefault();
+          void api.showWindowMenu(e.clientX, e.clientY).catch(() => {});
+        }}
+      >
         <Dropdown
           className="switcher-select"
           value={session.active ?? ""}

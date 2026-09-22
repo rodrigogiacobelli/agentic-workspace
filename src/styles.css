@@ -177,6 +177,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .tree-head + .tree-filter { margin-top: 4px; }
 .tree-row.missing .tree-name { color: var(--danger); text-decoration: line-through; }
 .tree-row.missing .tree-chevron { visibility: hidden; }
+.tree-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .tree {
   flex: 1;
   overflow: auto;
