@@ -228,9 +228,16 @@ pub fn set_expanded(app: AppHandle, state: tauri::State<AppState>, workspace_id:
     publish(&app);
 }
 
-fn default_mode(path: &str) -> &'static str {
+/// The mode a new tab opens in: the configured one for markdown, source for
+/// everything else.
+fn default_mode(state: &AppState, path: &str) -> String {
     let lower = path.to_lowercase();
-    if lower.ends_with(".md") || lower.ends_with(".markdown") { "rich" } else { "source" }
+    if lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".mdx") {
+        let mode = state.settings.lock().markdown_mode.clone();
+        if ["source", "split", "rich"].contains(&mode.as_str()) { mode } else { "source".into() }
+    } else {
+        "source".into()
+    }
 }
 
 /// Puts `tab` into `group` and makes it active. A preview tab replaces the
@@ -269,7 +276,10 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
                 group.active_editor = Some(id.clone());
                 id
             }
-            None => place_tab(group, EditorTab { id: crate::state::new_id(), path: path.clone(), mode: default_mode(&path).into(), line: 0, diff: None, preview }),
+            None => {
+                let mode = default_mode(&state, &path);
+                place_tab(group, EditorTab { id: crate::state::new_id(), path: path.clone(), mode, line: 0, diff: None, preview })
+            }
         };
         ws.recent_files.retain(|p| p != &path);
         ws.recent_files.insert(0, path);
@@ -509,7 +519,7 @@ pub fn drop_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: 
         }
         let tab = match (&source.editor, &source.path) {
             (Some(id), _) => take_tab(ws, id).ok_or_else(|| format!("no editor {id}"))?,
-            (None, Some(path)) => EditorTab { id: crate::state::new_id(), path: path.clone(), mode: default_mode(path).into(), line: 0, diff: None, preview: false },
+            (None, Some(path)) => EditorTab { id: crate::state::new_id(), path: path.clone(), mode: default_mode(&state, path), line: 0, diff: None, preview: false },
             (None, None) => return Err("nothing to drop".into()),
         };
         let id = tab.id.clone();

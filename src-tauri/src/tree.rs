@@ -242,6 +242,53 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A name in `dir` that nothing has: the wanted one, else `<stem> copy<ext>`,
+/// `<stem> copy 2<ext>`, and so on.
+fn free_copy_name(root: &Path, dir: &str, name: &str) -> Result<String> {
+    if !root.join(join_rel(dir, name)).exists() {
+        return Ok(join_rel(dir, name));
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    (1..1000)
+        .map(|n| if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") })
+        .map(|n| join_rel(dir, &n))
+        .find(|rel| !root.join(rel).exists())
+        .context("no free name for the copy")
+}
+
+/// Pastes a copied or cut entry into a directory. A copy takes a free name;
+/// a cut is a move that refuses to overwrite.
+#[tauri::command]
+pub fn paste_entry(state: tauri::State<AppState>, workspace_id: String, from: String, to_dir: String, cut: bool) -> Result<String, String> {
+    let (root, src) = resolve(&state, &workspace_id, &from).map_err(|e| format!("{e:#}"))?;
+    resolve(&state, &workspace_id, &to_dir).map_err(|e| format!("{e:#}"))?;
+    let (_, name) = parent_and_name(&from);
+    let to_dir = to_dir.trim_matches('/').to_string();
+    if src.is_dir() && (to_dir == from || to_dir.starts_with(&format!("{from}/"))) {
+        return Err(format!("{from} cannot be pasted into itself"));
+    }
+    if cut {
+        let dest = join_rel(&to_dir, &name);
+        if dest == from {
+            return Ok(dest);
+        }
+        let dst = root.join(&dest);
+        if dst.exists() {
+            return Err(format!("{dest} already exists"));
+        }
+        std::fs::rename(&src, &dst).with_context(|| format!("moving {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
+        return Ok(dest);
+    }
+    let dest = free_copy_name(&root, &to_dir, &name).map_err(|e| format!("{e:#}"))?;
+    let dst = root.join(&dest);
+    let result = if src.is_dir() { copy_dir(&src, &dst) } else { std::fs::copy(&src, &dst).map(|_| ()) };
+    result.with_context(|| format!("copying {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
+    Ok(dest)
+}
+
 /// Moves the entry to the desktop's trash through GIO, never `rm`.
 #[tauri::command]
 pub fn trash_entry(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {

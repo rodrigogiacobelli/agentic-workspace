@@ -253,6 +253,7 @@ pub fn run() {
             tree::rename_entry,
             tree::duplicate_entry,
             tree::trash_entry,
+            tree::paste_entry,
             tree::reveal_entry,
             tree::search_project,
             files::read_file,

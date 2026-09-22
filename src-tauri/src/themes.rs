@@ -333,24 +333,9 @@ fn map_theme(value: &Value, fallback_name: &str, ui_hint: Option<&str>) -> Theme
             }
         }
     }
-    let unused: Vec<String> = rules
-        .iter()
-        .flat_map(|r| r.scopes.iter().cloned())
-        .filter(|s| !used.contains(s))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    if !unused.is_empty() {
-        let mut list = unused;
-        list.sort();
-        let shown: Vec<String> = list.iter().take(12).cloned().collect();
-        report.push(format!("{} token scopes have no surface here ({}{})", list.len(), shown.join(", "), if list.len() > 12 { ", …" } else { "" }));
-    }
-    if let Some(sem) = value.get("semanticTokenColors").and_then(Value::as_object) {
-        if !sem.is_empty() {
-            report.push(format!("semanticTokenColors ({} entries) ignored", sem.len()));
-        }
-    }
+    // Scopes with no surface here and semantic token colours are expected in
+    // any editor theme; only what fell back to a built-in is worth a line.
+    let _ = used;
     Theme { id: format!("import-{}", slug(&name)), name, dark, ui, terminal, syntax, report }
 }
 

@@ -2,7 +2,7 @@
 id: 015-views-and-citations
 title: 'ADR-015: Views are flat shortcuts and citations are root-relative'
 summary: Why a custom view is an ordered list of workspace-relative paths rather than
-  a structure of its own, why a citation is `@/` plus a path from the workspace root,
+  a structure of its own, why a citation is `@` plus a path from the workspace root,
   and what the one application-wide link setting decides.
 related:
 - 003-source-markdown-is-canonical
@@ -60,17 +60,21 @@ no *New folder* (VIEW-06). *Remove from view* takes the entry out of the list
 (VIEW-07); `view_delete` deletes the list and leaves every file it named
 (VIEW-10). Dragging one root row onto another reorders the list (VIEW-12).
 
-**A citation is `@/` followed by a path from the workspace root.**
+**A citation is `@` followed by a path from the workspace root.**
 `src/editor/citation.ts` defines it as a `@lezer/markdown` inline node.
-`citationEnd` requires the slash, refuses an `@` preceded by a word character,
-an `@` or a dot, runs to the first whitespace or closing punctuation, and trims
-a trailing `.,:;!?` — so an email address, a CSS at-rule and a scoped package
-name parse as they did before (CITE-10). In the rendered pane a citation whose
+`citationEnd` refuses an `@` preceded by a word character, an `@`, a dot or a
+slash, runs to the first whitespace or closing punctuation, trims a trailing
+`.,:;!?`, and takes the result only when it holds a slash or a dot — so an
+email address, a CSS at-rule and a bare handle parse as they did before
+(CITE-10), while a scoped package name such as `@anthropic-ai/sdk` reads as a
+citation of a path that does not exist and is drawn as missing. The older
+`@/path` form, which the specification chose, is still read; the slash was
+dropped because `@path` is what the owner types to an agent. In the rendered pane a citation whose
 cursor is elsewhere is replaced by the media itself when the cited path is an
 image, audio or video, and by a chip otherwise; a chip whose path does not
 exist is drawn in the danger colour (CITE-06, CITE-07, CITE-11). Clicking a
 chip opens the file (CITE-08). The node is a decoration over the source text,
-so moving the cursor into it shows the `@/path` that is in the file (CITE-09).
+so moving the cursor into it shows the `@path` that is in the file (CITE-09).
 
 **One application-wide setting decides what paste and drop write.**
 `asset_links` in the settings is `markdown` or `citation` (CITE-03). It decides
@@ -94,7 +98,7 @@ CITE-12), one per line in tree order for a `Ctrl`-click selection of several
 - One application-wide setting matches the single thing it decides — how this
   person prefers a path written — rather than a property of any project.
 - Rejecting a path outside the workspace keeps a view inside the boundary
-  `007-workspace-is-one-directory` draws, and keeps `@/` unambiguous.
+  `007-workspace-is-one-directory` draws, and keeps a citation's root fixed.
 
 ## Alternatives considered
 

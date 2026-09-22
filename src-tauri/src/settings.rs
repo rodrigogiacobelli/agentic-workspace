@@ -38,6 +38,8 @@ pub struct Settings {
     pub languages: HashMap<String, String>,
     /// How a panel's tab reads: `text` or `icons`.
     pub panel_tabs: String,
+    /// The mode a markdown file opens in: `source`, `split` or `rich`.
+    pub markdown_mode: String,
     /// Where the Files, Search, Git and Outline panels sit, as the frontend
     /// lays them out; the application's, not a workspace's (DOCK-08). Null
     /// until a panel is first moved.
@@ -76,6 +78,7 @@ impl Default for Settings {
             global_hotkey: "CTRL+ALT+a".into(),
             languages: HashMap::new(),
             panel_tabs: "text".into(),
+            markdown_mode: "source".into(),
             panel_layout: serde_json::Value::Null,
             workspaces: HashMap::new(),
         }

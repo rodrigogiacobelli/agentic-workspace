@@ -10,6 +10,7 @@ import { EditorArea, closeTab, groupOrder } from "./EditorArea";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
 import { Icon } from "./icons";
+import { ContextMenu } from "./Menu";
 import { Outline } from "./Outline";
 import { Palette, type PaletteItem } from "./Palette";
 import { SearchPanel } from "./SearchPanel";
@@ -254,6 +255,7 @@ function RegionView({ region, layout, update, unstaged, icons, render }: {
   // A panel tab dropped on the strip lands at that position: the way to
   // reorder tabs, or to bring a panel over from another region.
   const [over, setOver] = useState<number | null>(null);
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; id: PanelId } | null>(null);
   const isPanel = (e: React.DragEvent) => e.dataTransfer.types.includes(PANEL_MIME);
   const dropAt = (e: React.DragEvent, index: number | null) => {
     const panel = e.dataTransfer.getData(PANEL_MIME) as PanelId;
@@ -283,6 +285,7 @@ function RegionView({ region, layout, update, unstaged, icons, render }: {
               onDragOver={(e) => { if (isPanel(e)) { e.preventDefault(); e.stopPropagation(); setOver(i); } }}
               onDrop={(e) => dropAt(e, i)}
               onClick={() => update(setActivePanel(layout, region.id, id))}
+              onContextMenu={(e) => { e.preventDefault(); setTabMenu({ x: e.clientX, y: e.clientY, id }); }}
               title={`${panel?.label ?? id} (${panel?.hotkey ?? ""})`}
             >
               {icons && panel ? <Icon name={panel.icon} /> : (panel?.label ?? id)}
@@ -290,8 +293,12 @@ function RegionView({ region, layout, update, unstaged, icons, render }: {
             </div>
           );
         })}
-        <button className="panel-hide" onClick={() => update(hidePanel(layout, region.active))} title="Hide this panel — the View menu or its hotkey brings it back">×</button>
       </div>
+      {tabMenu && (
+        <ContextMenu x={tabMenu.x} y={tabMenu.y} onClose={() => setTabMenu(null)}>
+          <button onClick={() => { update(hidePanel(layout, tabMenu.id)); setTabMenu(null); }}>Hide {PANELS.find((p) => p.id === tabMenu.id)?.label ?? tabMenu.id}</button>
+        </ContextMenu>
+      )}
       {render(region.active)}
       {zone.overlay}
     </aside>

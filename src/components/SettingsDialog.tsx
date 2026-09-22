@@ -109,6 +109,10 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
         {number("Monospace size", current.editorFontSize, (v) => set({ editorFontSize: v }), 8, 32)}
         {text("Prose font", current.proseFontFamily, (v) => set({ proseFontFamily: v }), "system sans-serif")}
         {number("Prose size", current.proseFontSize, (v) => set({ proseFontSize: v }), 8, 40)}
+        <label className="setting">
+          <span>Markdown opens in</span>
+          <Dropdown value={current.markdownMode} options={[{ id: "source", label: "Source" }, { id: "split", label: "Split" }, { id: "rich", label: "Rich" }]} onChange={(id) => set({ markdownMode: id as "source" | "split" | "rich" })} />
+        </label>
         {toggle("Autosave", current.autosave, (v) => set({ autosave: v }))}
         {number("Autosave delay (ms)", current.autosaveDelayMs, (v) => set({ autosaveDelayMs: v }), 200, 60000, 100)}
         {number("Warn for assets above (MB)", current.assetWarnMb, (v) => set({ assetWarnMb: v }), 1, 1000)}

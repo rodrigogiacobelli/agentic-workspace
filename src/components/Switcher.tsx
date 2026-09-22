@@ -74,7 +74,7 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
         }}
       >
         <div className="switcher-left">
-          <span className="switcher-path" title={active?.path}>{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>
+          {active?.available === false && <span className="switcher-path" title={active.path}>Missing: {active.path}</span>}
           {active?.git?.isRepo && (
             <span className="switcher-branch" title={active.git.state ? `${active.git.state} in progress` : "Current branch"}>
               ⑂ {active.git.detached ? "detached @ " : ""}{active.git.branch ?? ""}{active.git.state ? ` · ${active.git.state}` : ""}

@@ -53,6 +53,9 @@ type Dialog =
 
 const ENTRY_MIME = "application/x-agentic-view-entry";
 
+/** What Ctrl+C or Ctrl+X took from the tree; pasted into the selected folder. */
+let clipboard: { paths: string[]; cut: boolean } | null = null;
+
 function dirOf(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? "" : path.slice(0, i);
@@ -142,9 +145,55 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
     return e ? (e.isDir ? e.path : dirOf(e.path)) : "";
   };
 
-  const trash = async (entry: Entry) => {
-    const yes = await ask(`Move ${entry.path} to the trash?`, { title: "Delete", kind: "warning", okLabel: "Move to trash", cancelLabel: "Keep" });
-    if (yes) await api.trashEntry(ws.id, entry.path).catch(report);
+  const trash = async (paths: string[]) => {
+    if (!paths.length) return;
+    const what = paths.length === 1 ? paths[0] : `${paths.length} items`;
+    const yes = await ask(`Move ${what} to the trash?`, { title: "Delete", kind: "warning", okLabel: "Move to trash", cancelLabel: "Keep" });
+    if (!yes) return;
+    for (const p of paths) await api.trashEntry(ws.id, p).catch(report);
+    setMulti(new Set());
+  };
+
+  /** The rows a keyboard action applies to: the multi-selection in tree order, else the selected row. */
+  const targets = (): string[] => (multi.size > 0 ? order.current.filter((p) => multi.has(p)) : selected ? [selected] : []);
+
+  const copy = (cut: boolean) => {
+    const paths = targets();
+    if (paths.length) clipboard = { paths, cut };
+  };
+
+  const paste = async () => {
+    const dir = creationDir();
+    if (dir === null || !clipboard) return;
+    const { paths, cut } = clipboard;
+    let last: string | null = null;
+    for (const from of paths) {
+      try {
+        last = await api.pasteEntry(ws.id, from, dir, cut);
+      } catch (e) {
+        report(e);
+      }
+    }
+    if (cut) clipboard = null;
+    if (dir && !ws.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true).catch(() => {});
+    if (last) onSelect(last);
+  };
+
+  const entryOf = (path: string): Entry => ({ name: path.split("/").pop() ?? path, path, isDir: isDir(path), ignored: false });
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if ((e.target as HTMLElement).tagName === "INPUT") return;
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "c") copy(false);
+    else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "x") copy(true);
+    else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "v") void paste();
+    else if (!e.ctrlKey && e.key === "Delete") void trash(targets());
+    else if (!e.ctrlKey && e.key === "F2" && selected) setDialog({ kind: "rename", entry: entryOf(selected) });
+    else if (!e.ctrlKey && e.key === "Enter" && selected) { if (isDir(selected)) toggle(selected); else onOpen(selected, false); }
+    else if (e.key === "Escape") setMulti(new Set());
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
   };
 
   const deleteView = async (v: View) => {
@@ -350,6 +399,8 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
       />
       <nav
         className="tree"
+        tabIndex={0}
+        onKeyDown={onKey}
         onMouseDown={(e) => { if (e.target === e.currentTarget) onSelect(null); }}
         onContextMenu={(ev) => { ev.preventDefault(); setMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
       >
@@ -365,6 +416,9 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
               <button onClick={() => { setDialog({ kind: "new-file", dir: targetDir() }); setMenu(null); }}>New file…</button>
               <button onClick={() => { setDialog({ kind: "new-folder", dir: targetDir() }); setMenu(null); }}>New folder…</button>
             </>
+          )}
+          {!menu.entry && clipboard && (!view || selected) && (
+            <button onClick={() => { void paste(); setMenu(null); }}>Paste</button>
           )}
           {view && !menu.entry && (
             <>
@@ -396,9 +450,13 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
                 <button onClick={() => { setDialog({ kind: "new-view", then: menu.entry!.path }); setMenu(null); }}>New view…</button>
               </SubMenu>
               <hr />
+              <button onClick={() => { copy(false); setMenu(null); }}>Copy</button>
+              <button onClick={() => { copy(true); setMenu(null); }}>Cut</button>
+              {clipboard && <button onClick={() => { void paste(); setMenu(null); }}>Paste into {menu.entry.isDir ? menu.entry.name : dirOf(menu.entry.path) || "the root"}</button>}
+              <hr />
               <button onClick={() => { setDialog({ kind: "rename", entry: menu.entry! }); setMenu(null); }}>Rename…</button>
               <button onClick={() => { void api.duplicateEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Duplicate</button>
-              <button onClick={() => { void trash(menu.entry!); setMenu(null); }}>Move to trash</button>
+              <button onClick={() => { void trash(targets().includes(menu.entry!.path) ? targets() : [menu.entry!.path]); setMenu(null); }}>Move to trash</button>
               <hr />
               <button onClick={() => { void api.copyText(menu.entry!.path); setMenu(null); }}>Copy relative path</button>
               <button onClick={() => { void api.copyText(`${ws.path}/${menu.entry!.path}`); setMenu(null); }}>Copy absolute path</button>

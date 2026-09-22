@@ -128,6 +128,9 @@ export const api = {
     invoke<string>("duplicate_entry", { workspaceId, path }),
   trashEntry: (workspaceId: string, path: string) =>
     invoke<void>("trash_entry", { workspaceId, path }),
+  /** Copies, or moves when `cut`, an entry into a directory; returns the new path. */
+  pasteEntry: (workspaceId: string, from: string, toDir: string, cut: boolean) =>
+    invoke<string>("paste_entry", { workspaceId, from, toDir, cut }),
   revealEntry: (workspaceId: string, path: string) =>
     invoke<void>("reveal_entry", { workspaceId, path }),
   searchProject: (workspaceId: string, query: string, includeIgnored: boolean) =>

@@ -227,6 +227,23 @@ main { flex: 1; display: flex; min-height: 0; }
   overflow: auto;
   padding: 0 0 4px;
   position: relative;
+  outline: none;
+}
+.tree:focus .tree-row.selected { box-shadow: inset 2px 0 0 var(--accent); }
+.tooltip {
+  position: fixed;
+  z-index: 200;
+  max-width: 480px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .menu hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 
@@ -471,12 +488,17 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-history { display: flex; flex-direction: column; min-height: 200px; }
 .git-filter { margin: 4px 8px; }
 .git-log { max-height: 40vh; overflow: auto; }
-.git-commit-row { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; padding: 3px 8px; cursor: pointer; }
+.git-commit-row { display: grid; grid-template-columns: 12px auto 1fr; column-gap: 6px; padding: 3px 8px; cursor: pointer; }
 .git-commit-row:hover { background: var(--bg-hover); }
-.git-commit-row.selected { background: var(--selection); }
+.git-commit-row.selected { background: var(--bg-hover); }
+.git-chevron { color: var(--fg-dim); font-size: 10px; padding-top: 2px; }
 .git-hash { font-family: var(--mono); color: var(--accent); font-size: 11px; }
 .git-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.git-meta { grid-column: 2; color: var(--fg-dim); font-size: 11px; }
+.git-meta { grid-column: 3; color: var(--fg-dim); font-size: 11px; }
+.git-commit-files { padding: 0 0 6px 14px; border-bottom: 1px solid var(--border); }
+.git-commit-files .git-message { margin: 4px 8px 6px; font-size: 11px; }
+.git-dir { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-row .git-path { flex: 0 1 auto; }
 .git-detail { border-top: 1px solid var(--border); padding: 6px 0; }
 .git-detail-head { display: flex; gap: 8px; align-items: center; padding: 0 8px; }
 .git-detail-head .git-meta { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

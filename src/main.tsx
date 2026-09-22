@@ -5,6 +5,9 @@ import { App } from "./App";
 import type { WindowRole } from "./types";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
+import { installTooltips } from "./tooltip";
+
+installTooltips();
 
 const role: WindowRole = getCurrentWindow().label === "terminal" ? "terminal" : "workspace";
 

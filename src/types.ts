@@ -154,6 +154,8 @@ export interface Settings {
   languages: Record<string, string>;
   /** How a panel's tab reads. */
   panelTabs: "text" | "icons";
+  /** The mode a markdown file opens in. */
+  markdownMode: "source" | "split" | "rich";
   panelLayout: PanelLayout | null;
   workspaces: Record<string, WorkspaceSettings>;
 }

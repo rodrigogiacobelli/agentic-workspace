@@ -89,7 +89,7 @@ their depth on disk, each folder expanding to its real children. Nothing is
 copied and nothing is moved; deleting a view deletes the list.
 
 **Paths an agent can read.** *Quote to AI* on any file or folder writes
-`@/path/from/the/workspace/root` into the document you are editing — one line
+`@path/from/the/workspace/root` into the document you are editing — one line
 per file when several are selected. In the rendered view a cited image, audio
 file or video plays inline, everything else is a chip you can click to open, and
 a citation to a file that is not there is marked in red. One setting decides
@@ -214,7 +214,7 @@ In the rendered markdown view, syntax shows on the lines the cursor touches and
 is hidden elsewhere; `Ctrl`+click follows a link. Paste an image or drop a file
 onto a document and it lands in the workspace's clipboard folder; Settings →
 *Asset links* decides whether the document gets a markdown link relative to the
-note or an `@/` citation from the workspace root.
+note or an `@` citation from the workspace root.
 
 Themes: four built in, and Settings → Import… reads a VS Code theme from a
 `.json` or a `.vsix`, reporting what it could not map. A theme can be set per

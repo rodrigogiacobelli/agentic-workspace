@@ -144,7 +144,7 @@ terminals, the file tree, session restore, the three-mode markdown editor with
 clipboard assets and external-change handling, git with branches and worktrees,
 and the two agent signals. The next four: app-drawn window chrome over a
 tray-resident process, preview tabs, the layout tree that drives both editor
-splits and panel docking, custom views, `@/` citations with *Quote to AI*, the
+splits and panel docking, custom views, `@` citations with *Quote to AI*, the
 typing helpers, and the operations document. The Rust backend is
 `src-tauri/src/`, the React frontend is `src/`, the editor is `src/editor/`.
 Mermaid, the grammar importer and HTML preview are not built; treat any claim

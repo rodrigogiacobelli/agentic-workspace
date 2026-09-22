@@ -154,7 +154,8 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: D
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [filter, setFilter] = useState("");
   const [done, setDone] = useState(false);
-  const [selected, setSelected] = useState<CommitDetail | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [details, setDetails] = useState<Map<string, CommitDetail>>(new Map());
   const loading = useRef(false);
 
   const load = useCallback(async (reset: boolean) => {
@@ -174,16 +175,33 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: D
 
   useEffect(() => { void load(true); }, [ws.id, filter]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    const unlisten = events.onGitChanged((id) => { if (id === ws.id) void load(true); });
+    const unlisten = events.onGitChanged((id) => { if (id === ws.id) { setDetails(new Map()); void load(true); } });
     return () => { void unlisten.then((u) => u()); };
   }, [ws.id, load]);
 
-  const select = (hash: string) => api.gitShow(ws.id, hash).then(setSelected).catch(report);
+  // A commit opens in place, listing what it changed; each file opens its diff.
+  const open = useCallback((hash: string) => {
+    setExpanded(hash);
+    if (!details.has(hash)) {
+      api.gitShow(ws.id, hash).then((d) => setDetails((m) => new Map(m).set(hash, d))).catch(report);
+    }
+  }, [ws.id, details]);
+  const toggle = (hash: string) => { if (expanded === hash) setExpanded(null); else open(hash); };
+
   useEffect(() => {
-    const onShow = (e: Event) => void select((e as CustomEvent<string>).detail);
+    const onShow = (e: Event) => {
+      const hash = (e as CustomEvent<string>).detail;
+      open(hash);
+      window.setTimeout(() => document.querySelector(`[data-commit="${hash}"]`)?.scrollIntoView({ block: "nearest" }), 50);
+    };
     window.addEventListener("show-commit", onShow);
     return () => window.removeEventListener("show-commit", onShow);
-  }); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const split = (path: string) => {
+    const i = path.lastIndexOf("/");
+    return i === -1 ? { name: path, dir: "" } : { name: path.slice(i + 1), dir: path.slice(0, i) };
+  };
 
   return (
     <div className="git-section git-history">
@@ -196,31 +214,38 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: D
           if (!done && el.scrollTop + el.clientHeight >= el.scrollHeight - 40) void load(false);
         }}
       >
-        {entries.map((c) => (
-          <div key={c.hash} className={`git-commit-row${selected?.hash === c.hash ? " selected" : ""}`} onClick={() => void select(c.hash)}>
-            <span className="git-hash">{c.short}</span>
-            <span className="git-subject" title={c.subject}>{c.subject}</span>
-            <span className="git-meta">{c.author} · {c.date}</span>
-          </div>
-        ))}
+        {entries.map((c) => {
+          const isOpen = expanded === c.hash;
+          const detail = details.get(c.hash);
+          return (
+            <div key={c.hash} data-commit={c.hash}>
+              <div className={`git-commit-row${isOpen ? " selected" : ""}`} onClick={() => toggle(c.hash)} title={`${c.hash}\n${c.author} · ${c.date}`}>
+                <span className="git-chevron">{isOpen ? "▾" : "▸"}</span>
+                <span className="git-hash">{c.short}</span>
+                <span className="git-subject">{c.subject}</span>
+                <span className="git-meta">{c.author} · {c.date}</span>
+              </div>
+              {isOpen && (
+                <div className="git-commit-files">
+                  {!detail && <div className="tree-loading">Loading…</div>}
+                  {detail && detail.message.includes("\n") && <pre className="git-message">{detail.message}</pre>}
+                  {detail?.files.map((f) => {
+                    const { name, dir } = split(f.path);
+                    return (
+                      <div key={f.path} className="git-row" onClick={() => onDiff(f.path, { kind: "commit", hash: c.hash, untracked: false })} title={f.path}>
+                        <span className={`git-letter s-${f.status}`}>{f.status}</span>
+                        <span className="git-path">{name}</span>
+                        {dir && <span className="git-dir">{dir}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
         {entries.length === 0 && <div className="tree-loading">No commits.</div>}
       </div>
-      {selected && (
-        <div className="git-detail">
-          <div className="git-detail-head">
-            <span className="git-hash">{selected.hash.slice(0, 7)}</span>
-            <span className="git-meta">{selected.author} &lt;{selected.email}&gt; · {selected.date}</span>
-            <button onClick={() => setSelected(null)}>×</button>
-          </div>
-          <pre className="git-message">{selected.message}</pre>
-          {selected.files.map((f) => (
-            <div key={f.path} className="git-row" onClick={() => onDiff(f.path, { kind: "commit", hash: selected.hash, untracked: false })}>
-              <span className={`git-letter s-${f.status}`}>{f.status}</span>
-              <span className="git-path">{f.path}</span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

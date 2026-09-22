@@ -1,8 +1,10 @@
-// A citation is `@/` followed by a path from the workspace root: what an
-// agent reads, as markdown is what a renderer reads. The slash is what
-// separates it from an email address, a CSS at-rule or a scoped package
-// (CITE-10). This module parses it as a markdown inline node and draws it in
-// the rendered pane: cited media as the media itself, anything else as a chip.
+// A citation is `@` followed by a path from the workspace root: what an
+// agent reads, as markdown is what a renderer reads. A path has a slash or
+// a dot in it, which keeps `@media` and a bare handle out, and it never
+// starts inside a word, which keeps an email address out (CITE-10). The
+// older `@/path` form is still read. This module parses a citation as a
+// markdown inline node and draws it in the rendered pane: cited media as
+// the media itself, anything else as a chip.
 
 import { styleTags, tags as t } from "@lezer/highlight";
 import type { InlineContext, MarkdownConfig } from "@lezer/markdown";
@@ -20,12 +22,15 @@ const TRAILING = ".,:;!?";
 
 /** Where a citation starting at `pos` ends, or -1 when there is none. */
 export function citationEnd(text: string, pos: number): number {
-  if (text.charCodeAt(pos) !== AT || text.charCodeAt(pos + 1) !== SLASH) return -1;
-  if (pos > 0 && /[\w@.]/.test(text[pos - 1])) return -1;
-  let end = pos + 2;
+  if (text.charCodeAt(pos) !== AT) return -1;
+  if (pos > 0 && /[\w@./]/.test(text[pos - 1])) return -1;
+  const start = text.charCodeAt(pos + 1) === SLASH ? pos + 2 : pos + 1;
+  let end = start;
   while (end < text.length && !ends(text.charCodeAt(end))) end++;
-  while (end > pos + 2 && TRAILING.includes(text[end - 1])) end--;
-  return end > pos + 2 ? end : -1;
+  while (end > start && TRAILING.includes(text[end - 1])) end--;
+  const path = text.slice(start, end);
+  if (!path || !(path.includes("/") || path.includes("."))) return -1;
+  return end;
 }
 
 export const citation: MarkdownConfig = {
@@ -35,7 +40,7 @@ export const citation: MarkdownConfig = {
     {
       name: "Citation",
       parse(cx: InlineContext, next: number, pos: number) {
-        if (next !== AT || cx.char(pos + 1) !== SLASH) return -1;
+        if (next !== AT) return -1;
         const text = cx.slice(cx.offset, cx.end);
         const end = citationEnd(text, pos - cx.offset);
         return end < 0 ? -1 : cx.addElement(cx.elt("Citation", pos, cx.offset + end));
@@ -44,9 +49,10 @@ export const citation: MarkdownConfig = {
   ],
 };
 
-/** The workspace-relative path a citation names. */
+/** The workspace-relative path a citation names, in either form. */
 export function citedPath(text: string): string {
-  return text.slice(2);
+  const body = text.slice(1);
+  return body.startsWith("/") ? body.slice(1) : body;
 }
 
 export interface CitationContext {
@@ -61,7 +67,7 @@ export class ChipWidget extends WidgetType {
   toDOM(_view: EditorView) {
     const el = document.createElement("span");
     el.className = `cm-lp-chip${this.missing ? " cm-lp-chip-missing" : ""}`;
-    el.title = this.missing ? `Missing: ${this.path}` : `@/${this.path}`;
+    el.title = this.missing ? `Missing: ${this.path}` : `@${this.path}`;
     const icon = document.createElement("span");
     icon.className = "cm-lp-chip-icon";
     icon.textContent = this.path.endsWith("/") ? "▤" : "▢";
