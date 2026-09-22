@@ -1,7 +1,7 @@
 //! Session state: the workspace list, and the one function that publishes it.
 
 use crate::pty;
-use crate::state::{AppState, EditorGroup, EditorTab, Session, TerminalTab, Workspace};
+use crate::state::{AppState, DiffSpec, EditorGroup, EditorTab, Session, TerminalTab, Workspace};
 use crate::store;
 use crate::watch;
 use anyhow::{Context, Result};
@@ -54,6 +54,7 @@ pub fn persist(app: &AppHandle) -> Session {
 pub fn publish(app: &AppHandle) {
     let snapshot = persist(app);
     let _ = app.emit(EVENT_CHANGED, &snapshot);
+    crate::tray::refresh(app);
 }
 
 /// A message for the user that has no command to return through.
@@ -238,11 +239,11 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
             .workspace_mut(&workspace_id)
             .ok_or_else(|| format!("no workspace {workspace_id}"))?;
         let group = ws.active_group_mut();
-        let id = match group.editors.iter().find(|e| e.path == path) {
+        let id = match group.editors.iter().find(|e| e.path == path && e.diff.is_none()) {
             Some(tab) => tab.id.clone(),
             None => {
                 let id = crate::state::new_id();
-                group.editors.push(EditorTab { id: id.clone(), path: path.clone(), mode: default_mode(&path).into(), line: 0 });
+                group.editors.push(EditorTab { id: id.clone(), path: path.clone(), mode: default_mode(&path).into(), line: 0, diff: None, preview: false });
                 id
             }
         };
@@ -253,6 +254,31 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
         id
     };
     watch::sync(&app);
+    publish(&app);
+    Ok(id)
+}
+
+/// Opens a diff of a path as a tab in the active group, beside the file tabs,
+/// or focuses the tab already showing that diff.
+#[tauri::command]
+pub fn open_diff(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String, diff: DiffSpec) -> Result<String, String> {
+    let id = {
+        let mut session = state.session.lock();
+        let ws = session
+            .workspace_mut(&workspace_id)
+            .ok_or_else(|| format!("no workspace {workspace_id}"))?;
+        let group = ws.active_group_mut();
+        let id = match group.editors.iter().find(|e| e.path == path && e.diff.as_ref() == Some(&diff)) {
+            Some(tab) => tab.id.clone(),
+            None => {
+                let id = crate::state::new_id();
+                group.editors.push(EditorTab { id: id.clone(), path, mode: "source".into(), line: 0, diff: Some(diff), preview: false });
+                id
+            }
+        };
+        group.active_editor = Some(id.clone());
+        id
+    };
     publish(&app);
     Ok(id)
 }
@@ -354,7 +380,7 @@ pub fn split_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id:
             (ws.groups.iter().position(|g| Some(&g.id) == ws.active_group.as_ref()).unwrap_or(0), tab)
         };
         let id = crate::state::new_id();
-        let editors = tab.map(|t| vec![EditorTab { id: crate::state::new_id(), path: t.path, mode: t.mode, line: t.line }]).unwrap_or_default();
+        let editors = tab.map(|t| vec![EditorTab { id: crate::state::new_id(), path: t.path, mode: t.mode, line: t.line, diff: t.diff, preview: false }]).unwrap_or_default();
         let active_editor = editors.first().map(|e| e.id.clone());
         ws.groups.insert(index + 1, EditorGroup { id: id.clone(), editors, active_editor });
         ws.active_group = Some(id);
@@ -413,19 +439,20 @@ pub fn set_split_ratio(app: AppHandle, state: tauri::State<AppState>, workspace_
     persist(&app);
 }
 
-/// Raises a window. Under Wayland the compositor decides whether to honour
-/// it; from a focused window of the same application it does.
+/// Raises a window at its remembered geometry. Under Wayland the compositor
+/// decides whether to honour the focus; from a focused window of the same
+/// application it does.
 #[tauri::command]
 pub fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| format!("no window {label}"))?;
-    window.show().map_err(|e| format!("{e:#}"))?;
-    window.set_focus().map_err(|e| format!("{e:#}"))
+    crate::windows::show(&app, &label).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 pub fn quit(app: AppHandle) {
+    for label in crate::windows::LABELS {
+        crate::windows::record(&app, label);
+    }
+    crate::windows::save(&app);
     persist(&app);
     pty::shutdown(&app);
     app.exit(0);

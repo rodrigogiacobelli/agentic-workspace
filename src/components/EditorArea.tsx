@@ -5,9 +5,11 @@ import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { LANGUAGES, languageFor } from "../editor/languages";
 import * as settings from "../settings";
-import type { DiffTarget, EditorGroup, Workspace } from "../types";
+import type { EditorGroup, EditorTab, Workspace } from "../types";
 import { DiffView } from "./DiffView";
+import { Dropdown } from "./Menu";
 import { report } from "./Switcher";
+import { useTabStrip } from "./tabs";
 
 const TAB_MIME = "application/x-agentic-tab";
 
@@ -22,15 +24,20 @@ export async function closeTab(ws: Workspace, id: string): Promise<void> {
   await api.closeFile(ws.id, id);
 }
 
-interface AreaProps {
-  ws: Workspace;
-  diff: DiffTarget | null;
-  onCloseDiff: () => void;
-  onDiffChanged: () => void;
+/** What a tab reads: the file name, marked when the tab shows a diff of it. */
+export function tabLabel(tab: EditorTab): string {
+  const name = tab.path.split("/").pop() ?? tab.path;
+  if (!tab.diff) return name;
+  return tab.diff.kind === "commit" ? `${name} (${tab.diff.hash?.slice(0, 7) ?? "commit"})` : `${name} (diff)`;
 }
 
-/** The editor groups side by side, or the diff view in their place. */
-export function EditorArea({ ws, diff, onCloseDiff, onDiffChanged }: AreaProps) {
+interface AreaProps {
+  ws: Workspace;
+  onGitChanged: () => void;
+}
+
+/** The editor groups side by side. */
+export function EditorArea({ ws, onGitChanged }: AreaProps) {
   const area = useRef<HTMLDivElement>(null);
   const [ratio, setRatio] = useState(ws.splitRatio);
   useEffect(() => setRatio(ws.splitRatio), [ws.splitRatio, ws.id]);
@@ -56,42 +63,39 @@ export function EditorArea({ ws, diff, onCloseDiff, onDiffChanged }: AreaProps) 
 
   return (
     <section className="editor-area">
-      {diff ? (
-        <DiffView ws={ws} target={diff} onClose={onCloseDiff} onChanged={onDiffChanged} />
-      ) : (
-        <div className="editor-groups" ref={area}>
-          {ws.groups.map((g, i) => (
-            <Fragment key={g.id}>
-              {i > 0 && <div className="group-divider" onMouseDown={startDrag} />}
-              <GroupView
-                ws={ws}
-                group={g}
-                active={g.id === ws.activeGroup || ws.groups.length === 1}
-                style={ws.groups.length === 2 ? { flex: `${i === 0 ? ratio : 1 - ratio} 1 0` } : { flex: "1 1 0" }}
-              />
-            </Fragment>
-          ))}
-        </div>
-      )}
+      <div className="editor-groups" ref={area}>
+        {ws.groups.map((g, i) => (
+          <Fragment key={g.id}>
+            {i > 0 && <div className="group-divider" onMouseDown={startDrag} />}
+            <GroupView
+              ws={ws}
+              group={g}
+              active={g.id === ws.activeGroup || ws.groups.length === 1}
+              style={ws.groups.length === 2 ? { flex: `${i === 0 ? ratio : 1 - ratio} 1 0` } : { flex: "1 1 0" }}
+              onGitChanged={onGitChanged}
+            />
+          </Fragment>
+        ))}
+      </div>
     </section>
   );
 }
 
-function GroupView({ ws, group, active, style }: { ws: Workspace; group: EditorGroup; active: boolean; style: React.CSSProperties }) {
+function GroupView({ ws, group, active, style, onGitChanged }: { ws: Workspace; group: EditorGroup; active: boolean; style: React.CSSProperties; onGitChanged: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const shownRef = useRef<string | null>(null);
   const [, bump] = useState(0);
   const activeId = group.activeEditor;
   const tab = group.editors.find((t) => t.id === activeId);
+  const strip = useTabStrip(activeId);
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
 
   useEffect(() => {
-    const container = host.current;
-    if (!container) return;
     if (shownRef.current && shownRef.current !== activeId) editors.unmount(shownRef.current);
-    shownRef.current = activeId;
-    if (tab) void editors.mount(ws, tab, container).catch(report);
+    shownRef.current = tab && !tab.diff ? activeId : null;
+    const container = host.current;
+    if (tab && !tab.diff && container) void editors.mount(ws, tab, container).catch(report);
   }, [activeId, ws, tab]);
 
   useEffect(() => () => { if (shownRef.current) editors.unmount(shownRef.current); }, []);
@@ -113,7 +117,7 @@ function GroupView({ ws, group, active, style }: { ws: Workspace; group: EditorG
     }
   };
 
-  const entry = tab ? editors.get(tab.id) : undefined;
+  const entry = tab && !tab.diff ? editors.get(tab.id) : undefined;
   const doc = entry && "doc" in entry ? entry.doc : undefined;
 
   return (
@@ -124,13 +128,16 @@ function GroupView({ ws, group, active, style }: { ws: Workspace; group: EditorG
     >
       <div
         className="tabs"
+        ref={strip.ref}
+        onWheel={strip.onWheel}
         onDragOver={(e) => { if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault(); }}
         onDrop={(e) => dropOnTab(e, null)}
       >
         {group.editors.map((t, i) => (
           <div
             key={t.id}
-            className={`tab${t.id === activeId ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}`}
+            data-tab={t.id}
+            className={`tab${t.id === activeId ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
             draggable
             onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
             onDragOver={(e) => { if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault(); }}
@@ -138,25 +145,31 @@ function GroupView({ ws, group, active, style }: { ws: Workspace; group: EditorG
             onClick={() => void api.setActiveEditor(ws.id, t.id)}
             title={t.path}
           >
-            <span className="tab-label">{editors.isDirty(t.id) ? "● " : ""}{t.path.split("/").pop()}</span>
+            <span className="tab-label">{editors.isDirty(t.id) ? "● " : ""}{tabLabel(t)}</span>
             <button className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(ws, t.id); }} title="Close (Ctrl+W)">×</button>
           </div>
         ))}
         <span className="tabs-spacer" />
         <button className="tab-add" onClick={() => void api.splitEditor(ws.id).catch(report)} title="Split the editor (Ctrl+\)">⫿</button>
       </div>
-      {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
-      {doc && <Banner doc={doc} />}
-      <div className="editor-host" ref={host}>
-        {group.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
-      </div>
-      {entry && "binary" in entry && tab && (
-        <div className="binary-notice">
-          <p>{tab.path} is not a text file.</p>
-          <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
-        </div>
+      {tab?.diff ? (
+        <DiffView key={tab.id} ws={ws} tab={tab} onClose={() => void closeTab(ws, tab.id)} onChanged={onGitChanged} />
+      ) : (
+        <>
+          {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
+          {doc && <Banner doc={doc} />}
+          <div className="editor-host" ref={host}>
+            {group.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
+          </div>
+          {entry && "binary" in entry && tab && (
+            <div className="binary-notice">
+              <p>{tab.path} is not a text file.</p>
+              <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
+            </div>
+          )}
+          {tab && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
+        </>
       )}
-      {tab && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
     </div>
   );
 }
@@ -250,9 +263,7 @@ function StatusBar({ ws, tabId, path, doc }: { ws: Workspace; tabId: string; pat
       {doc && ws.git?.isRepo && <button className={doc.blameOn ? "active" : ""} onClick={() => void toggleBlame()} title="Blame">blame</button>}
       <span>UTF-8</span>
       <span>LF</span>
-      <select value={language} onChange={(e) => void setLanguage(e.target.value)} title="Language for this file">
-        {LANGUAGES.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-      </select>
+      <Dropdown className="statusbar-language" value={language} options={LANGUAGES.map((l) => ({ id: l.id, label: l.name }))} onChange={(id) => void setLanguage(id)} title="Language for this file" />
     </div>
   );
 }

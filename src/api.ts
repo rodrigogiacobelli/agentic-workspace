@@ -2,9 +2,10 @@
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
-  BlameLine, Branches, CommitDetail, DirChanged, Entry, HotkeyStatus, ImportedTheme, LogEntry, RepoInfo, SearchHit,
+  BlameLine, Branches, CommitDetail, DiffSpec, DirChanged, Entry, HotkeyStatus, ImportedTheme, LogEntry, RepoInfo, SearchHit,
   Session, Settings, StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
 } from "./types";
 
@@ -28,6 +29,8 @@ export const api = {
     invoke<void>("set_expanded", { workspaceId, path, expanded }),
   openFile: (workspaceId: string, path: string) =>
     invoke<string>("open_file", { workspaceId, path }),
+  openDiff: (workspaceId: string, path: string, diff: DiffSpec) =>
+    invoke<string>("open_diff", { workspaceId, path, diff }),
   closeFile: (workspaceId: string, id: string) =>
     invoke<void>("close_file", { workspaceId, id }),
   setActiveEditor: (workspaceId: string, id: string) =>
@@ -45,6 +48,11 @@ export const api = {
   setEditorView: (workspaceId: string, id: string, mode: string, line: number) =>
     invoke<void>("set_editor_view", { workspaceId, id, mode, line }),
   focusWindow: (label: WindowRole) => invoke<void>("focus_window", { label }),
+  /** The title row's controls. Closing hides the window; the app stays in the tray. */
+  windowMinimize: () => getCurrentWindow().minimize(),
+  windowToggleMaximize: () => getCurrentWindow().toggleMaximize(),
+  windowClose: () => getCurrentWindow().close(),
+  windowMaximized: () => getCurrentWindow().isMaximized(),
   getSettings: () => invoke<Settings>("get_settings"),
   importThemes: (path: string) => invoke<ImportedTheme[]>("import_themes", { path }),
   listThemes: () => invoke<ImportedTheme[]>("list_themes"),
@@ -177,6 +185,7 @@ export const events = {
     listen<HotkeyStatus>("hotkey-changed", (e) => cb(e.payload)),
   onOpenAt: (cb: (t: OpenAt) => void): Promise<UnlistenFn> =>
     listen<OpenAt>("open-at", (e) => cb(e.payload)),
+  onWindowResized: (cb: () => void): Promise<UnlistenFn> => getCurrentWindow().onResized(() => cb()),
 };
 
 export function toBytes(chunk: OutputChunk): Uint8Array {

@@ -4,7 +4,7 @@
 import { Annotation, Compartment, EditorState, Text, type Extension } from "@codemirror/state";
 import {
   EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection,
-  dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, gutter, GutterMarker,
+  dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, gutter, GutterMarker, scrollPastEnd,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from "@codemirror/commands";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -72,7 +72,12 @@ const editorTheme = EditorView.theme({
   ".cm-activeLine": { backgroundColor: "var(--bg-hover)" },
   ".cm-activeLineGutter": { backgroundColor: "var(--bg-hover)", color: "var(--fg-dim)" },
   "&.cm-focused .cm-cursor": { borderLeftColor: "var(--accent)" },
-  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection": { backgroundColor: "var(--selection) !important" },
+  // The selection is drawn above the text rather than beneath it, so a line
+  // highlight, a code block or a widget with its own background cannot hide
+  // it; a blend mode in styles.css keeps the text legible through it.
+  ".cm-selectionLayer": { zIndex: "1 !important", pointerEvents: "none" },
+  ".cm-selectionBackground": { backgroundColor: "var(--selection) !important", opacity: "0.55" },
+  "&.cm-focused .cm-selectionBackground": { opacity: "1" },
   ".cm-matchingBracket": { backgroundColor: "var(--selection)", outline: "1px solid var(--accent)" },
   ".cm-searchMatch": { backgroundColor: "rgba(255, 200, 0, 0.25)" },
   ".cm-panels": { backgroundColor: "var(--bg-raised)", color: "var(--fg)", borderColor: "var(--border)" },
@@ -181,6 +186,7 @@ export class Doc {
       history(),
       foldGutter(),
       highlightActiveLine(),
+      scrollPastEnd(),
       keymap.of([
         { key: "Mod-s", run: () => { void this.save(); return true; } },
         ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, indentWithTab,
@@ -562,10 +568,10 @@ export class Doc {
     }
   }
 
-  /** Files dropped from the file manager, as absolute paths. */
-  async insertPaths(paths: string[], coords: { x: number; y: number } | null): Promise<void> {
+  /** Files dropped from the file manager, as absolute paths, inserted at the caret. */
+  async insertPaths(paths: string[]): Promise<void> {
     const view = this.active();
-    let pos = (coords && view.posAtCoords(coords)) ?? view.state.selection.main.head;
+    let pos = view.state.selection.main.head;
     for (const source of paths) {
       try {
         const stored = await api.importAsset(this.workspaceId, this.path, source);
@@ -580,10 +586,7 @@ export class Doc {
   private insertLink(view: EditorView, pos: number, link: string, name: string): number {
     const label = name.replace(/\.[^.]+$/, "");
     const kind = mediaKind(link);
-    const text = kind === "file" ? `[${label}](${link})` : `![${label}](${link})`;
-    const line = view.state.doc.lineAt(pos);
-    const prefix = kind !== "file" && line.text.trim() !== "" ? "\n" : "";
-    const insert = `${prefix}${text}`;
+    const insert = kind === "file" ? `[${label}](${link})` : `![${label}](${link})`;
     view.dispatch({ changes: { from: pos, insert }, selection: { anchor: pos + insert.length } });
     return pos + insert.length;
   }

@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, events } from "../api";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
-import type { DiffTarget, RepoInfo, Session, StatusEntry, Workspace } from "../types";
+import type { RepoInfo, Session, StatusEntry, Workspace } from "../types";
 import { EditorArea, closeTab } from "./EditorArea";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
@@ -23,7 +23,6 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   const [selected, setSelected] = useState<string | null>(null);
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
   const [sidebar, setSidebar] = useState<"files" | "search" | "git" | "outline">("files");
-  const [diff, setDiff] = useState<DiffTarget | null>(null);
   const [gitStatus, setGitStatus] = useState<StatusEntry[]>([]);
   const [gitInfo, setGitInfo] = useState<RepoInfo | null>(null);
   const [gitTick, setGitTick] = useState(0);
@@ -50,7 +49,6 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     const b = events.onGitChanged(schedule);
     return () => { void a.then((u) => u()); void b.then((u) => u()); if (timer) window.clearTimeout(timer); };
   }, [ws?.id, refreshGit]);
-  useEffect(() => { setDiff(null); }, [ws?.id]);
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
   useEffect(() => {
@@ -81,16 +79,13 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return () => { void unlisten.then((u) => u()); };
   }, []);
 
-  // Files dropped from the file manager land in the document under the pointer.
+  // Files dropped from the file manager land at the caret of the active
+  // document, wherever over the editor they were dropped (FIX-10).
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const activeId = ws ? editors.activeEditorId(ws) : null;
       if (event.payload.type !== "drop" || !activeId) return;
-      const doc = editors.doc(activeId);
-      if (!doc) return;
-      const scale = window.devicePixelRatio || 1;
-      const { x, y } = event.payload.position;
-      void doc.insertPaths(event.payload.paths, { x: x / scale, y: y / scale });
+      void editors.doc(activeId)?.insertPaths(event.payload.paths);
     });
     return () => { void unlisten.then((u) => u()); };
   }, [ws]);
@@ -147,6 +142,9 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return <main className="empty">Add a folder to start.</main>;
   }
 
+  // Files with work-tree changes or not yet tracked; what is only staged does not count (FIX-06).
+  const unstaged = gitStatus.filter((s) => s.untracked || s.conflicted || s.worktree !== ".").length;
+
   const openAt = (path: string, line: number, column: number) => {
     api.openFile(ws.id, path).then((id) => editors.revealLine(id, line, column)).catch(report);
   };
@@ -157,7 +155,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
         <div className="sidebar-tabs">
           <button className={sidebar === "files" ? "active" : ""} onClick={() => setSidebar("files")}>Files</button>
           <button className={sidebar === "search" ? "active" : ""} onClick={() => setSidebar("search")} title="Ctrl+Shift+F">Search</button>
-          <button className={sidebar === "git" ? "active" : ""} onClick={() => setSidebar("git")} title="Ctrl+Shift+G">Git{gitStatus.length ? ` ${gitStatus.length}` : ""}</button>
+          <button className={sidebar === "git" ? "active" : ""} onClick={() => setSidebar("git")} title="Ctrl+Shift+G">Git{unstaged ? ` (${unstaged})` : ""}</button>
           <button className={sidebar === "outline" ? "active" : ""} onClick={() => setSidebar("outline")}>Outline</button>
         </div>
         {!ws.available ? (
@@ -169,10 +167,10 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
         ) : sidebar === "outline" ? (
           <Outline ws={ws} />
         ) : (
-          <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={setDiff} onOpenFile={(p) => void api.openFile(ws.id, p).catch(report)} />
+          <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={(p, d) => void api.openDiff(ws.id, p, d).catch(report)} onOpenFile={(p) => void api.openFile(ws.id, p).catch(report)} />
         )}
       </aside>
-      <EditorArea ws={ws} diff={diff} onCloseDiff={() => setDiff(null)} onDiffChanged={refreshGit} />
+      <EditorArea ws={ws} onGitChanged={refreshGit} />
       {quickOpen && (
         <Palette
           title="Open file"

@@ -10,15 +10,16 @@ mod settings;
 mod state;
 mod store;
 mod themes;
+mod tray;
 mod tree;
 mod watch;
+mod windows;
 
 use crate::state::AppState;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
-use tauri_plugin_window_state::StateFlags;
 
 pub const EVENT_QUIT_REQUESTED: &str = "quit-requested";
 
@@ -62,9 +63,15 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         last_focused: Mutex::new("workspace".into()),
         ptys: Mutex::new(HashMap::new()),
         watcher: Mutex::new(watch::Watcher::new(handle.clone())),
+        windows: Mutex::new(windows::load(&data_dir)),
+        tray: tray::Tray::default(),
         data_dir,
         notices: Mutex::new(notices),
     });
+    if let Err(e) = tray::init(&handle) {
+        session::notice(&handle, format!("No tray icon: {e:#}. Closing the last window quits instead."));
+    }
+    windows::show_all(&handle);
 
     let active = handle.state::<AppState>().session.lock().active.clone();
     if let Some(id) = active {
@@ -89,26 +96,25 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
             session::persist(&ticker);
+            windows::save(&ticker);
         })
         .ok();
     Ok(())
 }
 
-/// Closing one window hides it while the other stays; closing the last visible
-/// window asks the workspace window — which knows about unsaved buffers — to
-/// run the quit path.
+/// Closing a window hides it; the application lives on in the tray with every
+/// terminal still running (TRAY-01). Without a tray there is no way back, so
+/// closing the last visible window asks the workspace window — which knows
+/// about unsaved buffers — to run the quit path instead.
 fn on_close_requested(app: &AppHandle, label: &str) {
     let other = if label == "terminal" { "workspace" } else { "terminal" };
-    let other_visible = app
-        .get_webview_window(other)
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false);
-    if other_visible {
-        if let Some(window) = app.get_webview_window(label) {
-            let _ = window.hide();
+    let stranded = !app.state::<AppState>().tray.is_available() && !windows::is_visible(app, other);
+    if stranded {
+        if let Some(window) = app.get_webview_window("workspace") {
+            let _ = window.emit(EVENT_QUIT_REQUESTED, ());
         }
-    } else if let Some(window) = app.get_webview_window("workspace") {
-        let _ = window.emit(EVENT_QUIT_REQUESTED, ());
+    } else {
+        windows::hide(app, label);
     }
 }
 
@@ -142,19 +148,8 @@ pub fn run() {
         // Registered first so a second launch is answered before anything
         // else initialises: it raises the running instance's windows.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            for label in ["workspace", "terminal"] {
-                if let Some(window) = app.get_webview_window(label) {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
+            windows::raise_last_focused(app);
         }))
-        // Size is restored; position is requested, which Wayland ignores.
-        .plugin(
-            tauri_plugin_window_state::Builder::new()
-                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
-                .build(),
-        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
@@ -170,6 +165,9 @@ pub fn run() {
             WindowEvent::Focused(true) => {
                 *window.app_handle().state::<AppState>().last_focused.lock() = window.label().to_string();
             }
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+                windows::record(window.app_handle(), window.label());
+            }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
@@ -181,6 +179,7 @@ pub fn run() {
             session::rename_workspace,
             session::set_expanded,
             session::open_file,
+            session::open_diff,
             session::close_file,
             session::set_active_editor,
             session::reorder_editors,
@@ -256,6 +255,7 @@ pub fn run() {
         .expect("error while building Agentic Workspace")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                windows::save(app);
                 pty::shutdown(app);
             }
         });

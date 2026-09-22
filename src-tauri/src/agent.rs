@@ -166,9 +166,7 @@ fn activate(app: &AppHandle, ws_id: &str, terminal_id: &str) {
         session::notice(app, format!("{e:#}"));
     }
     session::publish(app);
-    if let Some(window) = app.get_webview_window("terminal") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    if let Err(e) = crate::windows::show(app, "terminal") {
+        session::notice(app, format!("{e:#}"));
     }
 }

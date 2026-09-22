@@ -4,6 +4,7 @@ import { api, events } from "../api";
 import * as settings from "../settings";
 import { allThemes, isImported } from "../themes";
 import type { HotkeyStatus, Settings, Workspace } from "../types";
+import { Dropdown } from "./Menu";
 import { report } from "./Switcher";
 
 interface Props {
@@ -81,9 +82,7 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
         <label className="setting">
           <span>Theme</span>
           <span className="setting-row">
-            <select value={current.theme} onChange={(e) => set({ theme: e.target.value })}>
-              {allThemes().map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
+            <Dropdown value={current.theme} options={allThemes().map((t) => ({ id: t.id, label: t.name }))} onChange={(id) => set({ theme: id })} />
             <button onClick={() => void importTheme()} title="Import a VS Code theme (.json or .vsix)">Import…</button>
             {isImported(current.theme) && <button onClick={() => void removeTheme()} title="Remove this imported theme">Remove</button>}
           </span>
@@ -117,18 +116,15 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
             {text("Clipboard folder (relative to the workspace)", wsSettings.clipboardDir ?? "", (v) => setWs({ clipboardDir: v || null }), "clipboard")}
             <label className="setting">
               <span>Theme for this workspace</span>
-              <select value={wsSettings.theme ?? ""} onChange={(e) => setWs({ theme: e.target.value || null })}>
-                <option value="">Global theme</option>
-                {allThemes().map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
+              <Dropdown value={wsSettings.theme ?? ""} options={[{ id: "", label: "Global theme" }, ...allThemes().map((t) => ({ id: t.id, label: t.name }))]} onChange={(id) => setWs({ theme: id || null })} />
             </label>
             <label className="setting">
               <span>Notifications</span>
-              <select value={wsSettings.notifications === null ? "inherit" : wsSettings.notifications ? "on" : "off"} onChange={(e) => setWs({ notifications: e.target.value === "inherit" ? null : e.target.value === "on" })}>
-                <option value="inherit">Follow the global setting</option>
-                <option value="on">On</option>
-                <option value="off">Off</option>
-              </select>
+              <Dropdown
+                value={wsSettings.notifications === null ? "inherit" : wsSettings.notifications ? "on" : "off"}
+                options={[{ id: "inherit", label: "Follow the global setting" }, { id: "on", label: "On" }, { id: "off", label: "Off" }]}
+                onChange={(id) => setWs({ notifications: id === "inherit" ? null : id === "on" })}
+              />
             </label>
           </>
         )}

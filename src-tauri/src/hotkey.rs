@@ -46,13 +46,7 @@ fn publish(app: &AppHandle, status: HotkeyStatus) {
 
 /// Raises the window the user last worked in.
 fn raise(app: &AppHandle) {
-    let label = app.state::<AppState>().last_focused.lock().clone();
-    let label = if label.is_empty() { "workspace".to_string() } else { label };
-    if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+    crate::windows::raise_last_focused(app);
 }
 
 /// Runs the portal session for the life of the application, re-binding when

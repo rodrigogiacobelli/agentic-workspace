@@ -45,26 +45,47 @@ input:focus { border-color: var(--accent); }
 
 .app { display: flex; flex-direction: column; height: 100%; }
 
+/* The title row: app-drawn in place of the compositor's title bar (CHR-01). */
 .switcher {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: 4px;
+  height: 30px;
+  padding: 0 0 0 6px;
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
   flex: none;
+  font-size: 12px;
 }
-.switcher-select {
-  font: inherit;
-  font-weight: 600;
+.switcher > button { padding: 0 6px; height: 22px; line-height: 20px; }
+.switcher-select { font-weight: 600; min-width: 160px; max-width: 260px; }
+.switcher-path { flex: 1; align-self: stretch; display: flex; align-items: center; color: var(--fg-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.win-controls { display: flex; align-self: stretch; margin-left: 4px; }
+.win-controls button { width: 40px; height: 30px; padding: 0; border-radius: 0; color: var(--fg-dim); font-size: 12px; }
+.win-controls button:hover { color: var(--fg); }
+.win-controls .close:hover { background: #e81123; color: #fff; }
+
+/* App-drawn selects (FIX-01, FIX-02). */
+.dropdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 6px 0 8px;
   color: var(--fg);
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 3px 6px;
-  min-width: 160px;
 }
-.switcher-path { flex: 1; color: var(--fg-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dropdown:hover, .dropdown.open { border-color: var(--accent); background: var(--bg); }
+.dropdown-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dropdown-caret { color: var(--fg-dim); font-size: 10px; }
+.dropdown-list { display: flex; flex-direction: column; max-height: 60vh; overflow: auto; }
+.dropdown-list button { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; white-space: nowrap; }
+.dropdown-list button.selected { color: var(--accent); }
+.dropdown-list button.focused { background: var(--bg-hover); }
+.dropdown-detail { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }
 
 main { flex: 1; display: flex; min-height: 0; }
 .terminal-main { flex-direction: column; }
@@ -77,9 +98,18 @@ main { flex: 1; display: flex; min-height: 0; }
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+  overflow-y: hidden;
   flex: none;
-  min-height: 30px;
+  height: 30px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
+/* The strip's scrollbar keeps to 4 px along the bottom edge (FIX-04). */
+.tabs::-webkit-scrollbar { height: 4px; }
+.tabs::-webkit-scrollbar-track { background: transparent; }
+.tabs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.tabs::-webkit-scrollbar-thumb:hover { background: var(--fg-faint); }
+.tab.preview .tab-label { font-style: italic; }
 .tab {
   display: flex;
   align-items: center;
@@ -234,7 +264,7 @@ main { flex: 1; display: flex; min-height: 0; }
   background: var(--bg-raised);
   border-top: 1px solid var(--border);
 }
-.statusbar select { font: inherit; color: var(--fg-dim); background: transparent; border: none; margin-left: auto; }
+.statusbar-language { margin-left: auto; height: 18px; font-size: 11px; color: var(--fg-dim); background: transparent; border-color: transparent; }
 .binary-notice { padding: 24px; color: var(--fg-dim); text-align: center; }
 .binary-notice button { border: 1px solid var(--border); }
 
@@ -291,7 +321,8 @@ main { flex: 1; display: flex; min-height: 0; }
 .dialog h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-dim); margin: 16px 0 6px; }
 .setting { display: flex; align-items: center; gap: 12px; padding: 4px 0; }
 .setting > span { flex: 1; }
-.setting input:not([type="checkbox"]), .setting select { width: 220px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; }
+.setting input:not([type="checkbox"]) { width: 220px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; }
+.setting > .dropdown { width: 220px; justify-content: space-between; }
 
 .overlay {
   position: fixed;
@@ -394,13 +425,19 @@ main { flex: 1; display: flex; min-height: 0; }
 .diff-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diff-header button.active { background: var(--bg-hover); }
 .diff-host { flex: 1; min-height: 0; position: relative; user-select: text; }
+.diff-empty { padding: 24px; color: var(--fg-dim); text-align: center; }
+.diff-empty button { border: 1px solid var(--border); }
+/* The selection layer sits above the text (see editorTheme); a blend mode
+ * keeps the text legible through it, per theme (FIX-07). */
+[data-theme="dark"] .cm-selectionBackground { mix-blend-mode: screen; }
+[data-theme="light"] .cm-selectionBackground { mix-blend-mode: multiply; }
 .diff-host .cm-editor { height: 100%; }
 .hunk-action { display: inline-block; margin-right: 8px; font-size: 11px; border: 1px solid var(--border); padding: 0 6px; background: var(--bg-raised); vertical-align: middle; }
 .cm-blame-gutter .cm-blame-line { display: inline-block; width: 220px; padding: 0 8px; color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .statusbar button { padding: 0 6px; font-size: 11px; color: var(--fg-dim); }
 .statusbar button.active { color: var(--fg); background: var(--bg-hover); }
 .setting-row { display: flex; gap: 6px; align-items: center; }
-.setting-row select { width: 180px; }
+.setting-row .dropdown { width: 180px; justify-content: space-between; }
 .setting-row button { border: 1px solid var(--border); }
 .setting button { border: 1px solid var(--border); }
 .outline .tree-row { padding-top: 3px; padding-bottom: 3px; }

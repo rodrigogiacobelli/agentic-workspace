@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
-import type { CommitDetail, DiffTarget, LogEntry, RepoInfo, Session, StatusEntry, Workspace } from "../types";
+import type { CommitDetail, DiffSpec, LogEntry, RepoInfo, Session, StatusEntry, Workspace } from "../types";
 import { BranchList } from "./BranchList";
 import { report } from "./Switcher";
 import { WorktreeList } from "./WorktreeList";
@@ -12,7 +12,7 @@ interface Props {
   status: StatusEntry[];
   info: RepoInfo | null;
   refresh: () => void;
-  onDiff: (target: DiffTarget) => void;
+  onDiff: (path: string, diff: DiffSpec) => void;
   onOpenFile: (path: string) => void;
 }
 
@@ -75,7 +75,7 @@ export function GitPanel({ ws, session, status, info, refresh, onDiff, onOpenFil
     <div
       key={`${section}:${entry.path}`}
       className="git-row"
-      onClick={() => onDiff(section === "staged" ? { kind: "staged", path: entry.path } : { kind: "worktree", path: entry.path, untracked: entry.untracked })}
+      onClick={() => onDiff(entry.path, section === "staged" ? { kind: "staged", hash: null, untracked: false } : { kind: "worktree", hash: null, untracked: entry.untracked })}
       title={entry.origPath ? `${entry.origPath} → ${entry.path}` : entry.path}
     >
       <span className={`git-letter s-${section === "staged" ? entry.index : entry.untracked ? "U" : entry.worktree}`}>
@@ -150,7 +150,7 @@ export function GitPanel({ ws, session, status, info, refresh, onDiff, onOpenFil
   );
 }
 
-function History({ ws, onDiff }: { ws: Workspace; onDiff: (t: DiffTarget) => void }) {
+function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: DiffSpec) => void }) {
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [filter, setFilter] = useState("");
   const [done, setDone] = useState(false);
@@ -214,7 +214,7 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (t: DiffTarget) => voi
           </div>
           <pre className="git-message">{selected.message}</pre>
           {selected.files.map((f) => (
-            <div key={f.path} className="git-row" onClick={() => onDiff({ kind: "commit", hash: selected.hash, short: selected.hash.slice(0, 7), path: f.path })}>
+            <div key={f.path} className="git-row" onClick={() => onDiff(f.path, { kind: "commit", hash: selected.hash, untracked: false })}>
               <span className={`git-letter s-${f.status}`}>{f.status}</span>
               <span className="git-path">{f.path}</span>
             </div>

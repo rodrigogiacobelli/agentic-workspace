@@ -57,6 +57,16 @@ export interface EditorTab {
   mode: string;
   /** First visible line, restored on reopen. */
   line: number;
+  /** Set when the tab shows a diff of `path` rather than the file. */
+  diff: DiffSpec | null;
+  /** A preview tab: one per group, replaced by the next single click. */
+  preview: boolean;
+}
+
+export interface DiffSpec {
+  kind: "worktree" | "staged" | "commit";
+  hash: string | null;
+  untracked: boolean;
 }
 
 export interface Entry {
@@ -182,12 +192,6 @@ export interface WorktreeEntry {
   prunable: boolean;
   bare: boolean;
 }
-
-/** What the diff view shows. */
-export type DiffTarget =
-  | { kind: "worktree"; path: string; untracked: boolean }
-  | { kind: "staged"; path: string }
-  | { kind: "commit"; hash: string; path: string; short: string };
 
 export interface HotkeyStatus {
   active: boolean;

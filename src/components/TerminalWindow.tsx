@@ -3,7 +3,9 @@ import { api } from "../api";
 import { actionFor } from "../hotkeys";
 import * as terminals from "../terminals";
 import type { Session, TerminalTab, Workspace } from "../types";
+import { ContextMenu } from "./Menu";
 import { report } from "./Switcher";
+import { useTabStrip } from "./tabs";
 
 interface Props {
   session: Session;
@@ -143,6 +145,8 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
   onRenamed: () => void;
 }) {
   const dragging = useRef<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  const strip = useTabStrip(ws.activeTerminal);
 
   const drop = (targetId: string) => {
     const from = dragging.current;
@@ -155,10 +159,11 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
   };
 
   return (
-    <div className="tabs">
+    <div className="tabs" ref={strip.ref} onWheel={strip.onWheel}>
       {ws.terminals.map((tab) => (
         <div
           key={tab.id}
+          data-tab={tab.id}
           className={`tab${tab.id === ws.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}`}
           draggable
           onDragStart={() => { dragging.current = tab.id; }}
@@ -166,6 +171,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
           onDrop={() => drop(tab.id)}
           onClick={() => void api.setActiveTerminal(ws.id, tab.id)}
           onDoubleClick={() => onRename(tab.id)}
+          onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, id: tab.id }); }}
           title={tab.cwd}
         >
           {renaming === tab.id ? (
@@ -187,6 +193,14 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
         </div>
       ))}
       <button className="tab-add" onClick={() => void api.terminalOpen(ws.id).catch(report)} title="New terminal (Ctrl+Shift+T)">＋</button>
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          <button onClick={() => { onRename(menu.id); setMenu(null); }}>Rename…</button>
+          <button onClick={() => { void api.terminalRename(menu.id, null); setMenu(null); }}>Use the program's title</button>
+          <hr />
+          <button onClick={() => { void api.terminalClose(menu.id); setMenu(null); }}>Close</button>
+        </ContextMenu>
+      )}
     </div>
   );
 }

@@ -2,10 +2,18 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permissions for the workspace and terminal windows",
-  "windows": ["workspace", "terminal"],
+  "windows": [
+    "workspace",
+    "terminal"
+  ],
   "permissions": [
     "core:default",
     "core:event:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
     "dialog:default",

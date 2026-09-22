@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { EditorState } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType, lineNumbers } from "@codemirror/view";
+import { Decoration, EditorView, WidgetType, drawSelection, lineNumbers } from "@codemirror/view";
 import { StreamLanguage, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
 import { diff as diffMode } from "@codemirror/legacy-modes/mode/diff";
 import { MergeView } from "@codemirror/merge";
 import { tags as t } from "@lezer/highlight";
-import { api } from "../api";
+import { api, events } from "../api";
 import { languageExtension, languageFor } from "../editor/languages";
-import type { DiffTarget, Workspace } from "../types";
+import type { EditorTab, Workspace } from "../types";
 import { report } from "./Switcher";
 
 interface Props {
   ws: Workspace;
-  target: DiffTarget;
+  /** A tab whose `diff` is set. */
+  tab: EditorTab;
   onClose: () => void;
   onChanged: () => void;
 }
@@ -33,6 +34,9 @@ const theme = EditorView.theme({
   ".cm-deletedChunk": { backgroundColor: "rgba(255, 90, 90, 0.10)" },
   ".cm-changedText": { background: "rgba(120, 200, 120, 0.25)" },
   ".cm-deletedText": { background: "rgba(255, 90, 90, 0.25)" },
+  ".cm-selectionLayer": { zIndex: "1 !important", pointerEvents: "none" },
+  ".cm-selectionBackground": { backgroundColor: "var(--selection) !important", opacity: "0.55" },
+  "&.cm-focused .cm-selectionBackground": { opacity: "1" },
 });
 
 /** A button on a hunk header that stages or unstages that hunk alone. */
@@ -69,10 +73,27 @@ function hunkPatches(text: string): { line: number; patch: string }[] {
   return out;
 }
 
-export function DiffView({ ws, target, onClose, onChanged }: Props) {
+/** One diff of one path, as a tab. It follows the repository: a commit that
+ * empties it says so and offers to close (FIX-09). */
+export function DiffView({ ws, tab, onClose, onChanged }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<"inline" | "side">("inline");
   const [loaded, setLoaded] = useState<{ text: string; old: string; now: string } | null>(null);
+  const [tick, setTick] = useState(0);
+  const target = tab.diff!;
+  const path = tab.path;
+
+  useEffect(() => {
+    let timer: number | null = null;
+    const schedule = (id: string) => {
+      if (id !== ws.id) return;
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => setTick((n) => n + 1), 300);
+    };
+    const a = events.onGitChanged(schedule);
+    const b = events.onDirChanged((c) => schedule(c.workspaceId));
+    return () => { void a.then((u) => u()); void b.then((u) => u()); if (timer) window.clearTimeout(timer); };
+  }, [ws.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,33 +102,37 @@ export function DiffView({ ws, target, onClose, onChanged }: Props) {
       let old = "";
       let now = "";
       if (target.kind === "worktree") {
-        text = await api.gitDiff(ws.id, target.path, false, target.untracked);
-        old = target.untracked ? "" : await api.gitShowFile(ws.id, ":", target.path);
-        now = await api.readFile(ws.id, target.path).catch(() => "");
+        text = await api.gitDiff(ws.id, path, false, target.untracked);
+        old = target.untracked ? "" : await api.gitShowFile(ws.id, ":", path);
+        now = await api.readFile(ws.id, path).catch(() => "");
       } else if (target.kind === "staged") {
-        text = await api.gitDiff(ws.id, target.path, true, false);
-        old = await api.gitShowFile(ws.id, "HEAD", target.path);
-        now = await api.gitShowFile(ws.id, ":", target.path);
+        text = await api.gitDiff(ws.id, path, true, false);
+        old = await api.gitShowFile(ws.id, "HEAD", path);
+        now = await api.gitShowFile(ws.id, ":", path);
       } else {
-        text = await api.gitCommitFileDiff(ws.id, target.hash, target.path);
-        old = await api.gitShowFile(ws.id, `${target.hash}^`, target.path);
-        now = await api.gitShowFile(ws.id, target.hash, target.path);
+        const hash = target.hash ?? "HEAD";
+        text = await api.gitCommitFileDiff(ws.id, hash, path);
+        old = await api.gitShowFile(ws.id, `${hash}^`, path);
+        now = await api.gitShowFile(ws.id, hash, path);
       }
       if (!cancelled) setLoaded({ text, old, now });
     };
     load().catch(report);
     return () => { cancelled = true; };
-  }, [ws.id, target]);
+  }, [ws.id, path, target.kind, target.hash, target.untracked, tick]);
+
+  const empty = loaded !== null && loaded.text.trim() === "" && target.kind !== "commit";
 
   useEffect(() => {
     const el = host.current;
-    if (!el || !loaded) return;
+    if (!el || !loaded || empty) return;
     el.replaceChildren();
-    const lang = languageExtension(languageFor(target.path));
+    const lang = languageExtension(languageFor(path));
+    const shared = [EditorState.readOnly.of(true), EditorView.editable.of(false), drawSelection(), lineNumbers(), theme, syntaxHighlighting(diffHighlight)];
     if (mode === "side") {
       const mv = new MergeView({
-        a: { doc: loaded.old, extensions: [EditorState.readOnly.of(true), EditorView.editable.of(false), lineNumbers(), lang, theme, syntaxHighlighting(diffHighlight)] },
-        b: { doc: loaded.now, extensions: [EditorState.readOnly.of(true), EditorView.editable.of(false), lineNumbers(), lang, theme, syntaxHighlighting(diffHighlight)] },
+        a: { doc: loaded.old, extensions: [...shared, lang] },
+        b: { doc: loaded.now, extensions: [...shared, lang] },
         parent: el,
         highlightChanges: true,
         gutter: true,
@@ -123,12 +148,9 @@ export function DiffView({ ws, target, onClose, onChanged }: Props) {
       state: EditorState.create({
         doc: loaded.text || "(no differences)",
         extensions: [
-          EditorState.readOnly.of(true),
-          EditorView.editable.of(false),
+          ...shared,
           EditorView.lineWrapping,
           StreamLanguage.define(diffMode),
-          syntaxHighlighting(diffHighlight),
-          theme,
           EditorView.decorations.of((v) =>
             Decoration.set(
               hunks.map((h) => {
@@ -145,10 +167,10 @@ export function DiffView({ ws, target, onClose, onChanged }: Props) {
       }),
     });
     return () => view.destroy();
-  }, [loaded, mode, target, ws.id, onChanged]);
+  }, [loaded, empty, mode, path, target.kind, ws.id, onChanged]);
 
   const title =
-    target.kind === "commit" ? `${target.short} — ${target.path}` : `${target.path} ${target.kind === "staged" ? "(staged)" : target.kind === "worktree" && target.untracked ? "(untracked)" : "(changes)"}`;
+    target.kind === "commit" ? `${target.hash?.slice(0, 7) ?? "commit"} — ${path}` : `${path} ${target.kind === "staged" ? "(staged)" : target.untracked ? "(untracked)" : "(changes)"}`;
 
   return (
     <div className="diff-view">
@@ -158,7 +180,14 @@ export function DiffView({ ws, target, onClose, onChanged }: Props) {
         <button className={mode === "side" ? "active" : ""} onClick={() => setMode("side")}>Side by side</button>
         <button onClick={onClose} title="Close">×</button>
       </div>
-      <div className="diff-host" ref={host}>{!loaded && <div className="tree-loading">Loading…</div>}</div>
+      {empty ? (
+        <div className="diff-empty">
+          <p>{path} has no {target.kind === "staged" ? "staged changes" : "changes against the working tree"} now.</p>
+          <button onClick={onClose}>Close this tab</button>
+        </div>
+      ) : (
+        <div className="diff-host" ref={host}>{!loaded && <div className="tree-loading">Loading…</div>}</div>
+      )}
     </div>
   );
 }

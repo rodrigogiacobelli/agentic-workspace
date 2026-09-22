@@ -1,7 +1,9 @@
 //! The one state object Tauri holds, and the session model it serialises.
 
 use crate::pty;
+use crate::tray;
 use crate::watch;
+use crate::windows;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -120,6 +122,25 @@ pub struct EditorTab {
     /// First visible line, restored on reopen.
     #[serde(default)]
     pub line: u32,
+    /// Set when the tab shows a diff of `path` rather than the file itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffSpec>,
+    /// A preview tab: one per group, replaced by the next single click.
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// Which diff of a path a tab shows: the working tree against the index, the
+/// index against HEAD, or one commit's change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffSpec {
+    /// `worktree`, `staged` or `commit`.
+    pub kind: String,
+    #[serde(default)]
+    pub hash: Option<String>,
+    #[serde(default)]
+    pub untracked: bool,
 }
 
 fn default_mode() -> String {
@@ -193,6 +214,9 @@ pub struct AppState {
     /// never before it.
     pub ptys: Mutex<HashMap<String, pty::Live>>,
     pub watcher: Mutex<watch::Watcher>,
+    /// Per-window geometry, restored when a window is shown again.
+    pub windows: Mutex<windows::Store>,
+    pub tray: tray::Tray,
     pub data_dir: PathBuf,
     /// Messages for the user that have no command to return through, such as
     /// a state store that could not be read at launch.
