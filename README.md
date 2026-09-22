@@ -99,5 +99,6 @@ Project knowledge lives in Lore. `lore codex list` is the index.
 
 ## Building it
 
-There is nothing to build yet. When there is, it will be `pnpm tauri dev` on the
-toolchain named in `standards-linux-desktop`.
+There is nothing to build yet. The stack is decided — Tauri v2 over a Rust
+backend, per `008-tauri-v2-on-arch-kde` — but no toolchain versions are pinned
+and no dependency list exists until there is code to build.
