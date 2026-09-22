@@ -1,0 +1,39 @@
+[package]
+name = "agentic-workspace"
+version = "0.1.0"
+description = "Several agent-driven projects open at once, switching between them for free"
+authors = ["Rodrigo Giacobelli"]
+edition = "2021"
+# Above every dependency's floor. A floor below Tauri's makes Cargo resolve
+# Tauri 1.x silently; `cargo tree -p tauri` shows what was selected.
+rust-version = "1.88"
+
+[lib]
+name = "agentic_workspace_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+# Tauri 3 alphas are on crates.io; every Tauri crate stays on the 2.x line.
+tauri = { version = "2.11", features = [] }
+tauri-plugin-clipboard-manager = "2.3"
+tauri-plugin-dialog = "2.7"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+parking_lot = "0.12"
+portable-pty = "0.9"
+notify = "8"
+glib = "0.18"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

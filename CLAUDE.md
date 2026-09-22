@@ -139,9 +139,10 @@ A native Linux desktop app for running several agent-driven projects at once.
 Two OS windows — a file tree and markdown editor, and a tabbed terminal — over a
 workspace switcher that keeps every project's terminals alive in the background.
 
-**Nothing is built yet.** This repository holds a specification and the
-decisions behind it. Treat any claim about running code as false until you have
-read the code.
+The first milestone runs: workspaces, both windows, backend-owned terminals,
+the file tree and session restore. The Rust backend is `src-tauri/src/`, the
+React frontend is `src/`. The rich markdown editor, git and agent signals are
+not built; treat any claim about them as false until you have read the code.
 
 ## Where things are
 
@@ -150,7 +151,9 @@ read the code.
 | `.lore/codex/vision/` | What the product is for |
 | `.lore/codex/decisions/` | ADRs. Read the relevant one before changing a settled shape |
 | `.lore/codex/standards/` | The rules code has to comply with |
-| `README.md` | The outward-facing description |
+| `src-tauri/src/` | Rust backend: PTYs, session store, tree, watches |
+| `src/` | React frontend: the two window shells, terminal and editor registries |
+| `README.md` | The outward-facing description, build steps and key bindings |
 | `CLAUDE.md` | This file. How to work here |
 | `working/` | Throwaway, git-ignored. Holds `acceptance-criteria.md`, the in-flight spec |
 

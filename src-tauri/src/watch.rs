@@ -1,0 +1,153 @@
+//! Filesystem watches on exactly the directories the tree shows: the active
+//! workspace's root and its expanded directories, each non-recursively. An
+//! ignored subtree is never watched unless the user expands it.
+
+use crate::session;
+use crate::state::AppState;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager};
+
+pub const EVENT_DIR_CHANGED: &str = "dir-changed";
+const SETTLE: Duration = Duration::from_millis(150);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirChanged {
+    pub workspace_id: String,
+    /// Relative to the workspace root; empty for the root itself.
+    pub dirs: Vec<String>,
+}
+
+pub struct Watcher {
+    inner: Option<RecommendedWatcher>,
+    watched: HashSet<PathBuf>,
+}
+
+impl Watcher {
+    pub fn new(app: AppHandle) -> Self {
+        let (tx, rx) = mpsc::channel::<PathBuf>();
+        let inner = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if let Ok(event) = event {
+                for path in event.paths {
+                    let _ = tx.send(path);
+                }
+            }
+        });
+        let inner = match inner {
+            Ok(w) => Some(w),
+            Err(e) => {
+                session::notice(&app, format!("File watching is unavailable: {e}"));
+                None
+            }
+        };
+        std::thread::Builder::new()
+            .name("watch-settle".into())
+            .spawn(move || settle_loop(app, rx))
+            .ok();
+        Self { inner, watched: HashSet::new() }
+    }
+
+    fn apply(&mut self, wanted: HashSet<PathBuf>, app: &AppHandle) {
+        let Some(inner) = self.inner.as_mut() else { return };
+        for path in self.watched.difference(&wanted) {
+            let _ = inner.unwatch(path);
+        }
+        let mut watched = HashSet::new();
+        for path in wanted {
+            if self.watched.contains(&path) {
+                watched.insert(path);
+                continue;
+            }
+            match inner.watch(&path, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    watched.insert(path);
+                }
+                Err(e) => session::notice(
+                    app,
+                    format!("Not watching {}: {e}", path.display()),
+                ),
+            }
+        }
+        self.watched = watched;
+    }
+}
+
+/// Coalesces bursts of events into one `dir-changed` per affected directory.
+fn settle_loop(app: AppHandle, rx: mpsc::Receiver<PathBuf>) {
+    let mut pending: HashSet<PathBuf> = HashSet::new();
+    loop {
+        let first = match rx.recv() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        pending.insert(dir_of(&first));
+        loop {
+            match rx.recv_timeout(SETTLE) {
+                Ok(p) => {
+                    pending.insert(dir_of(&p));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        emit(&app, std::mem::take(&mut pending));
+    }
+}
+
+/// The directory a change is visible in: the path itself when it is a watched
+/// directory, its parent otherwise.
+fn dir_of(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.to_path_buf())
+    }
+}
+
+fn emit(app: &AppHandle, dirs: HashSet<PathBuf>) {
+    let state = app.state::<AppState>();
+    let roots: Vec<(String, PathBuf)> = state
+        .session
+        .lock()
+        .workspaces
+        .iter()
+        .map(|w| (w.id.clone(), w.path.clone()))
+        .collect();
+    let mut per_workspace: HashMap<String, Vec<String>> = HashMap::new();
+    for dir in dirs {
+        // A directory may sit inside several workspaces (a worktree inside its
+        // parent project); the deepest root claims it, and any others as well.
+        for (id, root) in &roots {
+            if let Ok(rel) = dir.strip_prefix(root) {
+                per_workspace
+                    .entry(id.clone())
+                    .or_default()
+                    .push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+    for (workspace_id, dirs) in per_workspace {
+        let _ = app.emit(EVENT_DIR_CHANGED, DirChanged { workspace_id, dirs });
+    }
+}
+
+/// Makes the watched set match the active workspace's root and expansions.
+pub fn sync(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let wanted: HashSet<PathBuf> = {
+        let session = state.session.lock();
+        match session.active.as_deref().and_then(|id| session.workspace(id)) {
+            Some(ws) if ws.path.is_dir() => std::iter::once(ws.path.clone())
+                .chain(ws.expanded.iter().map(|rel| ws.path.join(rel)))
+                .filter(|p| p.is_dir())
+                .collect(),
+            _ => HashSet::new(),
+        }
+    };
+    state.watcher.lock().apply(wanted, app);
+}

@@ -3,8 +3,10 @@
 A native Linux desktop app for running several agent-driven projects at once —
 without losing the one you just switched away from.
 
-> **Status: specification.** The design is settled and written down; no code
-> exists yet. `.lore/codex/` holds the decisions behind it.
+> **Status: first milestone.** Workspaces, the two windows, terminals that
+> survive a switch, the file tree and session restore run. The editor is a
+> plain source editor until the editor milestone lands. `.lore/codex/` holds
+> the decisions behind it.
 
 ---
 
@@ -101,6 +103,45 @@ Project knowledge lives in Lore. `lore codex list` is the index.
 
 ## Building it
 
-There is nothing to build yet. The stack is decided — Tauri v2 over a Rust
-backend, per `008-tauri-v2-on-arch-kde` — but no toolchain versions are pinned
-and no dependency list exists until there is code to build.
+Arch / CachyOS:
+
+```bash
+sudo pacman -S --needed base-devel webkit2gtk-4.1 git
+```
+
+Rust via [rustup](https://rustup.rs) (1.88 or newer) and Node with pnpm.
+
+> **Fish users:** `~/.cargo/env` is bash syntax and errors under fish. Use
+> `source ~/.cargo/env.fish`, or persist it with `fish_add_path ~/.cargo/bin`.
+
+```bash
+pnpm install
+pnpm tauri dev          # development: both windows, hot reload
+pnpm release            # deb / rpm / AppImage under src-tauri/target/release/bundle/
+```
+
+`pnpm release` sets `NO_STRIP=1` and `APPIMAGE_EXTRACT_AND_RUN=1` for the
+AppImage target; see `standards-linux-desktop` for why. The app writes its
+session and settings to `~/.local/share/dev.agenticworkspace.app/` and its
+desktop entry and icon under `~/.local/share/` at every launch.
+
+```bash
+cd src-tauri && cargo test --lib     # unit tests; no compositor or PTY needed
+```
+
+## Keys
+
+| Key | Where | Does |
+|---|---|---|
+| `Ctrl+Shift+P` | both | Switch workspace |
+| `Ctrl+Shift+Space` | both | Focus the other window |
+| `Ctrl+Q` | both | Quit |
+| `Ctrl+Shift+T` / `Ctrl+Shift+W` | terminal | New / close terminal tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | both | Next / previous tab |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | terminal | Copy / paste |
+| `Ctrl+Shift+F` | terminal | Search scrollback |
+| `Ctrl+P` | workspace | Quick open a file |
+| `Ctrl+S` / `Ctrl+W` | workspace | Save / close the editor tab |
+| `Ctrl+Alt+Shift+C` | workspace | Copy the selected path, relative to the workspace |
+
+Double-click a terminal tab to rename it; drag tabs to reorder them.

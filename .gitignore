@@ -13,3 +13,6 @@ target/
 *.swp
 *~
 .DS_Store
+
+# Tauri
+src-tauri/gen/schemas/
