@@ -1,0 +1,15 @@
+# Throwaway files — scratch scripts, experiments, one-off output, agent
+# scratchpads. Nothing here is ever committed. See standards-repository.
+**/working/**
+
+# Node
+node_modules/
+dist/
+
+# Rust
+target/
+
+# Editor and OS noise
+*.swp
+*~
+.DS_Store
