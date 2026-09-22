@@ -1,0 +1,26 @@
+# Created by Lore automatically.
+*
+!.gitignore
+!config.toml
+!custom-schemas
+!custom-schemas/**
+!codex
+!codex/**
+!artifacts
+!artifacts/**
+artifacts/default/
+!doctrines
+!doctrines/**
+doctrines/default/
+!watchers
+!watchers/**
+watchers/default/
+!rites
+!rites/**
+!skills
+!skills/**
+!index
+!index/**
+index/codex.json
+GETTING-STARTED.md
+LORE-AGENT.md

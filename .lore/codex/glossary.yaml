@@ -1,0 +1,14 @@
+# Project glossary — see the Glossary section of .lore/codex/codex.md.
+# Before adding a term, run: `lore artifact show glossary-design`.
+# Auto-surfaced on `lore codex show`. Toggle via .lore/config.toml.
+items:
+  - keyword: quiet
+    definition: >-
+      The state of a terminal that produced output and then produced none for
+      the configured threshold. Quiet is not the same as idle: a terminal
+      sitting at a prompt having produced nothing since it was last viewed is
+      idle and raises no notification. Quiet is the observable sign that an
+      agent finished or is waiting for an answer.
+    aliases:
+      - goes quiet
+      - quiet threshold
