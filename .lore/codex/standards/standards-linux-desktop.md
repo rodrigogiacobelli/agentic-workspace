@@ -9,6 +9,7 @@ related:
   - 008-tauri-v2-on-arch-kde
   - 001-two-os-windows
   - standards-code
+  - operations-running-agentic-workspace
 ---
 
 # Linux desktop standard
