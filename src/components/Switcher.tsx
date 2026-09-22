@@ -1,11 +1,14 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, events } from "../api";
-import type { Session, WindowRole } from "../types";
-import { Dropdown } from "./Menu";
+import { report } from "../notice";
+import type { Session, WindowRole, Workspace } from "../types";
+import { ContextMenu } from "./Menu";
 import { PanelsMenu } from "./PanelsMenu";
 import { Prompt } from "./Prompt";
+
+export { report };
 
 interface Props {
   session: Session;
@@ -22,39 +25,37 @@ interface Props {
 export function Switcher({ session, role, unsaved, onSettings }: Props) {
   const active = session.workspaces.find((w) => w.id === session.active);
   const other: WindowRole = role === "terminal" ? "workspace" : "terminal";
-  const [renaming, setRenaming] = useState(false);
+  const [renaming, setRenaming] = useState<Workspace | null>(null);
   const [maximized, setMaximized] = useState(false);
 
+  // The window's own border and resize band exist only while it is not
+  // maximised; the root carries the state for the stylesheet.
   useEffect(() => {
     const check = () => api.windowMaximized().then(setMaximized).catch(() => {});
     void check();
     const unlisten = events.onWindowResized(() => void check());
     return () => { void unlisten.then((u) => u()); };
   }, []);
+  useEffect(() => { document.documentElement.dataset.maximized = maximized ? "true" : "false"; }, [maximized]);
 
   const addFolder = async () => {
     const picked = await open({ directory: true, multiple: false, title: "Add a workspace folder" });
     if (typeof picked === "string") await api.addWorkspace(picked).catch(report);
   };
 
-  const remove = async () => {
-    if (!active) return;
+  const remove = async (w: Workspace) => {
     const parts = [];
-    if (active.terminals.length) parts.push(`${active.terminals.length} terminal tab${active.terminals.length === 1 ? "" : "s"} will be closed and their processes terminated`);
-    if (unsaved) parts.push(`${unsaved} unsaved editor buffer${unsaved === 1 ? "" : "s"} will be lost`);
+    if (w.terminals.length) parts.push(`${w.terminals.length} terminal tab${w.terminals.length === 1 ? "" : "s"} will be closed and their processes terminated`);
+    if (w.id === session.active && unsaved) parts.push(`${unsaved} unsaved editor buffer${unsaved === 1 ? "" : "s"} will be lost`);
     const detail = parts.length ? `\n\n${parts.join(".\n")}.` : "";
-    const yes = await ask(`Remove workspace "${active.name}"?${detail}\n\nNo file on disk is deleted.`, {
+    const yes = await ask(`Remove workspace "${w.name}"?${detail}\n\nNo file on disk is deleted.`, {
       title: "Remove workspace",
       kind: "warning",
       okLabel: "Remove",
       cancelLabel: "Keep",
     });
-    if (yes) await api.removeWorkspace(active.id).catch(report);
+    if (yes) await api.removeWorkspace(w.id).catch(report);
   };
-
-  const options = session.workspaces.length
-    ? session.workspaces.map((w) => ({ id: w.id, label: `${w.attention && w.id !== session.active ? "● " : ""}${w.name}${w.available ? "" : " (unavailable)"}`, detail: w.path }))
-    : [{ id: "", label: "No workspaces" }];
 
   return (
     <>
@@ -68,13 +69,7 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           void api.showWindowMenu(e.clientX, e.clientY).catch(() => {});
         }}
       >
-        <Dropdown
-          className="switcher-select"
-          value={session.active ?? ""}
-          options={options}
-          onChange={(id) => void api.switchWorkspace(id).catch(report)}
-          title={active?.path}
-        />
+        <WorkspaceMenu session={session} onAdd={() => void addFolder()} onRename={setRenaming} onRemove={(w) => void remove(w)} />
         {session.workspaces.some((w) => w.attention && w.id !== session.active) && (
           <span className="attention-badge" title="A background workspace has new terminal output">●</span>
         )}
@@ -83,9 +78,6 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
             ⑂ {active.git.detached ? "detached @ " : ""}{active.git.branch ?? ""}{active.git.state ? ` · ${active.git.state}` : ""}
           </span>
         )}
-        <button onClick={() => void addFolder()} title="Add folder…">＋</button>
-        {active && <button onClick={() => void remove()} title="Remove this workspace">－</button>}
-        {active && <button onClick={() => setRenaming(true)} title="Rename this workspace">✎</button>}
         <span className="switcher-path">{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>
         {role === "workspace" && <PanelsMenu />}
         <button onClick={onSettings} title="Settings (Ctrl+,)">⚙</button>
@@ -99,13 +91,66 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
         </span>
       </header>
       {!maximized && <ResizeEdges />}
-      {renaming && active && (
+      {renaming && (
         <Prompt
           title="Workspace name"
-          initial={active.name}
-          onClose={() => setRenaming(false)}
-          onSubmit={(name) => { setRenaming(false); void api.renameWorkspace(active.id, name).catch(report); }}
+          initial={renaming.name}
+          onClose={() => setRenaming(null)}
+          onSubmit={(name) => { const w = renaming; setRenaming(null); void api.renameWorkspace(w.id, name).catch(report); }}
         />
+      )}
+    </>
+  );
+}
+
+/**
+ * The workspace selector: every workspace with its path, rename and remove
+ * on the right of each row, and a row at the bottom that adds a folder.
+ */
+function WorkspaceMenu({ session, onAdd, onRename, onRemove }: {
+  session: Session;
+  onAdd: () => void;
+  onRename: (w: Workspace) => void;
+  onRemove: (w: Workspace) => void;
+}) {
+  const [open, setOpen] = useState<{ x: number; y: number; width: number } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const active = session.workspaces.find((w) => w.id === session.active);
+  const toggle = () => {
+    if (open) { setOpen(null); return; }
+    const r = button.current?.getBoundingClientRect();
+    if (r) setOpen({ x: r.left, y: r.bottom + 2, width: Math.max(r.width, 320) });
+  };
+  const label = active ? `${active.name}${active.available ? "" : " (unavailable)"}` : "No workspace";
+  return (
+    <>
+      <button ref={button} className={`dropdown switcher-select${open ? " open" : ""}`} onClick={toggle} title={active?.path} aria-haspopup="menu" aria-expanded={!!open}>
+        <span className="dropdown-value">{label}</span>
+        <span className="dropdown-caret">▾</span>
+      </button>
+      {open && (
+        <ContextMenu x={open.x} y={open.y} onClose={() => setOpen(null)}>
+          <div className="ws-menu" style={{ minWidth: open.width }}>
+            {session.workspaces.map((w) => (
+              <div
+                key={w.id}
+                className={`ws-row${w.id === session.active ? " selected" : ""}`}
+                onClick={() => { setOpen(null); if (w.id !== session.active) void api.switchWorkspace(w.id).catch(report); }}
+                title={w.path}
+              >
+                <span className="ws-name">{w.attention && w.id !== session.active ? "● " : ""}{w.name}{w.available ? "" : " (unavailable)"}</span>
+                <span className="ws-path">{w.path}</span>
+                <span className="ws-actions" onClick={(e) => e.stopPropagation()}>
+                  <button title="Rename" onClick={() => { setOpen(null); onRename(w); }}>✎</button>
+                  <button title="Remove from the list" onClick={() => { setOpen(null); onRemove(w); }}>✕</button>
+                </span>
+              </div>
+            ))}
+            {session.workspaces.length === 0 && <div className="palette-empty">No workspaces yet</div>}
+            <hr />
+            <button className="ws-add" onClick={() => { setOpen(null); onAdd(); }}>＋ Add folder…</button>
+          </div>
+        </ContextMenu>
       )}
     </>
   );
@@ -134,9 +179,4 @@ function ResizeEdges() {
       ))}
     </>
   );
-}
-
-export function report(e: unknown): void {
-  console.error(e);
-  window.dispatchEvent(new CustomEvent("app-notice", { detail: String(e) }));
 }

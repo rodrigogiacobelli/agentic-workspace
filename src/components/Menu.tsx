@@ -50,6 +50,28 @@ export function MenuButton({ label, title, className, children }: { label: React
   );
 }
 
+/** A menu entry that opens its children beside it, for a list that can grow. */
+export function SubMenu({ label, children }: { label: ReactNode; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const list = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = list.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (r.right > window.innerWidth) { el.style.left = "auto"; el.style.right = "100%"; }
+    if (r.bottom > window.innerHeight) el.style.top = `${Math.max(-r.top, window.innerHeight - r.bottom)}px`;
+  }, [open]);
+  return (
+    <div className="submenu" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <button onClick={() => setOpen((o) => !o)}>
+        <span className="menu-label">{label}</span>
+        <span className="menu-hint">▸</span>
+      </button>
+      {open && <div ref={list} className="menu submenu-list">{children}</div>}
+    </div>
+  );
+}
+
 export interface Option {
   id: string;
   label: string;

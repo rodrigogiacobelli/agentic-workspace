@@ -5,7 +5,7 @@ import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
 import * as settings from "../settings";
 import type { PanelId, PanelLayout, Region, RepoInfo, Session, StatusEntry, Workspace } from "../types";
-import { PANELS, defaultLayout, dropPanel, hidePanel, leafKey, normalize, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
+import { PANELS, defaultLayout, dropPanel, hidePanel, leafKey, normalize, placePanel, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
 import { EditorArea, closeTab, groupOrder } from "./EditorArea";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
@@ -244,19 +244,39 @@ function RegionView({ region, layout, update, unstaged, render }: {
   const zone = useDropZone(
     (types) => types.includes(PANEL_MIME),
     (z, e) => update(dropPanel(layout, e.dataTransfer.getData(PANEL_MIME) as PanelId, region.id, z)),
+    { ignore: (target) => !!target.closest(".sidebar-tabs") },
   );
+  // A panel tab dropped on the strip lands at that position: the way to
+  // reorder tabs, or to bring a panel over from another region.
+  const [over, setOver] = useState<number | null>(null);
+  const isPanel = (e: React.DragEvent) => e.dataTransfer.types.includes(PANEL_MIME);
+  const dropAt = (e: React.DragEvent, index: number | null) => {
+    const panel = e.dataTransfer.getData(PANEL_MIME) as PanelId;
+    setOver(null);
+    if (!panel) return;
+    e.preventDefault();
+    e.stopPropagation();
+    update(placePanel(layout, panel, region.id, index));
+  };
   return (
     <aside className="region" ref={zone.ref} {...zone.handlers}>
-      <div className="sidebar-tabs">
-        {region.panels.map((id) => {
+      <div
+        className="sidebar-tabs"
+        onDragOver={(e) => { if (isPanel(e)) { e.preventDefault(); e.stopPropagation(); setOver(region.panels.length); } }}
+        onDragLeave={() => setOver(null)}
+        onDrop={(e) => dropAt(e, null)}
+      >
+        {region.panels.map((id, i) => {
           const panel = PANELS.find((p) => p.id === id);
           return (
             <div
               key={id}
               role="tab"
-              className={id === region.active ? "active" : ""}
+              className={`${id === region.active ? "active" : ""}${over === i ? " drop-before" : ""}`}
               draggable
               onDragStart={(e) => { e.dataTransfer.setData(PANEL_MIME, id); e.dataTransfer.effectAllowed = "move"; }}
+              onDragOver={(e) => { if (isPanel(e)) { e.preventDefault(); e.stopPropagation(); setOver(i); } }}
+              onDrop={(e) => dropAt(e, i)}
               onClick={() => update(setActivePanel(layout, region.id, id))}
               title={panel?.hotkey}
             >

@@ -58,8 +58,9 @@ export async function init(): Promise<Settings> {
 }
 
 export async function update(patch: Partial<Settings>): Promise<void> {
-  if (!current) return;
-  const next = await api.updateSettings({ ...current, ...patch });
+  // A page that lost its snapshot — a dev-server reload mid-session — starts from the store.
+  const base = current ?? (await api.getSettings());
+  const next = await api.updateSettings({ ...base, ...patch });
   apply(next);
 }
 

@@ -136,13 +136,30 @@ export function dropPanel(layout: PanelLayout, panel: PanelId, targetKey: string
   return normalize({ root, hidden: layout.hidden.filter((p) => p !== panel), lastRegion: layout.lastRegion });
 }
 
+function mapRegion(node: DockNode, regionId: string, f: (r: Region) => Region): DockNode {
+  if (node.kind === "region") return node.id === regionId ? f(node) : node;
+  if (node.kind === "split") return { ...node, children: (node as SplitNode<DockLeaf>).children.map((c) => mapRegion(c, regionId, f)) };
+  return node;
+}
+
 export function setActivePanel(layout: PanelLayout, regionId: string, panel: PanelId): PanelLayout {
-  const walk = (node: DockNode): DockNode => {
-    if (node.kind === "region") return node.id === regionId && node.panels.includes(panel) ? { ...node, active: panel } : node;
-    if (node.kind === "split") return { ...node, children: (node as SplitNode<DockLeaf>).children.map(walk) };
-    return node;
-  };
-  return { ...layout, root: walk(layout.root) };
+  return { ...layout, root: mapRegion(layout.root, regionId, (r) => (r.panels.includes(panel) ? { ...r, active: panel } : r)) };
+}
+
+/**
+ * Puts a panel at a position in a region's tab strip — before the tab at
+ * `index`, or last — moving it from wherever it was, and makes it active.
+ */
+export function placePanel(layout: PanelLayout, panel: PanelId, regionId: string, index: number | null): PanelLayout {
+  const target = regions(layout.root).find((r) => r.id === regionId);
+  if (!target) return layout;
+  const from = target.panels.indexOf(panel);
+  const rest = target.panels.filter((p) => p !== panel);
+  const at = index === null ? rest.length : Math.min(from >= 0 && index > from ? index - 1 : index, rest.length);
+  const panels = [...rest];
+  panels.splice(at, 0, panel);
+  const root = mapRegion(withoutPanel(layout.root, panel), regionId, (r) => ({ ...r, panels, active: panel }));
+  return normalize({ root, hidden: layout.hidden.filter((p) => p !== panel), lastRegion: layout.lastRegion });
 }
 
 export function hidePanel(layout: PanelLayout, panel: PanelId): PanelLayout {

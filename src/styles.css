@@ -43,7 +43,10 @@ input {
 }
 input:focus { border-color: var(--accent); }
 
-.app { display: flex; flex-direction: column; height: 100%; }
+/* An undecorated window has no frame of its own; the border is what keeps two
+ * overlapping windows apart. It goes when the window is maximised. */
+.app { display: flex; flex-direction: column; height: 100%; border: 1px solid var(--fg-faint); }
+:root[data-maximized="true"] .app { border: none; }
 
 /* The title row: app-drawn in place of the compositor's title bar (CHR-01). */
 .switcher {
@@ -59,6 +62,17 @@ input:focus { border-color: var(--accent); }
 }
 .switcher > button { padding: 0 6px; height: 22px; line-height: 20px; }
 .switcher-select { font-weight: 600; min-width: 160px; max-width: 260px; }
+.ws-menu { display: flex; flex-direction: column; max-width: 560px; }
+.ws-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.ws-row:hover { background: var(--bg-hover); }
+.ws-row.selected .ws-name { color: var(--accent); }
+.ws-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-path { grid-column: 1; color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 2px; visibility: hidden; }
+.ws-row:hover .ws-actions { visibility: visible; }
+.ws-actions button { padding: 0 6px; color: var(--fg-dim); }
+.ws-actions button:hover { color: var(--fg); }
+.ws-add { text-align: left; }
 .switcher-path { flex: 1; align-self: stretch; display: flex; align-items: center; color: var(--fg-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .win-controls { display: flex; align-self: stretch; margin-left: 4px; }
 .win-controls button { width: 40px; height: 30px; padding: 0; border-radius: 0; color: var(--fg-dim); font-size: 12px; }
@@ -74,6 +88,12 @@ input:focus { border-color: var(--accent); }
 .resize-sw { bottom: 0; left: 0; width: 10px; height: 10px; cursor: nesw-resize; }
 .resize-nw { top: 0; left: 0; width: 10px; height: 10px; cursor: nwse-resize; }
 .resize-se { bottom: 0; right: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+.menu button:disabled { color: var(--fg-faint); cursor: default; }
+.menu button:disabled:hover { background: transparent; }
+.submenu { position: relative; display: flex; flex-direction: column; }
+.submenu > button { width: 100%; }
+.submenu-list { position: absolute; left: 100%; top: -4px; min-width: 160px; }
+.sidebar-tabs [role="tab"].drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .menu-check { display: inline-block; width: 16px; color: var(--accent); }
 .menu-label { flex: 1; }
 .menu-hint { color: var(--fg-dim); font-size: 11px; margin-left: 16px; }

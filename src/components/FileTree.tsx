@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
 import type { Entry, StatusEntry, View, Workspace } from "../types";
-import { ContextMenu, Dropdown } from "./Menu";
+import { ContextMenu, Dropdown, SubMenu } from "./Menu";
 import { Prompt } from "./Prompt";
 import { FILE_MIME } from "./SplitTree";
 import { report } from "./Switcher";
@@ -295,7 +295,6 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
     { id: NEW_VIEW, label: "New view…" },
   ];
 
-  const sendTargets = (path: string) => ws.views.filter((v) => !v.entries.includes(path));
   const citation = (e: Entry) => (e.isDir ? `${e.path}/` : e.path);
   /** What Quote to AI cites: the multi-selection in tree order, or the one row. */
   const quoteTargets = (e: Entry): string[] => {
@@ -359,10 +358,18 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
             <>
               <hr />
               <button onClick={() => { onQuote(quoteTargets(menu.entry!)); setMenu(null); }}>Quote to AI{multi.size > 1 && multi.has(menu.entry.path) ? ` (${multi.size} files)` : ""}</button>
-              {sendTargets(menu.entry.path).map((v) => (
-                <button key={v.id} onClick={() => { void api.viewAdd(ws.id, v.id, menu.entry!.path).catch(report); setMenu(null); }}>Send to {v.name} view</button>
-              ))}
-              <button onClick={() => { setDialog({ kind: "new-view", then: menu.entry!.path }); setMenu(null); }}>Send to a new view…</button>
+              <SubMenu label="Send to view">
+                {ws.views.map((v) => {
+                  const there = v.entries.includes(menu.entry!.path);
+                  return (
+                    <button key={v.id} disabled={there} onClick={() => { void api.viewAdd(ws.id, v.id, menu.entry!.path).catch(report); setMenu(null); }}>
+                      <span className="menu-label">{v.name}</span>{there && <span className="menu-hint">already there</span>}
+                    </button>
+                  );
+                })}
+                {ws.views.length > 0 && <hr />}
+                <button onClick={() => { setDialog({ kind: "new-view", then: menu.entry!.path }); setMenu(null); }}>New view…</button>
+              </SubMenu>
               <hr />
               <button onClick={() => { setDialog({ kind: "rename", entry: menu.entry! }); setMenu(null); }}>Rename…</button>
               <button onClick={() => { void api.duplicateEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Duplicate</button>

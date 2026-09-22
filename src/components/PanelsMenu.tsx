@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import * as settings from "../settings";
 import { PANELS, defaultLayout, hidePanel, normalize, showPanel } from "./dock";
 import { MenuButton } from "./Menu";
-import { report } from "./Switcher";
+import { report } from "../notice";
 
 /** The View menu: which panels are shown, and the way back for a hidden one (DOCK-09, DOCK-11). */
 export function PanelsMenu() {
