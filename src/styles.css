@@ -393,3 +393,8 @@ main { flex: 1; display: flex; min-height: 0; }
 .cm-blame-gutter .cm-blame-line { display: inline-block; width: 220px; padding: 0 8px; color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .statusbar button { padding: 0 6px; font-size: 11px; color: var(--fg-dim); }
 .statusbar button.active { color: var(--fg); background: var(--bg-hover); }
+.setting-row { display: flex; gap: 6px; align-items: center; }
+.setting-row select { width: 180px; }
+.setting-row button { border: 1px solid var(--border); }
+.setting button { border: 1px solid var(--border); }
+.outline .tree-row { padding-top: 3px; padding-bottom: 3px; }

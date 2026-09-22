@@ -6,7 +6,7 @@ use crate::state::AppState;
 use crate::tree;
 use anyhow::{Context, Result};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[tauri::command]
 pub fn read_file(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<String, String> {
@@ -52,4 +52,50 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+// --- Drafts: unsaved buffers, kept so a crash loses nothing -------------------
+
+/// FNV-1a over the absolute path: stable across builds, unlike `DefaultHasher`.
+fn draft_name(abs: &Path) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in abs.to_string_lossy().as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}.txt")
+}
+
+fn draft_path(state: &AppState, workspace_id: &str, path: &str) -> Result<PathBuf, String> {
+    let (_, abs) = tree::resolve(state, workspace_id, path).map_err(|e| format!("{e:#}"))?;
+    Ok(state.data_dir.join("drafts").join(draft_name(&abs)))
+}
+
+#[tauri::command]
+pub fn save_draft(state: tauri::State<AppState>, workspace_id: String, path: String, content: String) -> Result<(), String> {
+    let target = draft_path(&state, &workspace_id, &path)?;
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    write_atomic(&target, content.as_bytes()).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn read_draft(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<Option<String>, String> {
+    let target = draft_path(&state, &workspace_id, &path)?;
+    match std::fs::read_to_string(&target) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn delete_draft(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {
+    let target = draft_path(&state, &workspace_id, &path)?;
+    match std::fs::remove_file(&target) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }

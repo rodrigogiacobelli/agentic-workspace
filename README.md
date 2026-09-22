@@ -136,6 +136,7 @@ cd src-tauri && cargo test --lib     # unit tests; no compositor or PTY needed
 | `Ctrl+Shift+P` | both | Switch workspace |
 | `Ctrl+Shift+Space` | both | Focus the other window |
 | `Ctrl+Q` | both | Quit |
+| `Ctrl+Alt+A` | anywhere | Raise the window you last used (bound through the desktop portal; reassign it in System Settings → Shortcuts) |
 | `Ctrl+Shift+T` / `Ctrl+Shift+W` | terminal | New / close terminal tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | both | Next / previous tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | terminal | Copy / paste |
@@ -151,6 +152,10 @@ In the rendered markdown view, syntax shows on the lines the cursor touches and
 is hidden elsewhere; `Ctrl`+click follows a link. Paste an image or drop a file
 onto a document and it lands in the workspace's clipboard folder with a link
 relative to the note.
+
+Themes: four built in, and Settings → Import… reads a VS Code theme from a
+`.json` or a `.vsix`, reporting what it could not map. A theme can be set per
+workspace so projects are distinguishable at a glance.
 
 Git runs through the `git` binary on your machine, so hooks run and your
 configuration applies. Desktop notifications go through `notify-send`; clicking

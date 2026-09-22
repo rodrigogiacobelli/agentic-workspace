@@ -143,9 +143,9 @@ Three milestones run: workspaces, both windows, backend-owned terminals, the
 file tree, session restore, the three-mode markdown editor with clipboard
 assets and external-change handling, git with branches and worktrees, and the
 two agent signals. The Rust backend is `src-tauri/src/`, the React frontend is
-`src/`, the editor is `src/editor/`. Theme import, the global hotkey and editor
-groups are not built; treat any claim about them as false until you have read
-the code.
+`src/`, the editor is `src/editor/`. Editor groups, clickable terminal paths,
+mermaid, the grammar importer and HTML preview are not built; treat any claim
+about them as false until you have read the code.
 
 ## Where things are
 

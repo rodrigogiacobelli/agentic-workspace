@@ -2,11 +2,33 @@
 // the editors whenever the backend publishes a change.
 
 import { api, events } from "./api";
-import { themeById, type Theme } from "./themes";
-import type { Settings } from "./types";
+import { setImported, themeById, type Theme } from "./themes";
+import type { ImportedTheme, Settings } from "./types";
 
 let current: Settings | null = null;
+let activePath: string | null = null;
 const listeners = new Set<(s: Settings) => void>();
+
+function asTheme(t: ImportedTheme): Theme {
+  return { id: t.id, name: `${t.name} (imported)`, dark: t.dark, ui: t.ui as Theme["ui"], terminal: t.terminal as Theme["terminal"], syntax: t.syntax as Theme["syntax"] };
+}
+
+export async function reloadImported(): Promise<void> {
+  setImported((await api.listThemes()).map(asTheme));
+  if (current) apply(current);
+}
+
+/** The active workspace's path, so its theme override can apply. */
+export function setActivePath(path: string | null): void {
+  if (path === activePath) return;
+  activePath = path;
+  if (current) apply(current);
+}
+
+export function activeThemeId(): string {
+  const override = activePath ? current?.workspaces[activePath]?.theme : null;
+  return override || current?.theme || "graphite";
+}
 
 export const monospaceFallback =
   '"JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", "Cascadia Code", "DejaVu Sans Mono", monospace';
@@ -17,7 +39,7 @@ export function get(): Settings | null {
 }
 
 export function theme(): Theme {
-  return themeById(current?.theme ?? "graphite");
+  return themeById(activeThemeId());
 }
 
 export function subscribe(cb: (s: Settings) => void): () => void {
@@ -28,6 +50,8 @@ export function subscribe(cb: (s: Settings) => void): () => void {
 
 export async function init(): Promise<Settings> {
   const s = await api.getSettings();
+  current = s;
+  await reloadImported().catch(() => {});
   apply(s);
   void events.onSettings(apply);
   return s;
@@ -41,7 +65,7 @@ export async function update(patch: Partial<Settings>): Promise<void> {
 
 function apply(s: Settings): void {
   current = s;
-  const t = themeById(s.theme);
+  const t = themeById(activeThemeId());
   const root = document.documentElement.style;
   root.setProperty("--bg", t.ui.bg);
   root.setProperty("--bg-raised", t.ui.bgRaised);

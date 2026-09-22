@@ -1,6 +1,10 @@
+import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { api, events } from "../api";
 import * as settings from "../settings";
-import { themes } from "../themes";
-import type { Settings, Workspace } from "../types";
+import { allThemes, isImported } from "../themes";
+import type { HotkeyStatus, Settings, Workspace } from "../types";
+import { report } from "./Switcher";
 
 interface Props {
   current: Settings;
@@ -9,11 +13,46 @@ interface Props {
 }
 
 export function SettingsDialog({ current, workspace, onClose }: Props) {
+  const [hotkey, setHotkey] = useState<HotkeyStatus | null>(null);
+  const [, bump] = useState(0);
+  useEffect(() => {
+    api.hotkeyStatus().then(setHotkey).catch(() => {});
+    const unlisten = events.onHotkey(setHotkey);
+    return () => { void unlisten.then((u) => u()); };
+  }, []);
+
   const set = (patch: Partial<Settings>) => void settings.update(patch);
   const wsKey = workspace?.path ?? "";
   const wsSettings = current.workspaces[wsKey] ?? { clipboardDir: null, notifications: null, theme: null };
   const setWs = (patch: Partial<typeof wsSettings>) =>
     set({ workspaces: { ...current.workspaces, [wsKey]: { ...wsSettings, ...patch } } });
+
+  const importTheme = async () => {
+    const picked = await open({ multiple: false, title: "Import a VS Code theme", filters: [{ name: "Theme", extensions: ["json", "jsonc", "vsix"] }] });
+    if (typeof picked !== "string") return;
+    try {
+      const imported = await api.importThemes(picked);
+      await settings.reloadImported();
+      bump((n) => n + 1);
+      for (const t of imported) {
+        const detail = t.report.length ? `\n${t.report.map((r) => `• ${r}`).join("\n")}` : "\nEverything mapped.";
+        report(`Imported theme "${t.name}".${detail}`);
+      }
+      if (imported[0]) set({ theme: imported[0].id });
+    } catch (e) {
+      report(`Theme import failed: ${String(e)}`);
+    }
+  };
+
+  const removeTheme = async () => {
+    try {
+      await api.deleteTheme(current.theme);
+      await settings.reloadImported();
+      bump((n) => n + 1);
+    } catch (e) {
+      report(e);
+    }
+  };
 
   const text = (label: string, value: string, onChange: (v: string) => void, placeholder = "") => (
     <label className="setting">
@@ -41,10 +80,22 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
         <h3>Appearance</h3>
         <label className="setting">
           <span>Theme</span>
-          <select value={current.theme} onChange={(e) => set({ theme: e.target.value })}>
-            {themes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
+          <span className="setting-row">
+            <select value={current.theme} onChange={(e) => set({ theme: e.target.value })}>
+              {allThemes().map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <button onClick={() => void importTheme()} title="Import a VS Code theme (.json or .vsix)">Import…</button>
+            {isImported(current.theme) && <button onClick={() => void removeTheme()} title="Remove this imported theme">Remove</button>}
+          </span>
         </label>
+        <h3>Raise from anywhere</h3>
+        {text("Preferred key (portal syntax, e.g. CTRL+ALT+a)", current.globalHotkey, (v) => set({ globalHotkey: v }))}
+        <div className="setting">
+          <span>
+            {hotkey?.active ? `Bound to ${hotkey.trigger}` : hotkey?.message ?? "Binding…"}
+          </span>
+          <button onClick={() => void api.configureHotkey()}>Open the desktop's shortcut editor</button>
+        </div>
         <h3>Terminal</h3>
         {text("Font family", current.terminalFontFamily, (v) => set({ terminalFontFamily: v }), "system monospace")}
         {number("Font size", current.terminalFontSize, (v) => set({ terminalFontSize: v }), 8, 32)}
@@ -64,6 +115,13 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
           <>
             <h3>Workspace: {workspace.name}</h3>
             {text("Clipboard folder (relative to the workspace)", wsSettings.clipboardDir ?? "", (v) => setWs({ clipboardDir: v || null }), "clipboard")}
+            <label className="setting">
+              <span>Theme for this workspace</span>
+              <select value={wsSettings.theme ?? ""} onChange={(e) => setWs({ theme: e.target.value || null })}>
+                <option value="">Global theme</option>
+                {allThemes().map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </label>
             <label className="setting">
               <span>Notifications</span>
               <select value={wsSettings.notifications === null ? "inherit" : wsSettings.notifications ? "on" : "off"} onChange={(e) => setWs({ notifications: e.target.value === "inherit" ? null : e.target.value === "on" })}>

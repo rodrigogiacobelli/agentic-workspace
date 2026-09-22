@@ -49,6 +49,21 @@ export const themes: Theme[] = [
   },
 ];
 
+let imported: Theme[] = [];
+
+/** Themes read out of VS Code packages, kept beside the built-ins. */
+export function setImported(list: Theme[]): void {
+  imported = list;
+}
+
+export function allThemes(): Theme[] {
+  return [...themes, ...imported];
+}
+
+export function isImported(id: string): boolean {
+  return imported.some((t) => t.id === id);
+}
+
 export function themeById(id: string): Theme {
-  return themes.find((t) => t.id === id) ?? themes[0];
+  return themes.find((t) => t.id === id) ?? imported.find((t) => t.id === id) ?? themes[0];
 }

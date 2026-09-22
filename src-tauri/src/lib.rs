@@ -2,12 +2,14 @@ mod agent;
 mod assets;
 mod desktop;
 mod git;
+mod hotkey;
 mod files;
 mod pty;
 mod session;
 mod settings;
 mod state;
 mod store;
+mod themes;
 mod tree;
 mod watch;
 
@@ -54,6 +56,8 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         attention: Mutex::new(std::collections::HashSet::new()),
         activities: Mutex::new(HashMap::new()),
         git: Mutex::new(HashMap::new()),
+        hotkey: Mutex::new(hotkey::Hotkey::default()),
+        last_focused: Mutex::new("workspace".into()),
         ptys: Mutex::new(HashMap::new()),
         watcher: Mutex::new(watch::Watcher::new(handle.clone())),
         data_dir,
@@ -72,6 +76,8 @@ fn setup(app: &mut tauri::App) -> Result<()> {
 
     let quiet = handle.clone();
     std::thread::Builder::new().name("quiet-watch".into()).spawn(move || agent::quiet_loop(quiet)).ok();
+    let portal = handle.clone();
+    std::thread::Builder::new().name("global-hotkey".into()).spawn(move || hotkey::run_blocking(portal)).ok();
 
     // Terminal working directories change with no event to observe; a periodic
     // save keeps the session file close to the truth if the process is killed.
@@ -154,11 +160,15 @@ pub fn run() {
             setup(app).map_err(|e| -> Box<dyn std::error::Error> { format!("{e:#}").into() })?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 on_close_requested(window.app_handle(), window.label());
             }
+            WindowEvent::Focused(true) => {
+                *window.app_handle().state::<AppState>().last_focused.lock() = window.label().to_string();
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             session::get_session,
@@ -174,6 +184,11 @@ pub fn run() {
             session::set_editor_view,
             settings::get_settings,
             settings::update_settings,
+            themes::import_themes,
+            themes::list_themes,
+            themes::delete_theme,
+            hotkey::hotkey_status,
+            hotkey::configure_hotkey,
             assets::save_asset,
             assets::import_asset,
             git::git_info,
@@ -225,6 +240,9 @@ pub fn run() {
             tree::search_project,
             files::read_file,
             files::open_externally,
+            files::save_draft,
+            files::read_draft,
+            files::delete_draft,
             files::write_file,
         ])
         .build(tauri::generate_context!())

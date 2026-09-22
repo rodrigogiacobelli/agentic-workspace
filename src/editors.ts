@@ -67,6 +67,9 @@ export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElemen
     d.subscribe(notify);
     entry = { doc: d };
     registry.set(tab.id, entry);
+    const draft = await api.readDraft(ws.id, tab.path).catch(() => null);
+    if (draft !== null && draft !== text) d.restoreDraft(draft);
+    else if (draft !== null) void api.deleteDraft(ws.id, tab.path).catch(() => {});
     notify();
   }
   if ("doc" in entry) {

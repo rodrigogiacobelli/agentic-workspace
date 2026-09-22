@@ -129,6 +129,9 @@ pub struct AppState {
     pub activities: crate::agent::Activities,
     /// Repository summaries keyed by workspace id, refreshed on git changes.
     pub git: Mutex<HashMap<String, GitSummary>>,
+    pub hotkey: Mutex<crate::hotkey::Hotkey>,
+    /// The window label that last had focus; the global hotkey raises it.
+    pub last_focused: Mutex<String>,
     /// Live pseudoterminals keyed by terminal tab id. Locked after `session`,
     /// never before it.
     pub ptys: Mutex<HashMap<String, pty::Live>>,

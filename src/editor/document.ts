@@ -109,6 +109,9 @@ export class Doc {
   conflict: string | null = null;
   reloadedAt = 0;
   diffOpen = false;
+  /** Unsaved changes were restored from a draft after a crash. */
+  restored = false;
+  private draftTimer: number | null = null;
   private root: HTMLDivElement | null = null;
   private listeners = new Set<() => void>();
   private mergeComp = new Compartment();
@@ -230,6 +233,7 @@ export class Doc {
       if (dirty !== this.dirty) this.dirty = dirty;
       const fromDisk = u.transactions.some((tr) => tr.annotation(external));
       if (dirty && !fromDisk) this.scheduleAutosave();
+      this.scheduleDraft();
     }
     if (u.docChanged || u.selectionSet) this.emit();
   }
@@ -349,6 +353,25 @@ export class Doc {
     }, now ? 0 : 1500);
   }
 
+  /** Keeps a copy of unsaved changes on disk so a crash loses nothing. */
+  private scheduleDraft(): void {
+    if (this.draftTimer) window.clearTimeout(this.draftTimer);
+    this.draftTimer = window.setTimeout(() => {
+      this.draftTimer = null;
+      if (this.disposed) return;
+      if (this.dirty) void api.saveDraft(this.workspaceId, this.path, this.source.state.doc.toString()).catch(() => {});
+      else void api.deleteDraft(this.workspaceId, this.path).catch(() => {});
+    }, 1500);
+  }
+
+  /** Applies a draft left by a previous run as unsaved changes. */
+  restoreDraft(text: string): void {
+    if (this.source.state.doc.toString() === text) return;
+    this.source.dispatch({ changes: { from: 0, to: this.source.state.doc.length, insert: text } });
+    this.restored = true;
+    this.emit();
+  }
+
   private scheduleAutosave(): void {
     const s = settings.get();
     if (!s?.autosave) return;
@@ -363,8 +386,10 @@ export class Doc {
     this.dirty = false;
     this.detached = false;
     this.conflict = null;
+    this.restored = false;
     this.closeDiff();
     this.emit();
+    void api.deleteDraft(this.workspaceId, this.path).catch(() => {});
   }
 
   /** Applies `text` as a change set so cursor and scroll survive. */
@@ -460,6 +485,23 @@ export class Doc {
     return { line: line.number, col: head - line.from + 1 };
   }
 
+  /** Every heading in the document, in order. */
+  outline(): { level: number; text: string; from: number }[] {
+    if (!this.isMarkdown) return [];
+    const state = this.source.state;
+    const out: { level: number; text: string; from: number }[] = [];
+    syntaxTree(state).iterate({
+      enter(n) {
+        const m = /^(?:ATXHeading|SetextHeading)([1-6])$/.exec(n.name);
+        if (!m) return n.name === "Document";
+        const text = state.doc.sliceString(n.from, n.to).split("\n")[0].replace(/^#+\s*/, "").replace(/\s*#+$/, "").trim();
+        out.push({ level: Number(m[1]), text, from: n.from });
+        return false;
+      },
+    });
+    return out;
+  }
+
   /** Headings enclosing the cursor, outermost first. */
   headingTrail(): { text: string; from: number }[] {
     if (!this.isMarkdown) return [];
@@ -553,6 +595,7 @@ export class Doc {
 
   dispose(): void {
     this.disposed = true;
+    if (this.draftTimer) window.clearTimeout(this.draftTimer);
     if (this.autosaveTimer) window.clearTimeout(this.autosaveTimer);
     if (this.viewTimer) window.clearTimeout(this.viewTimer);
     this.rich?.destroy();

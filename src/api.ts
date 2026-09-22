@@ -4,8 +4,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
-  BlameLine, Branches, CommitDetail, DirChanged, Entry, LogEntry, RepoInfo, SearchHit, Session, Settings,
-  StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
+  BlameLine, Branches, CommitDetail, DirChanged, Entry, HotkeyStatus, ImportedTheme, LogEntry, RepoInfo, SearchHit,
+  Session, Settings, StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
 } from "./types";
 
 export type OutputChunk = ArrayBuffer | Uint8Array | number[];
@@ -30,6 +30,15 @@ export const api = {
     invoke<void>("set_editor_view", { workspaceId, id, mode, line }),
   focusWindow: (label: WindowRole) => invoke<void>("focus_window", { label }),
   getSettings: () => invoke<Settings>("get_settings"),
+  importThemes: (path: string) => invoke<ImportedTheme[]>("import_themes", { path }),
+  listThemes: () => invoke<ImportedTheme[]>("list_themes"),
+  deleteTheme: (id: string) => invoke<void>("delete_theme", { id }),
+  hotkeyStatus: () => invoke<HotkeyStatus>("hotkey_status"),
+  configureHotkey: () => invoke<void>("configure_hotkey"),
+  saveDraft: (workspaceId: string, path: string, content: string) =>
+    invoke<void>("save_draft", { workspaceId, path, content }),
+  readDraft: (workspaceId: string, path: string) => invoke<string | null>("read_draft", { workspaceId, path }),
+  deleteDraft: (workspaceId: string, path: string) => invoke<void>("delete_draft", { workspaceId, path }),
   updateSettings: (settings: Settings) => invoke<Settings>("update_settings", { settings }),
   /** Stores clipboard bytes; metadata travels as headers beside the raw body. */
   saveAsset: (workspaceId: string, note: string, name: string | null, mime: string, bytes: ArrayBuffer) =>
@@ -146,6 +155,8 @@ export const events = {
     listen<Settings>("settings-changed", (e) => cb(e.payload)),
   onGitChanged: (cb: (workspaceId: string) => void): Promise<UnlistenFn> =>
     listen<string>("git-changed", (e) => cb(e.payload)),
+  onHotkey: (cb: (s: HotkeyStatus) => void): Promise<UnlistenFn> =>
+    listen<HotkeyStatus>("hotkey-changed", (e) => cb(e.payload)),
 };
 
 export function toBytes(chunk: OutputChunk): Uint8Array {

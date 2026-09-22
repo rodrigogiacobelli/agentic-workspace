@@ -47,6 +47,7 @@ export function App({ role }: { role: WindowRole }) {
     .map((id) => session.workspaces.find((w) => w.id === id))
     .filter((w): w is NonNullable<typeof w> => !!w);
   const active = session.workspaces.find((w) => w.id === session.active);
+  settings.setActivePath(active?.path ?? null);
 
   return (
     <div className={`app app-${role}`}>

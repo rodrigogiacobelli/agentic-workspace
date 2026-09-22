@@ -7,6 +7,7 @@ import type { DiffTarget, RepoInfo, Session, StatusEntry, Workspace } from "../t
 import { EditorArea, closeTab } from "./EditorArea";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
+import { Outline } from "./Outline";
 import { Palette, type PaletteItem } from "./Palette";
 import { SearchPanel } from "./SearchPanel";
 import { report } from "./Switcher";
@@ -21,7 +22,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   const ws = session.workspaces.find((w) => w.id === session.active);
   const [selected, setSelected] = useState<string | null>(null);
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
-  const [sidebar, setSidebar] = useState<"files" | "search" | "git">("files");
+  const [sidebar, setSidebar] = useState<"files" | "search" | "git" | "outline">("files");
   const [diff, setDiff] = useState<DiffTarget | null>(null);
   const [gitStatus, setGitStatus] = useState<StatusEntry[]>([]);
   const [gitInfo, setGitInfo] = useState<RepoInfo | null>(null);
@@ -138,6 +139,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
           <button className={sidebar === "files" ? "active" : ""} onClick={() => setSidebar("files")}>Files</button>
           <button className={sidebar === "search" ? "active" : ""} onClick={() => setSidebar("search")} title="Ctrl+Shift+F">Search</button>
           <button className={sidebar === "git" ? "active" : ""} onClick={() => setSidebar("git")} title="Ctrl+Shift+G">Git{gitStatus.length ? ` ${gitStatus.length}` : ""}</button>
+          <button className={sidebar === "outline" ? "active" : ""} onClick={() => setSidebar("outline")}>Outline</button>
         </div>
         {!ws.available ? (
           <div className="tree-loading">The directory {ws.path} is missing.</div>
@@ -145,6 +147,8 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
           <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p) => void api.openFile(ws.id, p).catch(report)} gitStatus={gitStatus} />
         ) : sidebar === "search" ? (
           <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />
+        ) : sidebar === "outline" ? (
+          <Outline ws={ws} />
         ) : (
           <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={setDiff} onOpenFile={(p) => void api.openFile(ws.id, p).catch(report)} />
         )}

@@ -92,6 +92,7 @@ export interface Settings {
   notifications: boolean;
   quietThresholdS: number;
   assetWarnMb: number;
+  globalHotkey: string;
   languages: Record<string, string>;
   workspaces: Record<string, WorkspaceSettings>;
 }
@@ -178,3 +179,19 @@ export type DiffTarget =
   | { kind: "worktree"; path: string; untracked: boolean }
   | { kind: "staged"; path: string }
   | { kind: "commit"; hash: string; path: string; short: string };
+
+export interface HotkeyStatus {
+  active: boolean;
+  trigger: string | null;
+  message: string | null;
+}
+
+export interface ImportedTheme {
+  id: string;
+  name: string;
+  dark: boolean;
+  ui: Record<string, string>;
+  terminal: Record<string, string>;
+  syntax: Record<string, string>;
+  report: string[];
+}

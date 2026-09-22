@@ -28,6 +28,9 @@ pub struct Settings {
     pub notifications: bool,
     pub quiet_threshold_s: u32,
     pub asset_warn_mb: u32,
+    /// Preferred trigger for the raise-from-anywhere hotkey, in the portal's
+    /// syntax. The compositor may assign something else, or nothing.
+    pub global_hotkey: String,
     /// Language overrides keyed by absolute file path.
     pub languages: HashMap<String, String>,
     /// Per-workspace settings keyed by absolute directory path.
@@ -60,6 +63,7 @@ impl Default for Settings {
             notifications: true,
             quiet_threshold_s: 20,
             asset_warn_mb: 5,
+            global_hotkey: "CTRL+ALT+a".into(),
             languages: HashMap::new(),
             workspaces: HashMap::new(),
         }
@@ -101,16 +105,24 @@ pub fn get_settings(state: tauri::State<AppState>) -> Settings {
     state.settings.lock().clone()
 }
 
-#[tauri::command]
-pub fn update_settings(app: AppHandle, state: tauri::State<AppState>, settings: Settings) -> Result<Settings, String> {
-    let snapshot = {
-        let mut current = state.settings.lock();
-        *current = settings;
-        current.clone()
-    };
-    if let Err(e) = save(&state.data_dir, &snapshot) {
+pub fn save_and_emit(app: &AppHandle, state: &AppState, snapshot: &Settings) {
+    if let Err(e) = save(&state.data_dir, snapshot) {
         let _ = app.emit(EVENT_NOTICE, format!("Could not save settings: {e:#}"));
     }
-    let _ = app.emit(EVENT_CHANGED, &snapshot);
+    let _ = app.emit(EVENT_CHANGED, snapshot);
+}
+
+#[tauri::command]
+pub fn update_settings(app: AppHandle, state: tauri::State<AppState>, settings: Settings) -> Result<Settings, String> {
+    let (snapshot, hotkey_changed) = {
+        let mut current = state.settings.lock();
+        let changed = current.global_hotkey != settings.global_hotkey;
+        *current = settings;
+        (current.clone(), changed)
+    };
+    save_and_emit(&app, &state, &snapshot);
+    if hotkey_changed {
+        state.hotkey.lock().restart.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     Ok(snapshot)
 }

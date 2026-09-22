@@ -136,6 +136,9 @@ function Banner({ doc }: { doc: import("../editor/document").Doc }) {
       </div>
     );
   }
+  if (doc.restored) {
+    return <div className="banner info"><span>Unsaved changes from the previous session were restored. Save to keep them, or undo to discard.</span></div>;
+  }
   if (doc.detached) {
     return <div className="banner warn"><span>{doc.path} was deleted or moved on disk. Saving recreates it.</span></div>;
   }
