@@ -1,7 +1,7 @@
 //! Session state: the workspace list, and the one function that publishes it.
 
 use crate::pty;
-use crate::state::{AppState, DiffSpec, EditorGroup, EditorTab, Session, TerminalTab, Workspace};
+use crate::state::{AppState, DiffSpec, EditorGroup, EditorTab, Layout, Session, TerminalTab, Workspace};
 use crate::store;
 use crate::watch;
 use anyhow::{Context, Result};
@@ -134,6 +134,7 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
                     active_terminal: Some(terminal),
                     groups: Vec::new(),
                     active_group: None,
+                    layout: None,
                     split_ratio: 0.5,
                     editors: Vec::new(),
                     active_editor: None,
@@ -229,25 +230,44 @@ fn default_mode(path: &str) -> &'static str {
     if lower.ends_with(".md") || lower.ends_with(".markdown") { "rich" } else { "source" }
 }
 
+/// Puts `tab` into `group` and makes it active. A preview tab replaces the
+/// group's existing preview tab in place; a permanent one is appended.
+fn place_tab(group: &mut EditorGroup, tab: EditorTab) -> String {
+    let id = tab.id.clone();
+    if tab.preview {
+        if let Some(i) = group.editors.iter().position(|e| e.preview) {
+            group.editors[i] = tab;
+            group.active_editor = Some(id.clone());
+            return id;
+        }
+    }
+    group.editors.push(tab);
+    group.active_editor = Some(id.clone());
+    id
+}
+
 /// Opens a file in the active editor group, or focuses the tab already
-/// showing it there.
+/// showing it there. A preview open (a single click) reuses the group's
+/// preview tab; a permanent open makes an existing preview tab permanent.
 #[tauri::command]
-pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<String, String> {
+pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String, preview: bool) -> Result<String, String> {
     let id = {
         let mut session = state.session.lock();
         let ws = session
             .workspace_mut(&workspace_id)
             .ok_or_else(|| format!("no workspace {workspace_id}"))?;
         let group = ws.active_group_mut();
-        let id = match group.editors.iter().find(|e| e.path == path && e.diff.is_none()) {
-            Some(tab) => tab.id.clone(),
-            None => {
-                let id = crate::state::new_id();
-                group.editors.push(EditorTab { id: id.clone(), path: path.clone(), mode: default_mode(&path).into(), line: 0, diff: None, preview: false });
+        let id = match group.editors.iter_mut().find(|e| e.path == path && e.diff.is_none()) {
+            Some(tab) => {
+                if !preview {
+                    tab.preview = false;
+                }
+                let id = tab.id.clone();
+                group.active_editor = Some(id.clone());
                 id
             }
+            None => place_tab(group, EditorTab { id: crate::state::new_id(), path: path.clone(), mode: default_mode(&path).into(), line: 0, diff: None, preview }),
         };
-        group.active_editor = Some(id.clone());
         ws.recent_files.retain(|p| p != &path);
         ws.recent_files.insert(0, path);
         ws.recent_files.truncate(RECENT_FILES_MAX);
@@ -259,7 +279,8 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
 }
 
 /// Opens a diff of a path as a tab in the active group, beside the file tabs,
-/// or focuses the tab already showing that diff.
+/// or focuses the tab already showing that diff. A status diff is a preview
+/// tab; a commit's diff is permanent, since it was asked for by name.
 #[tauri::command]
 pub fn open_diff(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String, diff: DiffSpec) -> Result<String, String> {
     let id = {
@@ -268,19 +289,37 @@ pub fn open_diff(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
             .workspace_mut(&workspace_id)
             .ok_or_else(|| format!("no workspace {workspace_id}"))?;
         let group = ws.active_group_mut();
-        let id = match group.editors.iter().find(|e| e.path == path && e.diff.as_ref() == Some(&diff)) {
-            Some(tab) => tab.id.clone(),
-            None => {
-                let id = crate::state::new_id();
-                group.editors.push(EditorTab { id: id.clone(), path, mode: "source".into(), line: 0, diff: Some(diff), preview: false });
+        match group.editors.iter().find(|e| e.path == path && e.diff.as_ref() == Some(&diff)) {
+            Some(tab) => {
+                let id = tab.id.clone();
+                group.active_editor = Some(id.clone());
                 id
             }
-        };
-        group.active_editor = Some(id.clone());
-        id
+            None => {
+                let preview = diff.kind != "commit";
+                place_tab(group, EditorTab { id: crate::state::new_id(), path, mode: "source".into(), line: 0, diff: Some(diff), preview })
+            }
+        }
     };
     publish(&app);
     Ok(id)
+}
+
+/// Makes a preview tab permanent: it was edited, double-clicked or dragged.
+#[tauri::command]
+pub fn pin_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String) {
+    let changed = {
+        let mut session = state.session.lock();
+        session
+            .workspace_mut(&workspace_id)
+            .and_then(|ws| ws.group_of_editor_mut(&id))
+            .and_then(|g| g.editors.iter_mut().find(|e| e.id == id))
+            .map(|tab| std::mem::replace(&mut tab.preview, false))
+            .unwrap_or(false)
+    };
+    if changed {
+        publish(&app);
+    }
 }
 
 /// Records how a tab is being viewed. Saved, not broadcast: scrolling is not
@@ -301,7 +340,8 @@ pub fn set_editor_view(app: AppHandle, state: tauri::State<AppState>, workspace_
     persist(&app);
 }
 
-/// Closes a tab; a group left empty closes itself unless it is the last one.
+/// Closes a tab; a group left empty closes itself unless it is the last one,
+/// and the layout collapses around it.
 #[tauri::command]
 pub fn close_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String) {
     {
@@ -315,10 +355,7 @@ pub fn close_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: S
                     group.active_editor = group.editors.get(next).map(|e| e.id.clone());
                 }
             }
-            if ws.groups.len() > 1 {
-                ws.groups.retain(|g| !g.editors.is_empty());
-            }
-            ws.ensure_groups();
+            ws.prune_groups();
         }
     }
     watch::sync(&app);
@@ -355,85 +392,168 @@ pub fn set_active_group(app: AppHandle, state: tauri::State<AppState>, workspace
     publish(&app);
 }
 
+/// Reorders a group's tabs. A tab dragged to a new position arrives
+/// permanent (ED-33).
 #[tauri::command]
-pub fn reorder_editors(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, group_id: String, ids: Vec<String>) {
+pub fn reorder_editors(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, group_id: String, ids: Vec<String>, moved: Option<String>) {
     {
         let mut session = state.session.lock();
         if let Some(group) = session.workspace_mut(&workspace_id).and_then(|ws| ws.group_mut(&group_id)) {
             reorder(&mut group.editors, &ids, |e| &e.id);
+            if let Some(tab) = moved.and_then(|m| group.editors.iter_mut().find(|e| e.id == m)) {
+                tab.preview = false;
+            }
         }
     }
     publish(&app);
 }
 
-/// Opens a second group beside the active one showing the same file, so two
-/// views — or two files — sit side by side.
+/// A new group beside `beside`, split off in `direction` (`row` or `column`),
+/// after it unless `before`.
+fn add_group(ws: &mut Workspace, beside: &str, direction: &str, before: bool, editors: Vec<EditorTab>) -> String {
+    ws.ensure_groups();
+    let id = crate::state::new_id();
+    let active_editor = editors.first().map(|e| e.id.clone());
+    ws.groups.push(EditorGroup { id: id.clone(), editors, active_editor });
+    if let Some(l) = ws.layout.as_mut() {
+        if !l.split_leaf(beside, direction, &id, before) {
+            // The leaf named is gone; the new group joins the root row.
+            let old = std::mem::replace(l, Layout::Group { id: String::new() });
+            *l = Layout::Split { direction: "row".into(), children: vec![old, Layout::Group { id: id.clone() }], sizes: vec![0.5, 0.5] };
+        }
+    }
+    ws.active_group = Some(id.clone());
+    id
+}
+
+/// Opens a second group to the right of the active one showing the same file,
+/// so two views — or two files — sit side by side (ED-42).
 #[tauri::command]
 pub fn split_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String) -> Result<(), String> {
     {
         let mut session = state.session.lock();
         let ws = session.workspace_mut(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
         ws.ensure_groups();
-        let (index, tab) = {
+        let beside = ws.active_group.clone().unwrap_or_default();
+        let tab = {
             let active = ws.active_group_mut();
-            let tab = active.active_editor.as_deref().and_then(|id| active.editors.iter().find(|e| e.id == id)).cloned();
-            (ws.groups.iter().position(|g| Some(&g.id) == ws.active_group.as_ref()).unwrap_or(0), tab)
+            active.active_editor.as_deref().and_then(|id| active.editors.iter().find(|e| e.id == id)).cloned()
         };
-        let id = crate::state::new_id();
         let editors = tab.map(|t| vec![EditorTab { id: crate::state::new_id(), path: t.path, mode: t.mode, line: t.line, diff: t.diff, preview: false }]).unwrap_or_default();
-        let active_editor = editors.first().map(|e| e.id.clone());
-        ws.groups.insert(index + 1, EditorGroup { id: id.clone(), editors, active_editor });
-        ws.active_group = Some(id);
+        add_group(ws, &beside, "row", false, editors);
     }
     watch::sync(&app);
     publish(&app);
     Ok(())
 }
 
-/// Moves a tab into another group, or into a new group to the right when
-/// `group_id` is empty. The tab keeps its id, so its editor state travels.
+/// Takes a tab out of its group, keeping its id so its editor state travels.
+fn take_tab(ws: &mut Workspace, id: &str) -> Option<EditorTab> {
+    let from = ws.group_of_editor_mut(id)?;
+    let pos = from.editors.iter().position(|e| e.id == id)?;
+    let mut tab = from.editors.remove(pos);
+    tab.preview = false;
+    if from.active_editor.as_deref() == Some(id) {
+        from.active_editor = from.editors.get(pos.min(from.editors.len().saturating_sub(1))).map(|e| e.id.clone());
+    }
+    Some(tab)
+}
+
+/// Moves a tab into another group, or into a new group to the right of the
+/// active one when `group_id` is empty. The tab arrives permanent.
 #[tauri::command]
 pub fn move_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String, group_id: String, index: Option<usize>) -> Result<(), String> {
     {
         let mut session = state.session.lock();
         let ws = session.workspace_mut(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
-        let tab = {
-            let Some(from) = ws.group_of_editor_mut(&id) else { return Err(format!("no editor {id}")) };
-            let pos = from.editors.iter().position(|e| e.id == id).ok_or("no such tab")?;
-            let tab = from.editors.remove(pos);
-            if from.active_editor.as_deref() == Some(&id) {
-                from.active_editor = from.editors.get(pos.min(from.editors.len().saturating_sub(1))).map(|e| e.id.clone());
-            }
-            tab
-        };
-        let target = if group_id.is_empty() {
-            let gid = crate::state::new_id();
-            ws.groups.push(EditorGroup { id: gid.clone(), editors: Vec::new(), active_editor: None });
-            gid
-        } else {
-            group_id
-        };
-        if let Some(group) = ws.group_mut(&target) {
+        let beside = ws.group_of_editor_mut(&id).map(|g| g.id.clone()).ok_or_else(|| format!("no editor {id}"))?;
+        let tab = take_tab(ws, &id).ok_or("no such tab")?;
+        if group_id.is_empty() {
+            add_group(ws, &beside, "row", false, vec![tab]);
+        } else if let Some(group) = ws.group_mut(&group_id) {
             let at = index.unwrap_or(group.editors.len()).min(group.editors.len());
             group.editors.insert(at, tab);
             group.active_editor = Some(id);
+            ws.active_group = Some(group_id);
+        } else {
+            return Err(format!("no group {group_id}"));
         }
-        ws.active_group = Some(target);
-        if ws.groups.len() > 1 {
-            ws.groups.retain(|g| !g.editors.is_empty());
-        }
-        ws.ensure_groups();
+        ws.prune_groups();
     }
     publish(&app);
     Ok(())
 }
 
+/// What a drop carries: a tab by id, or a file by workspace-relative path.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropSource {
+    #[serde(default)]
+    pub editor: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// A tab or file dropped on a group: on its centre it joins the group, on an
+/// edge it opens a new group split off on that side (ED-36, ED-37, ED-41).
 #[tauri::command]
-pub fn set_split_ratio(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, ratio: f32) {
+pub fn drop_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, source: DropSource, target: String, zone: String, index: Option<usize>) -> Result<(), String> {
     {
         let mut session = state.session.lock();
-        if let Some(ws) = session.workspace_mut(&workspace_id) {
-            ws.split_ratio = ratio.clamp(0.15, 0.85);
+        let ws = session.workspace_mut(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+        if ws.group_mut(&target).is_none() {
+            return Err(format!("no group {target}"));
+        }
+        let tab = match (&source.editor, &source.path) {
+            (Some(id), _) => take_tab(ws, id).ok_or_else(|| format!("no editor {id}"))?,
+            (None, Some(path)) => EditorTab { id: crate::state::new_id(), path: path.clone(), mode: default_mode(path).into(), line: 0, diff: None, preview: false },
+            (None, None) => return Err("nothing to drop".into()),
+        };
+        let id = tab.id.clone();
+        let (direction, before) = match zone.as_str() {
+            "left" => ("row", true),
+            "right" => ("row", false),
+            "top" => ("column", true),
+            "bottom" => ("column", false),
+            _ => ("", false),
+        };
+        if direction.is_empty() {
+            let group = ws.group_mut(&target).expect("checked above");
+            if let Some(existing) = group.editors.iter().find(|e| e.path == tab.path && e.diff == tab.diff && e.id != tab.id).map(|e| e.id.clone()) {
+                group.active_editor = Some(existing);
+            } else {
+                let at = index.unwrap_or(group.editors.len()).min(group.editors.len());
+                group.editors.insert(at, tab);
+                group.active_editor = Some(id);
+            }
+            ws.active_group = Some(target);
+        } else {
+            add_group(ws, &target, direction, before, vec![tab]);
+        }
+        if let Some(path) = &source.path {
+            ws.recent_files.retain(|p| p != path);
+            ws.recent_files.insert(0, path.clone());
+            ws.recent_files.truncate(RECENT_FILES_MAX);
+        }
+        ws.prune_groups();
+    }
+    watch::sync(&app);
+    publish(&app);
+    Ok(())
+}
+
+/// Records the sizes of one split after its divider was dragged (ED-39).
+#[tauri::command]
+pub fn set_layout_sizes(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: Vec<usize>, sizes: Vec<f32>) {
+    {
+        let mut session = state.session.lock();
+        if let Some(target) = session.workspace_mut(&workspace_id).and_then(|ws| ws.layout.as_mut()).and_then(|l| l.sizes_at(&path)) {
+            if target.len() == sizes.len() {
+                *target = sizes;
+            }
+        }
+        if let Some(l) = session.workspace_mut(&workspace_id).and_then(|ws| ws.layout.as_mut()) {
+            l.normalize();
         }
     }
     persist(&app);

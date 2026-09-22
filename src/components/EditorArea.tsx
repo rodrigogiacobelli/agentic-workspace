@@ -1,17 +1,16 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { LANGUAGES, languageFor } from "../editor/languages";
 import * as settings from "../settings";
-import type { EditorGroup, EditorTab, Workspace } from "../types";
+import type { EditorGroup, EditorTab, LayoutGroup, Workspace } from "../types";
 import { DiffView } from "./DiffView";
 import { Dropdown } from "./Menu";
+import { FILE_MIME, SplitTree, TAB_MIME, useDropZone } from "./SplitTree";
 import { report } from "./Switcher";
 import { useTabStrip } from "./tabs";
-
-const TAB_MIME = "application/x-agentic-tab";
 
 export async function closeTab(ws: Workspace, id: string): Promise<void> {
   if (editors.isDirty(id)) {
@@ -31,63 +30,60 @@ export function tabLabel(tab: EditorTab): string {
   return tab.diff.kind === "commit" ? `${name} (${tab.diff.hash?.slice(0, 7) ?? "commit"})` : `${name} (diff)`;
 }
 
+/** Group ids in reading order: left to right, top to bottom. */
+export function groupOrder(ws: Workspace): string[] {
+  const out: string[] = [];
+  const walk = (node: typeof ws.layout) => {
+    if (node.kind === "group") out.push(node.id);
+    else node.children.forEach(walk);
+  };
+  walk(ws.layout);
+  return out;
+}
+
 interface AreaProps {
   ws: Workspace;
   onGitChanged: () => void;
 }
 
-/** The editor groups side by side. */
+/** The editor groups, arranged by the workspace's layout tree (ED-40). */
 export function EditorArea({ ws, onGitChanged }: AreaProps) {
-  const area = useRef<HTMLDivElement>(null);
-  const [ratio, setRatio] = useState(ws.splitRatio);
-  useEffect(() => setRatio(ws.splitRatio), [ws.splitRatio, ws.id]);
-
-  const startDrag = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const el = area.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    let current = ratio;
-    const move = (ev: MouseEvent) => {
-      current = Math.min(0.85, Math.max(0.15, (ev.clientX - rect.left) / rect.width));
-      setRatio(current);
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      void api.setSplitRatio(ws.id, current);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-
   return (
     <section className="editor-area">
-      <div className="editor-groups" ref={area}>
-        {ws.groups.map((g, i) => (
-          <Fragment key={g.id}>
-            {i > 0 && <div className="group-divider" onMouseDown={startDrag} />}
-            <GroupView
-              ws={ws}
-              group={g}
-              active={g.id === ws.activeGroup || ws.groups.length === 1}
-              style={ws.groups.length === 2 ? { flex: `${i === 0 ? ratio : 1 - ratio} 1 0` } : { flex: "1 1 0" }}
-              onGitChanged={onGitChanged}
-            />
-          </Fragment>
-        ))}
-      </div>
+      <SplitTree<LayoutGroup>
+        node={ws.layout}
+        path={[]}
+        keyOf={(leaf) => leaf.id}
+        renderLeaf={(leaf) => {
+          const group = ws.groups.find((g) => g.id === leaf.id);
+          return group ? <GroupView ws={ws} group={group} active={group.id === ws.activeGroup || ws.groups.length === 1} onGitChanged={onGitChanged} /> : null;
+        }}
+        onResize={(path, sizes) => void api.setLayoutSizes(ws.id, path, sizes)}
+      />
     </section>
   );
 }
 
-function GroupView({ ws, group, active, style, onGitChanged }: { ws: Workspace; group: EditorGroup; active: boolean; style: React.CSSProperties; onGitChanged: () => void }) {
+function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: EditorGroup; active: boolean; onGitChanged: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const shownRef = useRef<string | null>(null);
   const [, bump] = useState(0);
   const activeId = group.activeEditor;
   const tab = group.editors.find((t) => t.id === activeId);
   const strip = useTabStrip(activeId);
+
+  // A tab or a file dropped on the group: the centre joins it, an edge
+  // splits it (ED-36, ED-37, ED-41). The tab strip handles its own drops.
+  const zone = useDropZone(
+    (types) => types.includes(TAB_MIME) || types.includes(FILE_MIME),
+    (z, e) => {
+      const editor = e.dataTransfer.getData(TAB_MIME);
+      const path = e.dataTransfer.getData(FILE_MIME);
+      if (z === "center" && editor && group.editors.some((t) => t.id === editor)) return;
+      void api.dropEditor(ws.id, editor ? { editor } : { path }, group.id, z, null).catch(report);
+    },
+    { ignore: (target) => !!target.closest(".tabs") },
+  );
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
 
@@ -102,37 +98,36 @@ function GroupView({ ws, group, active, style, onGitChanged }: { ws: Workspace; 
 
   const dropOnTab = (e: React.DragEvent, index: number | null) => {
     const id = e.dataTransfer.getData(TAB_MIME);
-    if (!id) return;
+    const path = e.dataTransfer.getData(FILE_MIME);
+    if (!id && !path) return;
     e.preventDefault();
     e.stopPropagation();
-    if (group.editors.some((t) => t.id === id)) {
+    if (path) {
+      void api.dropEditor(ws.id, { path }, group.id, "center", index).catch(report);
+    } else if (group.editors.some((t) => t.id === id)) {
       if (index === null) return;
       const ids = group.editors.map((t) => t.id);
       const from = ids.indexOf(id);
       ids.splice(from, 1);
       ids.splice(index > from ? index - 1 : index, 0, id);
-      void api.reorderEditors(ws.id, group.id, ids);
+      void api.reorderEditors(ws.id, group.id, ids, id);
     } else {
       void api.moveEditor(ws.id, id, group.id, index).catch(report);
     }
   };
+  const acceptsTab = (e: React.DragEvent) => { if (e.dataTransfer.types.includes(TAB_MIME) || e.dataTransfer.types.includes(FILE_MIME)) e.preventDefault(); };
 
   const entry = tab && !tab.diff ? editors.get(tab.id) : undefined;
   const doc = entry && "doc" in entry ? entry.doc : undefined;
 
   return (
     <div
+      ref={zone.ref}
+      {...zone.handlers}
       className={`editor-group${active ? " active" : ""}`}
-      style={style}
       onMouseDownCapture={() => { if (ws.activeGroup !== group.id) void api.setActiveGroup(ws.id, group.id); }}
     >
-      <div
-        className="tabs"
-        ref={strip.ref}
-        onWheel={strip.onWheel}
-        onDragOver={(e) => { if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault(); }}
-        onDrop={(e) => dropOnTab(e, null)}
-      >
+      <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={acceptsTab} onDrop={(e) => dropOnTab(e, null)}>
         {group.editors.map((t, i) => (
           <div
             key={t.id}
@@ -140,10 +135,11 @@ function GroupView({ ws, group, active, style, onGitChanged }: { ws: Workspace; 
             className={`tab${t.id === activeId ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
             draggable
             onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
-            onDragOver={(e) => { if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault(); }}
+            onDragOver={acceptsTab}
             onDrop={(e) => dropOnTab(e, i)}
             onClick={() => void api.setActiveEditor(ws.id, t.id)}
-            title={t.path}
+            onDoubleClick={() => { if (t.preview) void api.pinEditor(ws.id, t.id); }}
+            title={t.preview ? `${t.path} (preview — double-click to keep)` : t.path}
           >
             <span className="tab-label">{editors.isDirty(t.id) ? "● " : ""}{tabLabel(t)}</span>
             <button className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(ws, t.id); }} title="Close (Ctrl+W)">×</button>
@@ -170,6 +166,7 @@ function GroupView({ ws, group, active, style, onGitChanged }: { ws: Workspace; 
           {tab && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
         </>
       )}
+      {zone.overlay}
     </div>
   );
 }

@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, events } from "../api";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
-import type { RepoInfo, Session, StatusEntry, Workspace } from "../types";
-import { EditorArea, closeTab } from "./EditorArea";
+import * as settings from "../settings";
+import type { PanelId, PanelLayout, Region, RepoInfo, Session, StatusEntry, Workspace } from "../types";
+import { PANELS, defaultLayout, dropPanel, hidePanel, leafKey, normalize, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
+import { EditorArea, closeTab, groupOrder } from "./EditorArea";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
 import { Outline } from "./Outline";
 import { Palette, type PaletteItem } from "./Palette";
 import { SearchPanel } from "./SearchPanel";
+import { PANEL_MIME, SplitTree, useDropZone } from "./SplitTree";
 import { report } from "./Switcher";
 
 interface Props {
@@ -18,15 +21,32 @@ interface Props {
   openSettings: () => void;
 }
 
+const same = (a: PanelLayout, b: PanelLayout) => JSON.stringify(a) === JSON.stringify(b);
+
 export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) {
   const ws = session.workspaces.find((w) => w.id === session.active);
   const [selected, setSelected] = useState<string | null>(null);
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
-  const [sidebar, setSidebar] = useState<"files" | "search" | "git" | "outline">("files");
   const [gitStatus, setGitStatus] = useState<StatusEntry[]>([]);
   const [gitInfo, setGitInfo] = useState<RepoInfo | null>(null);
   const [gitTick, setGitTick] = useState(0);
   const [, bump] = useState(0);
+
+  // The panel layout is the application's, kept with the settings; the
+  // settings dialog can reset it or show a hidden panel from any window.
+  const [layout, setLayout] = useState<PanelLayout>(() => normalize(settings.get()?.panelLayout ?? defaultLayout()));
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  useEffect(() => settings.subscribe((s) => {
+    const next = normalize(s.panelLayout ?? defaultLayout());
+    if (!same(next, layoutRef.current)) setLayout(next);
+  }), []);
+  const update = useCallback((next: PanelLayout) => {
+    if (same(next, layoutRef.current)) return;
+    setLayout(next);
+    void settings.update({ panelLayout: next }).catch(report);
+  }, []);
+  const focusPanel = useCallback((id: PanelId) => update(showPanel(layoutRef.current, id)), [update]);
 
   // Git status follows the working tree: any change in the workspace, or in
   // its repository, refreshes it.
@@ -58,17 +78,17 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   // Links inside documents open files here; notices surface here.
   useEffect(() => {
     editors.setHooks({
-      openFile: (rel) => { if (ws) void api.openFile(ws.id, rel).catch(report); },
+      openFile: (rel) => { if (ws) void api.openFile(ws.id, rel, true).catch(report); },
       notice: (m) => report(m),
-      showCommit: (hash) => { setSidebar("git"); window.dispatchEvent(new CustomEvent("show-commit", { detail: hash })); },
+      showCommit: (hash) => { focusPanel("git"); window.dispatchEvent(new CustomEvent("show-commit", { detail: hash })); },
     });
-  }, [ws]);
+  }, [ws, focusPanel]);
 
   // A terminal link or a notification asked for a file at a line.
   useEffect(() => {
     const unlisten = events.onOpenAt(async (t) => {
       if (t.workspaceId !== session.active) await api.switchWorkspace(t.workspaceId).catch(report);
-      api.openFile(t.workspaceId, t.path).then((id) => { if (t.line > 0) editors.revealLine(id, t.line, Math.max(0, t.column - 1)); }).catch(report);
+      api.openFile(t.workspaceId, t.path, true).then((id) => { if (t.line > 0) editors.revealLine(id, t.line, Math.max(0, t.column - 1)); }).catch(report);
     });
     return () => { void unlisten.then((u) => u()); };
   }, [session.active]);
@@ -107,18 +127,22 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
         case "switch-workspace": openSwitcher(); break;
         case "focus-other-window": void api.focusWindow("terminal"); break;
         case "quick-open": void openQuickOpen(); break;
-        case "search": setSidebar("search"); break;
-        case "git": setSidebar("git"); break;
+        case "search": focusPanel("search"); break;
+        case "git": focusPanel("git"); break;
+        case "files": focusPanel("files"); break;
+        case "outline": focusPanel("outline"); break;
         case "settings": openSettings(); break;
         case "save": if (activeId) void editors.save(activeId).catch(report); break;
         case "close-editor": if (ws && activeId) void closeTab(ws, activeId); break;
         case "cycle-mode": if (activeId) editors.doc(activeId)?.cycleMode(); break;
         case "split-editor": if (ws) void api.splitEditor(ws.id).catch(report); break;
         case "move-editor": {
+          // The next group in reading order, or a new one when there is no other (ED-42).
           if (!ws || !activeId) break;
-          const i = ws.groups.findIndex((g) => g.id === ws.activeGroup);
-          const next = ws.groups[i + 1] ?? ws.groups[0];
-          void api.moveEditor(ws.id, activeId, ws.groups.length > 1 && next.id !== ws.activeGroup ? next.id : "", null).catch(report);
+          const order = groupOrder(ws);
+          const i = order.indexOf(ws.activeGroup ?? "");
+          const next = order.length > 1 ? order[(i + 1) % order.length] : "";
+          void api.moveEditor(ws.id, activeId, next, null).catch(report);
           break;
         }
         case "next-tab": cycle(ws, 1); break;
@@ -142,44 +166,101 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return <main className="empty">Add a folder to start.</main>;
   }
 
+  const openAt = (path: string, line: number, column: number) => {
+    api.openFile(ws.id, path, true).then((id) => editors.revealLine(id, line, column)).catch(report);
+  };
+
   // Files with work-tree changes or not yet tracked; what is only staged does not count (FIX-06).
   const unstaged = gitStatus.filter((s) => s.untracked || s.conflicted || s.worktree !== ".").length;
 
-  const openAt = (path: string, line: number, column: number) => {
-    api.openFile(ws.id, path).then((id) => editors.revealLine(id, line, column)).catch(report);
+  const renderPanel = (id: PanelId) => {
+    if (!ws.available) return <div className="tree-loading">The directory {ws.path} is missing.</div>;
+    switch (id) {
+      case "files": return <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p, preview) => void api.openFile(ws.id, p, preview).catch(report)} gitStatus={gitStatus} />;
+      case "search": return <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />;
+      case "outline": return <Outline ws={ws} />;
+      case "git": return <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={(p, d) => void api.openDiff(ws.id, p, d).catch(report)} onOpenFile={(p) => void api.openFile(ws.id, p, true).catch(report)} />;
+    }
   };
 
   return (
     <main className="workspace-main">
-      <aside className="sidebar">
-        <div className="sidebar-tabs">
-          <button className={sidebar === "files" ? "active" : ""} onClick={() => setSidebar("files")}>Files</button>
-          <button className={sidebar === "search" ? "active" : ""} onClick={() => setSidebar("search")} title="Ctrl+Shift+F">Search</button>
-          <button className={sidebar === "git" ? "active" : ""} onClick={() => setSidebar("git")} title="Ctrl+Shift+G">Git{unstaged ? ` (${unstaged})` : ""}</button>
-          <button className={sidebar === "outline" ? "active" : ""} onClick={() => setSidebar("outline")}>Outline</button>
-        </div>
-        {!ws.available ? (
-          <div className="tree-loading">The directory {ws.path} is missing.</div>
-        ) : sidebar === "files" ? (
-          <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p) => void api.openFile(ws.id, p).catch(report)} gitStatus={gitStatus} />
-        ) : sidebar === "search" ? (
-          <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />
-        ) : sidebar === "outline" ? (
-          <Outline ws={ws} />
-        ) : (
-          <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={(p, d) => void api.openDiff(ws.id, p, d).catch(report)} onOpenFile={(p) => void api.openFile(ws.id, p).catch(report)} />
-        )}
-      </aside>
-      <EditorArea ws={ws} onGitChanged={refreshGit} />
+      <SplitTree<DockLeaf>
+        node={layout.root}
+        path={[]}
+        keyOf={leafKey}
+        renderLeaf={(leaf) =>
+          leaf.kind === "editor" ? (
+            <EditorLeaf layout={layout} update={update}><EditorArea ws={ws} onGitChanged={refreshGit} /></EditorLeaf>
+          ) : (
+            <RegionView region={leaf} layout={layout} update={update} unstaged={unstaged} render={renderPanel} />
+          )
+        }
+        onResize={(path, sizes) => update(resizeSplit(layout, path, sizes))}
+      />
       {quickOpen && (
         <Palette
           title="Open file"
           items={quickOpen}
           onClose={() => setQuickOpen(null)}
-          onPick={(item) => { setQuickOpen(null); void api.openFile(ws.id, item.id).catch(report); }}
+          onPick={(item) => { setQuickOpen(null); void api.openFile(ws.id, item.id, true).catch(report); }}
         />
       )}
     </main>
+  );
+}
+
+/** The editor area as a dock leaf: panels dropped on its edges get a region beside it. */
+function EditorLeaf({ layout, update, children }: { layout: PanelLayout; update: (l: PanelLayout) => void; children: React.ReactNode }) {
+  const zone = useDropZone(
+    (types) => types.includes(PANEL_MIME),
+    (z, e) => update(dropPanel(layout, e.dataTransfer.getData(PANEL_MIME) as PanelId, "editor", z)),
+    { edgesOnly: true },
+  );
+  return (
+    <div className="editor-leaf" ref={zone.ref} {...zone.handlers}>
+      {children}
+      {zone.overlay}
+    </div>
+  );
+}
+
+/** One tabbed stack of panels. Its tabs are dragged to move a panel (DOCK-01). */
+function RegionView({ region, layout, update, unstaged, render }: {
+  region: Region;
+  layout: PanelLayout;
+  update: (l: PanelLayout) => void;
+  unstaged: number;
+  render: (id: PanelId) => React.ReactNode;
+}) {
+  const zone = useDropZone(
+    (types) => types.includes(PANEL_MIME),
+    (z, e) => update(dropPanel(layout, e.dataTransfer.getData(PANEL_MIME) as PanelId, region.id, z)),
+  );
+  return (
+    <aside className="region" ref={zone.ref} {...zone.handlers}>
+      <div className="sidebar-tabs">
+        {region.panels.map((id) => {
+          const panel = PANELS.find((p) => p.id === id);
+          return (
+            <div
+              key={id}
+              role="tab"
+              className={id === region.active ? "active" : ""}
+              draggable
+              onDragStart={(e) => { e.dataTransfer.setData(PANEL_MIME, id); e.dataTransfer.effectAllowed = "move"; }}
+              onClick={() => update(setActivePanel(layout, region.id, id))}
+              title={panel?.hotkey}
+            >
+              {panel?.label ?? id}{id === "git" && unstaged ? ` (${unstaged})` : ""}
+            </div>
+          );
+        })}
+        <button className="panel-hide" onClick={() => update(hidePanel(layout, region.active))} title="Hide this panel (its hotkey brings it back)">×</button>
+      </div>
+      {render(region.active)}
+      {zone.overlay}
+    </aside>
   );
 }
 

@@ -17,6 +17,8 @@ export type Action =
   | "copy-relative-path"
   | "cycle-mode"
   | "git"
+  | "files"
+  | "outline"
   | "split-editor"
   | "move-editor"
   | "settings"
@@ -41,6 +43,8 @@ export function actionFor(e: KeyboardEvent): Action | null {
       case "v": return "paste";
       case "f": return "search";
       case "g": return "git";
+      case "e": return "files";
+      case "o": return "outline";
       case "Tab": return "prev-tab";
     }
     return null;

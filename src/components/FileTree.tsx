@@ -3,11 +3,13 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
 import type { Entry, StatusEntry, Workspace } from "../types";
 import { Prompt } from "./Prompt";
+import { FILE_MIME } from "./SplitTree";
 import { report } from "./Switcher";
 
 interface Props {
   ws: Workspace;
-  onOpen: (path: string) => void;
+  /** A single click opens a preview tab; a double click or a new file opens a permanent one. */
+  onOpen: (path: string, preview: boolean) => void;
   selected: string | null;
   onSelect: (path: string | null) => void;
   gitStatus?: StatusEntry[];
@@ -122,7 +124,7 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
         const path = join(d.dir, value);
         await api.createEntry(ws.id, path, d.kind === "new-folder");
         if (d.dir && !ws.expanded.includes(d.dir)) await api.setExpanded(ws.id, d.dir, true);
-        if (d.kind === "new-file") onOpen(path);
+        if (d.kind === "new-file") onOpen(path, false);
       } else if (d.kind === "rename") {
         await api.renameEntry(ws.id, d.entry.path, join(dirOf(d.entry.path), value));
       }
@@ -136,6 +138,9 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
       className={`tree-row${e.ignored ? " ignored" : ""}${selected === e.path ? " selected" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
       style={{ paddingLeft: 8 + depth * 14 }}
       onClick={onClick}
+      onDoubleClick={() => { if (!e.isDir) onOpen(e.path, false); }}
+      draggable={!e.isDir}
+      onDragStart={(ev) => { ev.dataTransfer.setData(FILE_MIME, e.path); ev.dataTransfer.effectAllowed = "copyMove"; }}
       onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); onSelect(e.path); setMenu({ x: ev.clientX, y: ev.clientY, entry: e }); }}
       title={e.path}
     >
@@ -152,7 +157,7 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
       const expanded = e.isDir && ws.expanded.includes(e.path);
       return (
         <div key={e.path}>
-          {row(e, depth, expanded, () => { onSelect(e.path); if (e.isDir) toggle(e.path); else onOpen(e.path); })}
+          {row(e, depth, expanded, () => { onSelect(e.path); if (e.isDir) toggle(e.path); else onOpen(e.path, true); })}
           {expanded && render(e.path, depth + 1)}
         </div>
       );
@@ -187,7 +192,7 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
         const e: Entry = { name, path: join(dir, name), isDir, ignored: false };
         return (
           <div key={e.path}>
-            {row(e, depth, true, () => { onSelect(e.path); if (!e.isDir) onOpen(e.path); })}
+            {row(e, depth, true, () => { onSelect(e.path); if (!e.isDir) onOpen(e.path, true); })}
             {isDir && renderFiltered(e.path, depth + 1)}
           </div>
         );

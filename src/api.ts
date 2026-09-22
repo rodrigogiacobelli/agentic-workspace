@@ -27,24 +27,29 @@ export const api = {
   renameWorkspace: (id: string, name: string) => invoke<void>("rename_workspace", { id, name }),
   setExpanded: (workspaceId: string, path: string, expanded: boolean) =>
     invoke<void>("set_expanded", { workspaceId, path, expanded }),
-  openFile: (workspaceId: string, path: string) =>
-    invoke<string>("open_file", { workspaceId, path }),
+  /** A preview open reuses the group's preview tab; a permanent one keeps its own. */
+  openFile: (workspaceId: string, path: string, preview: boolean) =>
+    invoke<string>("open_file", { workspaceId, path, preview }),
   openDiff: (workspaceId: string, path: string, diff: DiffSpec) =>
     invoke<string>("open_diff", { workspaceId, path, diff }),
+  pinEditor: (workspaceId: string, id: string) => invoke<void>("pin_editor", { workspaceId, id }),
   closeFile: (workspaceId: string, id: string) =>
     invoke<void>("close_file", { workspaceId, id }),
   setActiveEditor: (workspaceId: string, id: string) =>
     invoke<void>("set_active_editor", { workspaceId, id }),
-  reorderEditors: (workspaceId: string, groupId: string, ids: string[]) =>
-    invoke<void>("reorder_editors", { workspaceId, groupId, ids }),
+  reorderEditors: (workspaceId: string, groupId: string, ids: string[], moved: string | null) =>
+    invoke<void>("reorder_editors", { workspaceId, groupId, ids, moved }),
   setActiveGroup: (workspaceId: string, groupId: string) =>
     invoke<void>("set_active_group", { workspaceId, groupId }),
   splitEditor: (workspaceId: string) => invoke<void>("split_editor", { workspaceId }),
-  /** An empty `groupId` opens a new group to the right. */
+  /** An empty `groupId` opens a new group to the right of the active one. */
   moveEditor: (workspaceId: string, id: string, groupId: string, index: number | null) =>
     invoke<void>("move_editor", { workspaceId, id, groupId, index }),
-  setSplitRatio: (workspaceId: string, ratio: number) =>
-    invoke<void>("set_split_ratio", { workspaceId, ratio }),
+  /** A tab or a file dropped on a group's centre or one of its edges. */
+  dropEditor: (workspaceId: string, source: { editor?: string; path?: string }, target: string, zone: string, index: number | null) =>
+    invoke<void>("drop_editor", { workspaceId, source, target, zone, index }),
+  setLayoutSizes: (workspaceId: string, path: number[], sizes: number[]) =>
+    invoke<void>("set_layout_sizes", { workspaceId, path, sizes }),
   setEditorView: (workspaceId: string, id: string, mode: string, line: number) =>
     invoke<void>("set_editor_view", { workspaceId, id, mode, line }),
   focusWindow: (label: WindowRole) => invoke<void>("focus_window", { label }),

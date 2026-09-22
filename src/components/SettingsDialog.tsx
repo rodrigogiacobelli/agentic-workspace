@@ -4,6 +4,7 @@ import { api, events } from "../api";
 import * as settings from "../settings";
 import { allThemes, isImported } from "../themes";
 import type { HotkeyStatus, Settings, Workspace } from "../types";
+import { defaultLayout, normalize, showPanel, PANELS } from "./dock";
 import { Dropdown } from "./Menu";
 import { report } from "./Switcher";
 
@@ -107,6 +108,17 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
         {toggle("Autosave", current.autosave, (v) => set({ autosave: v }))}
         {number("Autosave delay (ms)", current.autosaveDelayMs, (v) => set({ autosaveDelayMs: v }), 200, 60000, 100)}
         {number("Warn for assets above (MB)", current.assetWarnMb, (v) => set({ assetWarnMb: v }), 1, 1000)}
+        <h3>Panels</h3>
+        {normalize(current.panelLayout ?? defaultLayout()).hidden.map((id) => (
+          <div className="setting" key={id}>
+            <span>{PANELS.find((p) => p.id === id)?.label ?? id} is hidden</span>
+            <button onClick={() => set({ panelLayout: showPanel(normalize(current.panelLayout ?? defaultLayout()), id) })}>Show</button>
+          </div>
+        ))}
+        <div className="setting">
+          <span>Files, Search, Git and Outline back in one left sidebar</span>
+          <button onClick={() => set({ panelLayout: null })}>Reset panel layout</button>
+        </div>
         <h3>Agent signals</h3>
         {toggle("Desktop notifications when a busy terminal goes quiet", current.notifications, (v) => set({ notifications: v }))}
         {number("Quiet threshold (seconds, minimum 5)", current.quietThresholdS, (v) => set({ quietThresholdS: v }), 5, 3600)}

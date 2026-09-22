@@ -77,6 +77,14 @@ export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElemen
     const override = settings.get()?.languages[`${ws.path}/${tab.path}`];
     const d = new Doc(tab.id, ws.id, ws.path, tab.path, text, languageFor(tab.path, override), tab.mode as Mode, hooks);
     d.subscribe(notify);
+    // The first edit makes a preview tab permanent (ED-31).
+    if (tab.preview) {
+      const stop = d.subscribe(() => {
+        if (!d.dirty) return;
+        stop();
+        void api.pinEditor(ws.id, tab.id).catch(() => {});
+      });
+    }
     entry = { doc: d };
     registry.set(tab.id, entry);
     const draft = await api.readDraft(ws.id, tab.path).catch(() => null);

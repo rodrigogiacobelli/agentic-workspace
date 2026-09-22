@@ -33,6 +33,10 @@ pub struct Settings {
     pub global_hotkey: String,
     /// Language overrides keyed by absolute file path.
     pub languages: HashMap<String, String>,
+    /// Where the Files, Search, Git and Outline panels sit, as the frontend
+    /// lays them out; the application's, not a workspace's (DOCK-08). Null
+    /// until a panel is first moved.
+    pub panel_layout: serde_json::Value,
     /// Per-workspace settings keyed by absolute directory path.
     pub workspaces: HashMap<String, WorkspaceSettings>,
 }
@@ -65,6 +69,7 @@ impl Default for Settings {
             asset_warn_mb: 5,
             global_hotkey: "CTRL+ALT+a".into(),
             languages: HashMap::new(),
+            panel_layout: serde_json::Value::Null,
             workspaces: HashMap::new(),
         }
     }

@@ -14,11 +14,11 @@ export interface Workspace {
   name: string;
   terminals: TerminalTab[];
   activeTerminal: string | null;
-  /** Editor groups side by side, left to right; never empty. */
+  /** Every editor group; `layout` arranges them. Never empty. */
   groups: EditorGroup[];
   activeGroup: string | null;
-  /** Width of the first group as a fraction of the editor area. */
-  splitRatio: number;
+  /** A tree of rows and columns whose leaves name the groups. */
+  layout: Layout;
   /** Expanded tree directories, relative to `path`. */
   expanded: string[];
   /** Recently opened files, relative to `path`, most recent first. */
@@ -27,6 +27,31 @@ export interface Workspace {
   /** A background terminal here printed since it was last viewed. */
   attention: boolean;
   git: GitSummary | null;
+}
+
+/** A split node, shared by the editor layout and the panel layout. */
+export interface Split<L> {
+  kind: "split";
+  direction: "row" | "column";
+  children: (L | Split<L>)[];
+  sizes: number[];
+}
+
+export interface LayoutGroup { kind: "group"; id: string }
+export type Layout = LayoutGroup | Split<LayoutGroup>;
+
+export type PanelId = "files" | "search" | "git" | "outline";
+export interface Region { kind: "region"; id: string; panels: PanelId[]; active: PanelId }
+export interface EditorLeaf { kind: "editor" }
+export type DockLeaf = Region | EditorLeaf;
+export type DockNode = DockLeaf | Split<DockLeaf>;
+
+/** Where the panels sit around the editor; the application's, not a workspace's. */
+export interface PanelLayout {
+  root: DockNode;
+  hidden: PanelId[];
+  /** The region each hidden panel left, so it returns there. */
+  lastRegion: Partial<Record<PanelId, string>>;
 }
 
 export interface GitSummary {
@@ -113,6 +138,7 @@ export interface Settings {
   assetWarnMb: number;
   globalHotkey: string;
   languages: Record<string, string>;
+  panelLayout: PanelLayout | null;
   workspaces: Record<string, WorkspaceSettings>;
 }
 
