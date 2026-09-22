@@ -15,6 +15,8 @@ export type Action =
   | "save"
   | "close-editor"
   | "copy-relative-path"
+  | "cycle-mode"
+  | "settings"
   | "quit";
 
 export function actionFor(e: KeyboardEvent): Action | null {
@@ -43,6 +45,8 @@ export function actionFor(e: KeyboardEvent): Action | null {
     case "Tab": return "next-tab";
     case "s": return "save";
     case "w": return "close-editor";
+    case "e": return "cycle-mode";
+    case ",": return "settings";
     case "q": return "quit";
   }
   return null;
@@ -51,5 +55,5 @@ export function actionFor(e: KeyboardEvent): Action | null {
 /** Actions the terminal window claims before the shell sees the key. */
 export const TERMINAL_ACTIONS = new Set<Action>([
   "switch-workspace", "focus-other-window", "new-terminal", "close-terminal",
-  "next-tab", "prev-tab", "copy", "paste", "search", "quit",
+  "next-tab", "prev-tab", "copy", "paste", "search", "settings", "quit",
 ]);

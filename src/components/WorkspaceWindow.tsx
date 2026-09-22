@@ -1,30 +1,59 @@
-import { useEffect, useRef, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
-import { api } from "../api";
+import { useEffect, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { api, events } from "../api";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
 import type { Session, Workspace } from "../types";
+import { EditorArea, closeTab } from "./EditorArea";
 import { FileTree } from "./FileTree";
-import { SearchPanel } from "./SearchPanel";
 import { Palette, type PaletteItem } from "./Palette";
+import { SearchPanel } from "./SearchPanel";
 import { report } from "./Switcher";
 
 interface Props {
   session: Session;
   openSwitcher: () => void;
+  openSettings: () => void;
 }
 
-export function WorkspaceWindow({ session, openSwitcher }: Props) {
+export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) {
   const ws = session.workspaces.find((w) => w.id === session.active);
   const [selected, setSelected] = useState<string | null>(null);
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
   const [sidebar, setSidebar] = useState<"files" | "search">("files");
   const [, bump] = useState(0);
 
-  useEffect(() => editors.onDirty(() => bump((n) => n + 1)), []);
+  useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
   useEffect(() => {
     editors.retain(new Set(session.workspaces.flatMap((w) => w.editors.map((e) => e.id))));
   }, [session]);
+
+  // Links inside documents open files here; notices surface here.
+  useEffect(() => {
+    editors.setHooks({
+      openFile: (rel) => { if (ws) void api.openFile(ws.id, rel).catch(report); },
+      notice: (m) => report(m),
+    });
+  }, [ws]);
+
+  // An agent rewrote something: every open document in that directory checks its file.
+  useEffect(() => {
+    const unlisten = events.onDirChanged((change) => editors.checkDisk(change.workspaceId, change.dirs));
+    return () => { void unlisten.then((u) => u()); };
+  }, []);
+
+  // Files dropped from the file manager land in the document under the pointer.
+  useEffect(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type !== "drop" || !ws?.activeEditor) return;
+      const doc = editors.doc(ws.activeEditor);
+      if (!doc) return;
+      const scale = window.devicePixelRatio || 1;
+      const { x, y } = event.payload.position;
+      void doc.insertPaths(event.payload.paths, { x: x / scale, y: y / scale });
+    });
+    return () => { void unlisten.then((u) => u()); };
+  }, [ws?.activeEditor]);
 
   const openQuickOpen = async () => {
     if (!ws) return;
@@ -43,8 +72,10 @@ export function WorkspaceWindow({ session, openSwitcher }: Props) {
         case "focus-other-window": void api.focusWindow("terminal"); break;
         case "quick-open": void openQuickOpen(); break;
         case "search": setSidebar("search"); break;
+        case "settings": openSettings(); break;
         case "save": if (ws?.activeEditor) void editors.save(ws.activeEditor).catch(report); break;
         case "close-editor": if (ws?.activeEditor) void closeTab(ws, ws.activeEditor); break;
+        case "cycle-mode": if (ws?.activeEditor) editors.doc(ws.activeEditor)?.cycleMode(); break;
         case "next-tab": cycle(ws, 1); break;
         case "prev-tab": cycle(ws, -1); break;
         case "copy-relative-path": {
@@ -103,66 +134,4 @@ function cycle(ws: Workspace | undefined, delta: number) {
   const i = ws.editors.findIndex((t) => t.id === ws.activeEditor);
   const next = ws.editors[(i + delta + ws.editors.length) % ws.editors.length];
   void api.setActiveEditor(ws.id, next.id);
-}
-
-async function closeTab(ws: Workspace, id: string) {
-  if (editors.isDirty(id)) {
-    const path = ws.editors.find((t) => t.id === id)?.path ?? "this file";
-    const discard = await ask(`${path} has unsaved changes. Close it and discard them?`, {
-      title: "Unsaved changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep open",
-    });
-    if (!discard) return;
-  }
-  await api.closeFile(ws.id, id);
-}
-
-function EditorArea({ ws }: { ws: Workspace }) {
-  const host = useRef<HTMLDivElement>(null);
-  const shownRef = useRef<string | null>(null);
-  const dragging = useRef<string | null>(null);
-  const activeId = ws.activeEditor;
-
-  useEffect(() => {
-    const container = host.current;
-    if (!container) return;
-    if (shownRef.current && shownRef.current !== activeId) editors.unmount(shownRef.current);
-    shownRef.current = activeId;
-    const tab = ws.editors.find((t) => t.id === activeId);
-    if (tab) void editors.mount(tab.id, ws.id, tab.path, container).catch(report);
-  }, [activeId, ws.id, ws.editors]);
-
-  const drop = (targetId: string) => {
-    const from = dragging.current;
-    dragging.current = null;
-    if (!from || from === targetId) return;
-    const ids = ws.editors.map((t) => t.id);
-    ids.splice(ids.indexOf(from), 1);
-    ids.splice(ids.indexOf(targetId), 0, from);
-    void api.reorderEditors(ws.id, ids);
-  };
-
-  return (
-    <section className="editor-area">
-      <div className="tabs">
-        {ws.editors.map((tab) => (
-          <div
-            key={tab.id}
-            className={`tab${tab.id === activeId ? " active" : ""}`}
-            draggable
-            onDragStart={() => { dragging.current = tab.id; }}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={() => drop(tab.id)}
-            onClick={() => void api.setActiveEditor(ws.id, tab.id)}
-            title={tab.path}
-          >
-            <span className="tab-label">{editors.isDirty(tab.id) ? "● " : ""}{tab.path.split("/").pop()}</span>
-            <button className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(ws, tab.id); }} title="Close (Ctrl+W)">×</button>
-          </div>
-        ))}
-      </div>
-      <div className="editor-host" ref={host}>
-        {ws.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
-      </div>
-    </section>
-  );
 }

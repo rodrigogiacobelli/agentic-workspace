@@ -3,7 +3,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { DirChanged, Entry, SearchHit, Session, WindowRole } from "./types";
+import type { DirChanged, Entry, SearchHit, Session, Settings, StoredAsset, WindowRole } from "./types";
 
 export type OutputChunk = ArrayBuffer | Uint8Array | number[];
 
@@ -23,7 +23,25 @@ export const api = {
     invoke<void>("set_active_editor", { workspaceId, id }),
   reorderEditors: (workspaceId: string, ids: string[]) =>
     invoke<void>("reorder_editors", { workspaceId, ids }),
+  setEditorView: (workspaceId: string, id: string, mode: string, line: number) =>
+    invoke<void>("set_editor_view", { workspaceId, id, mode, line }),
   focusWindow: (label: WindowRole) => invoke<void>("focus_window", { label }),
+  getSettings: () => invoke<Settings>("get_settings"),
+  updateSettings: (settings: Settings) => invoke<Settings>("update_settings", { settings }),
+  /** Stores clipboard bytes; metadata travels as headers beside the raw body. */
+  saveAsset: (workspaceId: string, note: string, name: string | null, mime: string, bytes: ArrayBuffer) =>
+    invoke<StoredAsset>("save_asset", new Uint8Array(bytes), {
+      headers: {
+        "x-workspace": workspaceId,
+        "x-note": encodeURIComponent(note),
+        "x-mime": mime,
+        ...(name ? { "x-name": encodeURIComponent(name) } : {}),
+      },
+    }),
+  importAsset: (workspaceId: string, note: string, source: string) =>
+    invoke<StoredAsset>("import_asset", { workspaceId, note, source }),
+  openExternally: (workspaceId: string, path: string) =>
+    invoke<void>("open_externally", { workspaceId, path }),
   quit: () => invoke<void>("quit"),
 
   terminalOpen: (workspaceId: string) => invoke<string>("terminal_open", { workspaceId }),
@@ -77,6 +95,8 @@ export const events = {
     listen<DirChanged>("dir-changed", (e) => cb(e.payload)),
   onQuitRequested: (cb: () => void): Promise<UnlistenFn> =>
     listen("quit-requested", () => cb()),
+  onSettings: (cb: (s: Settings) => void): Promise<UnlistenFn> =>
+    listen<Settings>("settings-changed", (e) => cb(e.payload)),
 };
 
 export function toBytes(chunk: OutputChunk): Uint8Array {

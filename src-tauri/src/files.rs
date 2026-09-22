@@ -17,6 +17,15 @@ pub fn read_file(state: tauri::State<AppState>, workspace_id: String, path: Stri
     String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8 text"))
 }
 
+/// Opens a file in the desktop's default application, for the files the
+/// editor declines: binaries.
+#[tauri::command]
+pub fn open_externally(app: tauri::AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let (_, abs) = tree::resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+    app.opener().open_path(abs.to_string_lossy(), None::<&str>).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 pub fn write_file(state: tauri::State<AppState>, workspace_id: String, path: String, content: String) -> Result<(), String> {
     let (_, abs) = tree::resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;

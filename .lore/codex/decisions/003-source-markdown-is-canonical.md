@@ -1,12 +1,13 @@
 ---
 id: 003-source-markdown-is-canonical
-title: "ADR-003: Source markdown is canonical; rich edits splice byte ranges"
-summary: Why an edit made in the rendered pane rewrites only the byte range of
-  the block it touched instead of re-serialising the document, what that
-  protects, and the constraint it puts on the editor's document model.
+title: 'ADR-003: Source markdown is canonical; rich edits splice byte ranges'
+summary: Why an edit made in the rendered pane rewrites only the byte range of the
+  block it touched instead of re-serialising the document, what that protects, and
+  the constraint it puts on the editor's document model.
 related:
-  - vision-agentic-workspace
-  - standards-code
+- vision-agentic-workspace
+- standards-code
+- 011-live-preview-over-codemirror
 ---
 
 # ADR-003: Source markdown is canonical; rich edits splice byte ranges

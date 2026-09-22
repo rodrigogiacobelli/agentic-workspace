@@ -3,10 +3,10 @@
 A native Linux desktop app for running several agent-driven projects at once —
 without losing the one you just switched away from.
 
-> **Status: first milestone.** Workspaces, the two windows, terminals that
-> survive a switch, the file tree and session restore run. The editor is a
-> plain source editor until the editor milestone lands. `.lore/codex/` holds
-> the decisions behind it.
+> **Status: second milestone.** Workspaces, the two windows, terminals that
+> survive a switch, the file tree, session restore and the three-mode markdown
+> editor run. Git and agent signals are next. `.lore/codex/` holds the
+> decisions behind it.
 
 ---
 
@@ -142,7 +142,14 @@ cd src-tauri && cargo test --lib     # unit tests; no compositor or PTY needed
 | `Ctrl+Shift+F` | terminal / workspace | Search scrollback / search the project |
 | `Ctrl+P` | workspace | Quick open a file |
 | `Ctrl+S` / `Ctrl+W` | workspace | Save / close the editor tab |
+| `Ctrl+E` | workspace | Cycle the markdown editor: source → split → rich |
+| `Ctrl+,` | both | Settings |
 | `Ctrl+Alt+Shift+C` | workspace | Copy the selected path, relative to the workspace |
+
+In the rendered markdown view, syntax shows on the lines the cursor touches and
+is hidden elsewhere; `Ctrl`+click follows a link. Paste an image or drop a file
+onto a document and it lands in the workspace's clipboard folder with a link
+relative to the note.
 
 Double-click a terminal tab to rename it; drag tabs to reorder them. Right-click
 in the file tree for file operations; deleting moves to the trash through GIO.

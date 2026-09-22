@@ -197,7 +197,8 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
             Some(tab) => tab.id.clone(),
             None => {
                 let id = crate::state::new_id();
-                ws.editors.push(EditorTab { id: id.clone(), path: path.clone() });
+                let mode = if path.to_lowercase().ends_with(".md") || path.to_lowercase().ends_with(".markdown") { "rich" } else { "source" };
+                ws.editors.push(EditorTab { id: id.clone(), path: path.clone(), mode: mode.into(), line: 0 });
                 id
             }
         };
@@ -207,8 +208,23 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
         ws.recent_files.truncate(RECENT_FILES_MAX);
         id
     };
+    watch::sync(&app);
     publish(&app);
     Ok(id)
+}
+
+/// Records how a tab is being viewed. Saved, not broadcast: scrolling is not
+/// something another window needs to hear about.
+#[tauri::command]
+pub fn set_editor_view(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String, mode: String, line: u32) {
+    {
+        let mut session = state.session.lock();
+        if let Some(tab) = session.workspace_mut(&workspace_id).and_then(|ws| ws.editors.iter_mut().find(|e| e.id == id)) {
+            tab.mode = mode;
+            tab.line = line;
+        }
+    }
+    persist(&app);
 }
 
 #[tauri::command]
@@ -224,6 +240,7 @@ pub fn close_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: S
             }
         }
     }
+    watch::sync(&app);
     publish(&app);
 }
 

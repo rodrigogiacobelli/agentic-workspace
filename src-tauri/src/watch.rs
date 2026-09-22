@@ -136,18 +136,30 @@ fn emit(app: &AppHandle, dirs: HashSet<PathBuf>) {
     }
 }
 
-/// Makes the watched set match the active workspace's root and expansions.
+/// Makes the watched set match what is on screen: the active workspace's root
+/// and expansions, plus the directory of every open file in every workspace,
+/// since an agent may rewrite a file whose tab is in the background.
 pub fn sync(app: &AppHandle) {
     let state = app.state::<AppState>();
     let wanted: HashSet<PathBuf> = {
         let session = state.session.lock();
-        match session.active.as_deref().and_then(|id| session.workspace(id)) {
-            Some(ws) if ws.path.is_dir() => std::iter::once(ws.path.clone())
-                .chain(ws.expanded.iter().map(|rel| ws.path.join(rel)))
-                .filter(|p| p.is_dir())
-                .collect(),
-            _ => HashSet::new(),
+        let mut wanted = HashSet::new();
+        for ws in &session.workspaces {
+            if !ws.path.is_dir() {
+                continue;
+            }
+            if session.active.as_deref() == Some(&ws.id) {
+                wanted.insert(ws.path.clone());
+                wanted.extend(ws.expanded.iter().map(|rel| ws.path.join(rel)));
+            }
+            for tab in &ws.editors {
+                let file = ws.path.join(&tab.path);
+                if let Some(dir) = file.parent() {
+                    wanted.insert(dir.to_path_buf());
+                }
+            }
         }
+        wanted.into_iter().filter(|p| p.is_dir()).collect()
     };
     state.watcher.lock().apply(wanted, app);
 }

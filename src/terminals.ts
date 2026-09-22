@@ -9,7 +9,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Channel } from "@tauri-apps/api/core";
 import { api, toBytes, type OutputChunk } from "./api";
 import { actionFor, TERMINAL_ACTIONS } from "./hotkeys";
-import { monospace, theme } from "./theme";
+import * as settings from "./settings";
 
 export interface Instance {
   term: Terminal;
@@ -32,6 +32,18 @@ export function onTitles(cb: () => void): () => void {
 export function get(id: string): Instance | undefined {
   return registry.get(id);
 }
+
+// Font and palette changes reach every terminal, shown or hidden.
+settings.subscribe((s) => {
+  const font = settings.terminalFont(s);
+  for (const inst of registry.values()) {
+    inst.term.options.theme = settings.theme().terminal;
+    inst.term.options.fontFamily = font.fontFamily;
+    inst.term.options.fontSize = font.fontSize;
+    inst.term.options.lineHeight = font.lineHeight;
+    if (inst.el.isConnected) inst.fit.fit();
+  }
+});
 
 /** Shows the terminal in `container`, creating and attaching it on first use. */
 export async function mount(id: string, container: HTMLElement): Promise<Instance> {
@@ -75,14 +87,14 @@ export function retain(ids: Set<string>): void {
 }
 
 function create(id: string): Instance {
+  const s = settings.get();
+  const font = s ? settings.terminalFont(s) : { fontFamily: settings.monospaceFallback, fontSize: 13, lineHeight: 1.15 };
   const term = new Terminal({
     scrollback: 10_000,
-    fontFamily: monospace,
-    fontSize: 13,
-    lineHeight: 1.15,
+    ...font,
     cursorBlink: true,
     allowProposedApi: true,
-    theme,
+    theme: settings.theme().terminal,
   });
   const fit = new FitAddon();
   const search = new SearchAddon();

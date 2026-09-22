@@ -1,7 +1,9 @@
+mod assets;
 mod desktop;
 mod files;
 mod pty;
 mod session;
+mod settings;
 mod state;
 mod store;
 mod tree;
@@ -46,6 +48,7 @@ fn setup(app: &mut tauri::App) -> Result<()> {
 
     handle.manage(AppState {
         session: Mutex::new(session),
+        settings: Mutex::new(settings::load(&data_dir)),
         ptys: Mutex::new(HashMap::new()),
         watcher: Mutex::new(watch::Watcher::new(handle.clone())),
         data_dir,
@@ -159,6 +162,11 @@ pub fn run() {
             session::close_file,
             session::set_active_editor,
             session::reorder_editors,
+            session::set_editor_view,
+            settings::get_settings,
+            settings::update_settings,
+            assets::save_asset,
+            assets::import_asset,
             session::focus_window,
             session::quit,
             pty::terminal_open,
@@ -179,6 +187,7 @@ pub fn run() {
             tree::reveal_entry,
             tree::search_project,
             files::read_file,
+            files::open_externally,
             files::write_file,
         ])
         .build(tauri::generate_context!())

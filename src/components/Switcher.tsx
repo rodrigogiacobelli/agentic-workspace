@@ -7,10 +7,11 @@ interface Props {
   session: Session;
   role: WindowRole;
   unsaved: number;
+  onSettings: () => void;
 }
 
 /** The bar both windows share: which workspace is active, and the way out. */
-export function Switcher({ session, role, unsaved }: Props) {
+export function Switcher({ session, role, unsaved, onSettings }: Props) {
   const active = session.workspaces.find((w) => w.id === session.active);
   const other: WindowRole = role === "terminal" ? "workspace" : "terminal";
 
@@ -52,6 +53,7 @@ export function Switcher({ session, role, unsaved }: Props) {
       <button onClick={() => void addFolder()} title="Add folder…">＋</button>
       {active && <button onClick={() => void remove()} title="Remove this workspace">－</button>}
       <span className="switcher-path">{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>
+      <button onClick={onSettings} title="Settings (Ctrl+,)">⚙</button>
       <button onClick={() => void api.focusWindow(other)} title="Focus the other window (Ctrl+Shift+Space)">
         {other === "terminal" ? "Terminal ▸" : "◂ Workspace"}
       </button>

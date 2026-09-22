@@ -69,6 +69,16 @@ pub struct EditorTab {
     pub id: String,
     /// Relative to the workspace path.
     pub path: String,
+    /// `source`, `split` or `rich`; meaningful for markdown only.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// First visible line, restored on reopen.
+    #[serde(default)]
+    pub line: u32,
+}
+
+fn default_mode() -> String {
+    "rich".into()
 }
 
 impl Session {
@@ -87,6 +97,7 @@ impl Session {
 
 pub struct AppState {
     pub session: Mutex<Session>,
+    pub settings: Mutex<crate::settings::Settings>,
     /// Live pseudoterminals keyed by terminal tab id. Locked after `session`,
     /// never before it.
     pub ptys: Mutex<HashMap<String, pty::Live>>,

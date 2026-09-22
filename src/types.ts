@@ -32,6 +32,10 @@ export interface TerminalTab {
 export interface EditorTab {
   id: string;
   path: string;
+  /** `source`, `split` or `rich`; meaningful for markdown only. */
+  mode: string;
+  /** First visible line, restored on reopen. */
+  line: number;
 }
 
 export interface Entry {
@@ -53,4 +57,35 @@ export interface SearchHit {
   line: number;
   column: number;
   text: string;
+}
+
+export interface WorkspaceSettings {
+  clipboardDir: string | null;
+  notifications: boolean | null;
+  theme: string | null;
+}
+
+export interface Settings {
+  version: number;
+  theme: string;
+  terminalFontFamily: string;
+  terminalFontSize: number;
+  terminalLineHeight: number;
+  editorFontFamily: string;
+  editorFontSize: number;
+  proseFontFamily: string;
+  proseFontSize: number;
+  autosave: boolean;
+  autosaveDelayMs: number;
+  notifications: boolean;
+  quietThresholdS: number;
+  assetWarnMb: number;
+  languages: Record<string, string>;
+  workspaces: Record<string, WorkspaceSettings>;
+}
+
+export interface StoredAsset {
+  path: string;
+  link: string;
+  bytes: number;
 }

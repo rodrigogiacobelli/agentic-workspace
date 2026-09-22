@@ -8,6 +8,7 @@ import { report } from "./Switcher";
 interface Props {
   session: Session;
   openSwitcher: () => void;
+  openSettings: () => void;
 }
 
 function basename(p: string): string {
@@ -19,7 +20,7 @@ function labelOf(tab: TerminalTab): string {
   return tab.name ?? terminals.get(tab.id)?.title ?? basename(tab.cwd);
 }
 
-export function TerminalWindow({ session, openSwitcher }: Props) {
+export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
   const ws = session.workspaces.find((w) => w.id === session.active);
   const host = useRef<HTMLDivElement>(null);
   const [, bump] = useState(0);
@@ -79,6 +80,7 @@ export function TerminalWindow({ session, openSwitcher }: Props) {
           void api.pasteText().then((t) => { if (t) inst?.term.paste(t); });
           break;
         case "search": setSearching(true); break;
+        case "settings": openSettings(); break;
         case "quit": void api.requestQuit(); break;
         default: return;
       }
@@ -87,7 +89,7 @@ export function TerminalWindow({ session, openSwitcher }: Props) {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [ws, activeId, cycle, openSwitcher]);
+  }, [ws, activeId, cycle, openSwitcher, openSettings]);
 
   if (!ws) {
     return <main className="empty">Add a folder to start.</main>;

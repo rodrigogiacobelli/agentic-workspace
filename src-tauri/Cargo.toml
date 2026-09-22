@@ -17,7 +17,7 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 # Tauri 3 alphas are on crates.io; every Tauri crate stays on the 2.x line.
-tauri = { version = "2.11", features = [] }
+tauri = { version = "2.11", features = ["protocol-asset"] }
 tauri-plugin-clipboard-manager = "2.3"
 tauri-plugin-dialog = "2.7"
 tauri-plugin-opener = "2.5"
