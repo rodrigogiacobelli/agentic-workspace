@@ -1,13 +1,14 @@
 ---
 id: 004-central-settings-store
-title: "ADR-004: Settings live in a central store, never in the user's repos"
-summary: Why per-project settings are keyed by path in the application's own
-  store under the XDG data directory instead of a dotfile at the project root,
-  and what that costs in portability.
+title: 'ADR-004: Settings live in a central store, never in the user''s repos'
+summary: Why per-project settings are keyed by path in the application's own store
+  under the XDG data directory instead of a dotfile at the project root, and what
+  that costs in portability.
 related:
-  - vision-agentic-workspace
-  - 007-workspace-is-one-directory
-  - standards-repository
+- vision-agentic-workspace
+- 007-workspace-is-one-directory
+- standards-repository
+- 014-one-layout-tree
 ---
 
 # ADR-004: Settings live in a central store, never in the user's repos

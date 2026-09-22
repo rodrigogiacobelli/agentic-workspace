@@ -139,13 +139,18 @@ A native Linux desktop app for running several agent-driven projects at once.
 Two OS windows — a file tree and markdown editor, and a tabbed terminal — over a
 workspace switcher that keeps every project's terminals alive in the background.
 
-Three milestones run: workspaces, both windows, backend-owned terminals, the
-file tree, session restore, the three-mode markdown editor with clipboard
-assets and external-change handling, git with branches and worktrees, and the
-two agent signals. The Rust backend is `src-tauri/src/`, the React frontend is
-`src/`, the editor is `src/editor/`. Mermaid, the grammar importer and HTML
-preview are not built; treat any claim about them as false until you have read
-the code.
+Seven milestones run. The first three: workspaces, both windows, backend-owned
+terminals, the file tree, session restore, the three-mode markdown editor with
+clipboard assets and external-change handling, git with branches and worktrees,
+and the two agent signals. The next four: app-drawn window chrome over a
+tray-resident process, preview tabs, the layout tree that drives both editor
+splits and panel docking, custom views, `@/` citations with *Quote to AI*, the
+typing helpers, and the operations document. The Rust backend is
+`src-tauri/src/`, the React frontend is `src/`, the editor is `src/editor/`.
+Mermaid, the grammar importer and HTML preview are not built; treat any claim
+about them as false until you have read the code. The second in-flight
+specification is `working/acceptance-criteria-2.md`: the first one is frozen and
+the ids continue its groups, so a citation of `ED-07` or `BR-08` still resolves.
 
 ## Where things are
 
@@ -158,15 +163,16 @@ the code.
 | `src/` | React frontend: the two window shells, terminal and editor registries |
 | `README.md` | The outward-facing description, build steps and key bindings |
 | `CLAUDE.md` | This file. How to work here |
-| `working/` | Throwaway, git-ignored. Holds `acceptance-criteria.md`, the in-flight spec |
+| `working/` | Throwaway, git-ignored. Holds `acceptance-criteria.md` and `acceptance-criteria-2.md`, the in-flight specs |
 
 **Documentation goes to the codex. Everything else is throwaway and goes to
 `working/`.** There is no `docs/` directory and no third location.
 
-`working/acceptance-criteria.md` is the in-flight specification: every
-behaviour as Given/When/Then with an id and a P0/P1/P2 priority. Cite ids
-(`ED-07`, `BR-08`) when you discuss behaviour. It is not version controlled —
-as behaviour is built, its facts move into codex documents, which are.
+`working/acceptance-criteria.md` and `working/acceptance-criteria-2.md` are the
+in-flight specifications: every behaviour as Given/When/Then with an id and a
+P0/P1/P2 priority. Cite ids (`ED-07`, `DOCK-08`) when you discuss behaviour.
+Neither is version controlled — as behaviour is built, its facts move into
+codex documents, which are.
 
 `.lore/codex/conceptual/` and `.lore/codex/technical/` are deliberately empty.
 The codex records what is true today, and no system exists yet. Write those

@@ -1,14 +1,15 @@
 ---
 id: 011-live-preview-over-codemirror
-title: "ADR-011: The rich editor is CodeMirror rendering markdown in place"
-summary: Why the rendered, editable markdown view is one CodeMirror 6 document
-  decorated in place rather than a second document model such as ProseMirror,
-  how that makes the byte-splice guarantee hold by construction, and what it
-  gives up in rendering freedom.
+title: 'ADR-011: The rich editor is CodeMirror rendering markdown in place'
+summary: Why the rendered, editable markdown view is one CodeMirror 6 document decorated
+  in place rather than a second document model such as ProseMirror, how that makes
+  the byte-splice guarantee hold by construction, and what it gives up in rendering
+  freedom.
 related:
-  - 003-source-markdown-is-canonical
-  - 010-react-frontend
-  - standards-code
+- 003-source-markdown-is-canonical
+- 010-react-frontend
+- standards-code
+- 015-views-and-citations
 ---
 
 # ADR-011: The rich editor is CodeMirror rendering markdown in place

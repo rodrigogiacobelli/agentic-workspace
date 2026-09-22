@@ -1,18 +1,19 @@
 ---
 id: operations-running-agentic-workspace
 title: Running Agentic Workspace
-summary: How to run Agentic Workspace from a checkout on Arch, build the deb,
-  rpm and AppImage bundles, install the AppImage and replace it with a newer
-  build without losing the session, start the app at login under KDE, and read
-  the four failures that stop it before a window appears.
+summary: How to run Agentic Workspace from a checkout on Arch, build the deb, rpm
+  and AppImage bundles, install the AppImage and replace it with a newer build without
+  losing the session, start the app at login under KDE, and read the four failures
+  that stop it before a window appears.
 related:
-  - standards-linux-desktop
-  - 008-tauri-v2-on-arch-kde
-  - 004-central-settings-store
+- standards-linux-desktop
+- 008-tauri-v2-on-arch-kde
+- 004-central-settings-store
+- 013-app-drawn-chrome-and-tray
 binds:
-  - src-tauri/tauri.conf.json
-  - package.json
-  - src-tauri/Cargo.toml
+- src-tauri/tauri.conf.json
+- package.json
+- src-tauri/Cargo.toml
 ---
 
 # Running Agentic Workspace

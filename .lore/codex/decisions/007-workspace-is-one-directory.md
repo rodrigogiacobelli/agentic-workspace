@@ -9,6 +9,7 @@ related:
 - 002-backend-owned-terminal-sessions
 - 004-central-settings-store
 - 012-git-through-the-git-binary
+- 015-views-and-citations
 ---
 
 # ADR-007: A workspace is exactly one directory

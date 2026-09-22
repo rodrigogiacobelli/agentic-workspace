@@ -1,14 +1,15 @@
 ---
 id: 010-react-frontend
-title: "ADR-010: React with TypeScript, and one session snapshot as the only state"
-summary: Why the frontend is React 19 over Vite in TypeScript, why it holds no
-  state store of its own, and how one backend-published session snapshot keeps
-  two windows showing the same workspace.
+title: 'ADR-010: React with TypeScript, and one session snapshot as the only state'
+summary: Why the frontend is React 19 over Vite in TypeScript, why it holds no state
+  store of its own, and how one backend-published session snapshot keeps two windows
+  showing the same workspace.
 related:
-  - 001-two-os-windows
-  - 008-tauri-v2-on-arch-kde
-  - 009-xterm-and-portable-pty
-  - standards-code
+- 001-two-os-windows
+- 008-tauri-v2-on-arch-kde
+- 009-xterm-and-portable-pty
+- standards-code
+- 014-one-layout-tree
 ---
 
 # ADR-010: React with TypeScript, and one session snapshot as the only state

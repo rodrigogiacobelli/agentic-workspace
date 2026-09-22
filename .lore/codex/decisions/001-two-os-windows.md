@@ -1,14 +1,14 @@
 ---
 id: 001-two-os-windows
-title: "ADR-001: Two OS windows rather than one split window"
-summary: Why Agentic Workspace ships a separate Workspace window and Terminal
-  window instead of one window with a terminal pane, what the compositor gains
-  from that, and the window-placement limits under Wayland it accepts in
-  exchange.
+title: 'ADR-001: Two OS windows rather than one split window'
+summary: Why Agentic Workspace ships a separate Workspace window and Terminal window
+  instead of one window with a terminal pane, what the compositor gains from that,
+  and the window-placement limits under Wayland it accepts in exchange.
 related:
-  - vision-agentic-workspace
-  - 008-tauri-v2-on-arch-kde
-  - standards-linux-desktop
+- vision-agentic-workspace
+- 008-tauri-v2-on-arch-kde
+- standards-linux-desktop
+- 013-app-drawn-chrome-and-tray
 ---
 
 # ADR-001: Two OS windows rather than one split window
