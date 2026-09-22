@@ -30,6 +30,27 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
 
   useEffect(() => terminals.onTitles(() => bump((n) => n + 1)), []);
 
+  // A path printed in a terminal is resolved against that terminal's working
+  // directory, then opened in the Workspace window at its line.
+  useEffect(() => {
+    terminals.setLinkHandler((terminalId, target) => {
+      const owner = session.workspaces.find((w) => w.terminals.some((t) => t.id === terminalId));
+      const tab = owner?.terminals.find((t) => t.id === terminalId);
+      if (!owner || !tab) return;
+      const root = owner.path.replace(/\/+$/, "");
+      let abs = target.path;
+      if (abs.startsWith("~/")) abs = `${root}/${abs.slice(2)}`;
+      else if (!abs.startsWith("/")) abs = `${tab.cwd.replace(/\/+$/, "")}/${abs}`;
+      const parts: string[] = [];
+      for (const p of abs.split("/")) { if (p === "..") parts.pop(); else if (p && p !== ".") parts.push(p); }
+      abs = `/${parts.join("/")}`;
+      if (abs !== root && !abs.startsWith(`${root}/`)) { report(`${abs} is outside the workspace ${owner.name}`); return; }
+      const rel = abs === root ? "" : abs.slice(root.length + 1);
+      void api.openAt({ workspaceId: owner.id, path: rel, line: target.line, column: target.column });
+      void api.focusWindow("workspace");
+    });
+  }, [session]);
+
   // Instances belong to tabs; a tab that vanished takes its instance with it.
   useEffect(() => {
     terminals.retain(new Set(session.workspaces.flatMap((w) => w.terminals.map((t) => t.id))));

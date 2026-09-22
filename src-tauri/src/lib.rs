@@ -178,6 +178,7 @@ pub fn run() {
             session::add_workspace,
             session::switch_workspace,
             session::remove_workspace,
+            session::rename_workspace,
             session::set_expanded,
             session::open_file,
             session::close_file,

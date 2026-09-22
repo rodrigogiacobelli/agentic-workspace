@@ -194,6 +194,21 @@ pub fn remove_workspace(app: AppHandle, state: tauri::State<AppState>, id: Strin
 }
 
 #[tauri::command]
+pub fn rename_workspace(app: AppHandle, state: tauri::State<AppState>, id: String, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("a workspace needs a name".into());
+    }
+    {
+        let mut session = state.session.lock();
+        let ws = session.workspace_mut(&id).ok_or_else(|| format!("no workspace {id}"))?;
+        ws.name = name;
+    }
+    publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn set_expanded(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String, expanded: bool) {
     {
         let mut session = state.session.lock();

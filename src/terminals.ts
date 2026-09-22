@@ -24,6 +24,59 @@ export interface Instance {
 const registry = new Map<string, Instance>();
 const titleListeners = new Set<() => void>();
 
+export interface LinkTarget {
+  path: string;
+  line: number;
+  column: number;
+}
+
+/** Resolves a path printed in a terminal against that terminal's directory. */
+let linkHandler: (terminalId: string, target: LinkTarget) => void = () => {};
+
+export function setLinkHandler(h: typeof linkHandler): void {
+  linkHandler = h;
+}
+
+const URL_RE = /https?:\/\/[^\s'"<>)\]]+/g;
+const PATH_RE = /(?:^|[\s'"(\[])((?:\.{1,2}\/|~\/|\/)?[\w.@+-]+(?:\/[\w.@+-]+)*\.[A-Za-z0-9]{1,8})(?::(\d+)(?::(\d+))?)?/g;
+
+/** URLs and file paths become links; Ctrl+click follows them. */
+function linkProvider(id: string): import("@xterm/xterm").ILinkProvider {
+  return {
+    provideLinks(y, callback) {
+      const inst = registry.get(id);
+      const line = inst?.term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
+      const links: import("@xterm/xterm").ILink[] = [];
+      for (const m of line.matchAll(URL_RE)) {
+        const start = (m.index ?? 0) + 1;
+        links.push({
+          range: { start: { x: start, y }, end: { x: start + m[0].length - 1, y } },
+          text: m[0],
+          decorations: { underline: true, pointerCursor: true },
+          activate: (e, text) => { if (e.ctrlKey || e.metaKey) void import("@tauri-apps/plugin-opener").then((o) => o.openUrl(text)); },
+        });
+      }
+      for (const m of line.matchAll(PATH_RE)) {
+        const offset = m[0].indexOf(m[1]);
+        const start = (m.index ?? 0) + offset + 1;
+        const suffix = m[2] ? `:${m[2]}${m[3] ? `:${m[3]}` : ""}` : "";
+        const text = `${m[1]}${suffix}`;
+        if (/^https?:/.test(m[1])) continue;
+        links.push({
+          range: { start: { x: start, y }, end: { x: start + text.length - 1, y } },
+          text,
+          decorations: { underline: true, pointerCursor: true },
+          activate: (e) => {
+            if (!(e.ctrlKey || e.metaKey)) return;
+            linkHandler(id, { path: m[1], line: Number(m[2] ?? 0), column: Number(m[3] ?? 0) });
+          },
+        });
+      }
+      callback(links);
+    },
+  };
+}
+
 export function onTitles(cb: () => void): () => void {
   titleListeners.add(cb);
   return () => titleListeners.delete(cb);
@@ -111,6 +164,7 @@ function create(id: string): Instance {
     return !(action && TERMINAL_ACTIONS.has(action));
   });
   inst.disposers.push(
+    term.registerLinkProvider(linkProvider(id)),
     term.onData((data) => void api.terminalWrite(id, data).catch(() => {})),
     term.onBinary((data) => void api.terminalWrite(id, data).catch(() => {})),
     term.onResize(({ cols, rows }) => void api.terminalResize(id, cols, rows).catch(() => {})),

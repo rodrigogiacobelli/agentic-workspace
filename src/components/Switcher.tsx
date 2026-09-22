@@ -1,7 +1,9 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { useState } from "react";
 import { api } from "../api";
 import type { Session, WindowRole } from "../types";
+import { Prompt } from "./Prompt";
 
 interface Props {
   session: Session;
@@ -14,6 +16,7 @@ interface Props {
 export function Switcher({ session, role, unsaved, onSettings }: Props) {
   const active = session.workspaces.find((w) => w.id === session.active);
   const other: WindowRole = role === "terminal" ? "workspace" : "terminal";
+  const [renaming, setRenaming] = useState(false);
 
   const addFolder = async () => {
     const picked = await open({ directory: true, multiple: false, title: "Add a workspace folder" });
@@ -60,6 +63,15 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
       )}
       <button onClick={() => void addFolder()} title="Add folder…">＋</button>
       {active && <button onClick={() => void remove()} title="Remove this workspace">－</button>}
+      {active && <button onClick={() => setRenaming(true)} title="Rename this workspace">✎</button>}
+      {renaming && active && (
+        <Prompt
+          title="Workspace name"
+          initial={active.name}
+          onClose={() => setRenaming(false)}
+          onSubmit={(name) => { setRenaming(false); void api.renameWorkspace(active.id, name).catch(report); }}
+        />
+      )}
       <span className="switcher-path">{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>
       <button onClick={onSettings} title="Settings (Ctrl+,)">⚙</button>
       <button onClick={() => void api.focusWindow(other)} title="Focus the other window (Ctrl+Shift+Space)">

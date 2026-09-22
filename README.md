@@ -162,5 +162,9 @@ Git runs through the `git` binary on your machine, so hooks run and your
 configuration applies. Desktop notifications go through `notify-send`; clicking
 one switches to the terminal that went quiet.
 
+`Ctrl`+click a path or URL printed in a terminal to open the file at that line
+in the Workspace window, or the URL in your browser. The ✎ button in the
+switcher renames a workspace; the path underneath does not change.
+
 Double-click a terminal tab to rename it; drag tabs to reorder them. Right-click
 in the file tree for file operations; deleting moves to the trash through GIO.

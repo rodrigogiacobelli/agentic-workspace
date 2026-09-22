@@ -10,12 +10,20 @@ import type {
 
 export type OutputChunk = ArrayBuffer | Uint8Array | number[];
 
+export interface OpenAt {
+  workspaceId: string;
+  path: string;
+  line: number;
+  column: number;
+}
+
 export const api = {
   getSession: () => invoke<Session>("get_session"),
   takeNotices: () => invoke<string[]>("take_notices"),
   addWorkspace: (path: string, name?: string) => invoke<string>("add_workspace", { path, name: name ?? null }),
   switchWorkspace: (id: string) => invoke<void>("switch_workspace", { id }),
   removeWorkspace: (id: string) => invoke<void>("remove_workspace", { id }),
+  renameWorkspace: (id: string, name: string) => invoke<void>("rename_workspace", { id, name }),
   setExpanded: (workspaceId: string, path: string, expanded: boolean) =>
     invoke<void>("set_expanded", { workspaceId, path, expanded }),
   openFile: (workspaceId: string, path: string) =>
@@ -148,6 +156,8 @@ export const api = {
   pasteText: () => readText(),
   /** Asks the workspace window, which knows about unsaved buffers, to quit. */
   requestQuit: () => emitTo("workspace", "quit-requested"),
+  /** Asks the workspace window to open a file at a line, from a terminal link. */
+  openAt: (target: OpenAt) => emitTo("workspace", "open-at", target),
 };
 
 export const events = {
@@ -165,6 +175,8 @@ export const events = {
     listen<string>("git-changed", (e) => cb(e.payload)),
   onHotkey: (cb: (s: HotkeyStatus) => void): Promise<UnlistenFn> =>
     listen<HotkeyStatus>("hotkey-changed", (e) => cb(e.payload)),
+  onOpenAt: (cb: (t: OpenAt) => void): Promise<UnlistenFn> =>
+    listen<OpenAt>("open-at", (e) => cb(e.payload)),
 };
 
 export function toBytes(chunk: OutputChunk): Uint8Array {

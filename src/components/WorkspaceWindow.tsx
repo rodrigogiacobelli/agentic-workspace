@@ -66,6 +66,15 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     });
   }, [ws]);
 
+  // A terminal link or a notification asked for a file at a line.
+  useEffect(() => {
+    const unlisten = events.onOpenAt(async (t) => {
+      if (t.workspaceId !== session.active) await api.switchWorkspace(t.workspaceId).catch(report);
+      api.openFile(t.workspaceId, t.path).then((id) => { if (t.line > 0) editors.revealLine(id, t.line, Math.max(0, t.column - 1)); }).catch(report);
+    });
+    return () => { void unlisten.then((u) => u()); };
+  }, [session.active]);
+
   // An agent rewrote something: every open document in that directory checks its file.
   useEffect(() => {
     const unlisten = events.onDirChanged((change) => editors.checkDisk(change.workspaceId, change.dirs));
