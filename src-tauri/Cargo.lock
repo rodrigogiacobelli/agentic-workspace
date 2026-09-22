@@ -16,6 +16,7 @@ dependencies = [
  "ashpd",
  "futures-util",
  "glib",
+ "gtk",
  "notify",
  "parking_lot",
  "portable-pty",
