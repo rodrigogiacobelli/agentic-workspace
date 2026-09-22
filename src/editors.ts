@@ -5,7 +5,19 @@ import { api } from "./api";
 import { Doc, type DocHooks, type Mode } from "./editor/document";
 import { languageFor } from "./editor/languages";
 import * as settings from "./settings";
-import type { EditorTab, Workspace } from "./types";
+import type { EditorGroup, EditorTab, Workspace } from "./types";
+
+export function activeGroup(ws: Workspace): EditorGroup | undefined {
+  return ws.groups.find((g) => g.id === ws.activeGroup) ?? ws.groups[0];
+}
+
+export function activeEditorId(ws: Workspace): string | null {
+  return activeGroup(ws)?.activeEditor ?? null;
+}
+
+export function allTabIds(workspaces: Workspace[]): Set<string> {
+  return new Set(workspaces.flatMap((w) => w.groups.flatMap((g) => g.editors.map((e) => e.id))));
+}
 
 export type Entry = { doc: Doc } | { binary: string };
 

@@ -54,7 +54,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
   useEffect(() => {
-    editors.retain(new Set(session.workspaces.flatMap((w) => w.editors.map((e) => e.id))));
+    editors.retain(editors.allTabIds(session.workspaces));
   }, [session]);
 
   // Links inside documents open files here; notices surface here.
@@ -75,15 +75,16 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   // Files dropped from the file manager land in the document under the pointer.
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type !== "drop" || !ws?.activeEditor) return;
-      const doc = editors.doc(ws.activeEditor);
+      const activeId = ws ? editors.activeEditorId(ws) : null;
+      if (event.payload.type !== "drop" || !activeId) return;
+      const doc = editors.doc(activeId);
       if (!doc) return;
       const scale = window.devicePixelRatio || 1;
       const { x, y } = event.payload.position;
       void doc.insertPaths(event.payload.paths, { x: x / scale, y: y / scale });
     });
     return () => { void unlisten.then((u) => u()); };
-  }, [ws?.activeEditor]);
+  }, [ws]);
 
   const openQuickOpen = async () => {
     if (!ws) return;
@@ -97,6 +98,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     const onKey = (e: KeyboardEvent) => {
       const action = actionFor(e);
       if (!action) return;
+      const activeId = ws ? editors.activeEditorId(ws) : null;
       switch (action) {
         case "switch-workspace": openSwitcher(); break;
         case "focus-other-window": void api.focusWindow("terminal"); break;
@@ -104,13 +106,21 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
         case "search": setSidebar("search"); break;
         case "git": setSidebar("git"); break;
         case "settings": openSettings(); break;
-        case "save": if (ws?.activeEditor) void editors.save(ws.activeEditor).catch(report); break;
-        case "close-editor": if (ws?.activeEditor) void closeTab(ws, ws.activeEditor); break;
-        case "cycle-mode": if (ws?.activeEditor) editors.doc(ws.activeEditor)?.cycleMode(); break;
+        case "save": if (activeId) void editors.save(activeId).catch(report); break;
+        case "close-editor": if (ws && activeId) void closeTab(ws, activeId); break;
+        case "cycle-mode": if (activeId) editors.doc(activeId)?.cycleMode(); break;
+        case "split-editor": if (ws) void api.splitEditor(ws.id).catch(report); break;
+        case "move-editor": {
+          if (!ws || !activeId) break;
+          const i = ws.groups.findIndex((g) => g.id === ws.activeGroup);
+          const next = ws.groups[i + 1] ?? ws.groups[0];
+          void api.moveEditor(ws.id, activeId, ws.groups.length > 1 && next.id !== ws.activeGroup ? next.id : "", null).catch(report);
+          break;
+        }
         case "next-tab": cycle(ws, 1); break;
         case "prev-tab": cycle(ws, -1); break;
         case "copy-relative-path": {
-          const path = selected ?? ws?.editors.find((t) => t.id === ws.activeEditor)?.path;
+          const path = selected ?? (ws && activeId ? editors.activeGroup(ws)?.editors.find((t) => t.id === activeId)?.path : undefined);
           if (path) void api.copyText(path);
           break;
         }
@@ -167,8 +177,9 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
 }
 
 function cycle(ws: Workspace | undefined, delta: number) {
-  if (!ws || ws.editors.length === 0) return;
-  const i = ws.editors.findIndex((t) => t.id === ws.activeEditor);
-  const next = ws.editors[(i + delta + ws.editors.length) % ws.editors.length];
+  const group = ws ? editors.activeGroup(ws) : undefined;
+  if (!ws || !group || group.editors.length === 0) return;
+  const i = group.editors.findIndex((t) => t.id === group.activeEditor);
+  const next = group.editors[(i + delta + group.editors.length) % group.editors.length];
   void api.setActiveEditor(ws.id, next.id);
 }

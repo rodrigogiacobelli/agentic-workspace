@@ -1,17 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { LANGUAGES, languageFor } from "../editor/languages";
 import * as settings from "../settings";
-import type { DiffTarget, Workspace } from "../types";
+import type { DiffTarget, EditorGroup, Workspace } from "../types";
 import { DiffView } from "./DiffView";
 import { report } from "./Switcher";
 
+const TAB_MIME = "application/x-agentic-tab";
+
 export async function closeTab(ws: Workspace, id: string): Promise<void> {
   if (editors.isDirty(id)) {
-    const path = ws.editors.find((t) => t.id === id)?.path ?? "this file";
+    const path = ws.groups.flatMap((g) => g.editors).find((t) => t.id === id)?.path ?? "this file";
     const discard = await ask(`${path} has unsaved changes. Close it and discard them?`, {
       title: "Unsaved changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep open",
     });
@@ -27,13 +29,60 @@ interface AreaProps {
   onDiffChanged: () => void;
 }
 
+/** The editor groups side by side, or the diff view in their place. */
 export function EditorArea({ ws, diff, onCloseDiff, onDiffChanged }: AreaProps) {
+  const area = useRef<HTMLDivElement>(null);
+  const [ratio, setRatio] = useState(ws.splitRatio);
+  useEffect(() => setRatio(ws.splitRatio), [ws.splitRatio, ws.id]);
+
+  const startDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const el = area.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    let current = ratio;
+    const move = (ev: MouseEvent) => {
+      current = Math.min(0.85, Math.max(0.15, (ev.clientX - rect.left) / rect.width));
+      setRatio(current);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      void api.setSplitRatio(ws.id, current);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  return (
+    <section className="editor-area">
+      {diff ? (
+        <DiffView ws={ws} target={diff} onClose={onCloseDiff} onChanged={onDiffChanged} />
+      ) : (
+        <div className="editor-groups" ref={area}>
+          {ws.groups.map((g, i) => (
+            <Fragment key={g.id}>
+              {i > 0 && <div className="group-divider" onMouseDown={startDrag} />}
+              <GroupView
+                ws={ws}
+                group={g}
+                active={g.id === ws.activeGroup || ws.groups.length === 1}
+                style={ws.groups.length === 2 ? { flex: `${i === 0 ? ratio : 1 - ratio} 1 0` } : { flex: "1 1 0" }}
+              />
+            </Fragment>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function GroupView({ ws, group, active, style }: { ws: Workspace; group: EditorGroup; active: boolean; style: React.CSSProperties }) {
   const host = useRef<HTMLDivElement>(null);
   const shownRef = useRef<string | null>(null);
-  const dragging = useRef<string | null>(null);
   const [, bump] = useState(0);
-  const activeId = ws.activeEditor;
-  const tab = ws.editors.find((t) => t.id === activeId);
+  const activeId = group.activeEditor;
+  const tab = group.editors.find((t) => t.id === activeId);
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
 
@@ -45,30 +94,47 @@ export function EditorArea({ ws, diff, onCloseDiff, onDiffChanged }: AreaProps) 
     if (tab) void editors.mount(ws, tab, container).catch(report);
   }, [activeId, ws, tab]);
 
-  const drop = (targetId: string) => {
-    const from = dragging.current;
-    dragging.current = null;
-    if (!from || from === targetId) return;
-    const ids = ws.editors.map((t) => t.id);
-    ids.splice(ids.indexOf(from), 1);
-    ids.splice(ids.indexOf(targetId), 0, from);
-    void api.reorderEditors(ws.id, ids);
+  useEffect(() => () => { if (shownRef.current) editors.unmount(shownRef.current); }, []);
+
+  const dropOnTab = (e: React.DragEvent, index: number | null) => {
+    const id = e.dataTransfer.getData(TAB_MIME);
+    if (!id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (group.editors.some((t) => t.id === id)) {
+      if (index === null) return;
+      const ids = group.editors.map((t) => t.id);
+      const from = ids.indexOf(id);
+      ids.splice(from, 1);
+      ids.splice(index > from ? index - 1 : index, 0, id);
+      void api.reorderEditors(ws.id, group.id, ids);
+    } else {
+      void api.moveEditor(ws.id, id, group.id, index).catch(report);
+    }
   };
 
   const entry = tab ? editors.get(tab.id) : undefined;
   const doc = entry && "doc" in entry ? entry.doc : undefined;
 
   return (
-    <section className="editor-area">
-      <div className="tabs">
-        {ws.editors.map((t) => (
+    <div
+      className={`editor-group${active ? " active" : ""}`}
+      style={style}
+      onMouseDownCapture={() => { if (ws.activeGroup !== group.id) void api.setActiveGroup(ws.id, group.id); }}
+    >
+      <div
+        className="tabs"
+        onDragOver={(e) => { if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault(); }}
+        onDrop={(e) => dropOnTab(e, null)}
+      >
+        {group.editors.map((t, i) => (
           <div
             key={t.id}
             className={`tab${t.id === activeId ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}`}
             draggable
-            onDragStart={() => { dragging.current = t.id; }}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={() => drop(t.id)}
+            onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
+            onDragOver={(e) => { if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault(); }}
+            onDrop={(e) => dropOnTab(e, i)}
             onClick={() => void api.setActiveEditor(ws.id, t.id)}
             title={t.path}
           >
@@ -76,21 +142,22 @@ export function EditorArea({ ws, diff, onCloseDiff, onDiffChanged }: AreaProps) 
             <button className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(ws, t.id); }} title="Close (Ctrl+W)">×</button>
           </div>
         ))}
+        <span className="tabs-spacer" />
+        <button className="tab-add" onClick={() => void api.splitEditor(ws.id).catch(report)} title="Split the editor (Ctrl+\)">⫿</button>
       </div>
-      {tab && !diff && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
-      {doc && !diff && <Banner doc={doc} />}
-      <div className="editor-host" ref={host} hidden={!!diff}>
-        {ws.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
+      {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
+      {doc && <Banner doc={doc} />}
+      <div className="editor-host" ref={host}>
+        {group.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
       </div>
-      {diff && <DiffView ws={ws} target={diff} onClose={onCloseDiff} onChanged={onDiffChanged} />}
       {entry && "binary" in entry && tab && (
         <div className="binary-notice">
           <p>{tab.path} is not a text file.</p>
           <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
         </div>
       )}
-      {tab && !diff && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
-    </section>
+      {tab && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
+    </div>
   );
 }
 
@@ -164,7 +231,6 @@ function StatusBar({ ws, tabId, path, doc }: { ws: Workspace; tabId: string; pat
       return;
     }
     editors.reopen(tabId);
-    // The tab is re-mounted by the area's effect on the next render.
     void api.setActiveEditor(ws.id, tabId);
   };
   const toggleBlame = async () => {

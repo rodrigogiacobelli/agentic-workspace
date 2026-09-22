@@ -14,8 +14,11 @@ export interface Workspace {
   name: string;
   terminals: TerminalTab[];
   activeTerminal: string | null;
-  editors: EditorTab[];
-  activeEditor: string | null;
+  /** Editor groups side by side, left to right; never empty. */
+  groups: EditorGroup[];
+  activeGroup: string | null;
+  /** Width of the first group as a fraction of the editor area. */
+  splitRatio: number;
   /** Expanded tree directories, relative to `path`. */
   expanded: string[];
   /** Recently opened files, relative to `path`, most recent first. */
@@ -39,6 +42,12 @@ export interface TerminalTab {
   name: string | null;
   cwd: string;
   attention: boolean;
+}
+
+export interface EditorGroup {
+  id: string;
+  editors: EditorTab[];
+  activeEditor: string | null;
 }
 
 export interface EditorTab {

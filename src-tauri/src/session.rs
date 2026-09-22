@@ -1,7 +1,7 @@
 //! Session state: the workspace list, and the one function that publishes it.
 
 use crate::pty;
-use crate::state::{AppState, EditorTab, Session, TerminalTab, Workspace};
+use crate::state::{AppState, EditorGroup, EditorTab, Session, TerminalTab, Workspace};
 use crate::store;
 use crate::watch;
 use anyhow::{Context, Result};
@@ -24,6 +24,7 @@ pub fn persist(app: &AppHandle) -> Session {
         let git = state.git.lock();
         let active = session.active.clone();
         for ws in session.workspaces.iter_mut() {
+            ws.ensure_groups();
             ws.available = ws.path.is_dir();
             ws.git = git.get(&ws.id).cloned();
             // The tab on screen cannot need attention.
@@ -130,6 +131,9 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
                     name,
                     terminals: vec![TerminalTab { id: terminal.clone(), name: None, cwd: path.clone(), attention: false }],
                     active_terminal: Some(terminal),
+                    groups: Vec::new(),
+                    active_group: None,
+                    split_ratio: 0.5,
                     editors: Vec::new(),
                     active_editor: None,
                     expanded: Vec::new(),
@@ -204,7 +208,13 @@ pub fn set_expanded(app: AppHandle, state: tauri::State<AppState>, workspace_id:
     publish(&app);
 }
 
-/// Opens a file in an editor tab, or focuses the tab already showing it.
+fn default_mode(path: &str) -> &'static str {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".md") || lower.ends_with(".markdown") { "rich" } else { "source" }
+}
+
+/// Opens a file in the active editor group, or focuses the tab already
+/// showing it there.
 #[tauri::command]
 pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<String, String> {
     let id = {
@@ -212,16 +222,16 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
         let ws = session
             .workspace_mut(&workspace_id)
             .ok_or_else(|| format!("no workspace {workspace_id}"))?;
-        let id = match ws.editors.iter().find(|e| e.path == path) {
+        let group = ws.active_group_mut();
+        let id = match group.editors.iter().find(|e| e.path == path) {
             Some(tab) => tab.id.clone(),
             None => {
                 let id = crate::state::new_id();
-                let mode = if path.to_lowercase().ends_with(".md") || path.to_lowercase().ends_with(".markdown") { "rich" } else { "source" };
-                ws.editors.push(EditorTab { id: id.clone(), path: path.clone(), mode: mode.into(), line: 0 });
+                group.editors.push(EditorTab { id: id.clone(), path: path.clone(), mode: default_mode(&path).into(), line: 0 });
                 id
             }
         };
-        ws.active_editor = Some(id.clone());
+        group.active_editor = Some(id.clone());
         ws.recent_files.retain(|p| p != &path);
         ws.recent_files.insert(0, path);
         ws.recent_files.truncate(RECENT_FILES_MAX);
@@ -238,7 +248,11 @@ pub fn open_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
 pub fn set_editor_view(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String, mode: String, line: u32) {
     {
         let mut session = state.session.lock();
-        if let Some(tab) = session.workspace_mut(&workspace_id).and_then(|ws| ws.editors.iter_mut().find(|e| e.id == id)) {
+        if let Some(tab) = session
+            .workspace_mut(&workspace_id)
+            .and_then(|ws| ws.group_of_editor_mut(&id))
+            .and_then(|g| g.editors.iter_mut().find(|e| e.id == id))
+        {
             tab.mode = mode;
             tab.line = line;
         }
@@ -246,17 +260,24 @@ pub fn set_editor_view(app: AppHandle, state: tauri::State<AppState>, workspace_
     persist(&app);
 }
 
+/// Closes a tab; a group left empty closes itself unless it is the last one.
 #[tauri::command]
 pub fn close_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String) {
     {
         let mut session = state.session.lock();
         if let Some(ws) = session.workspace_mut(&workspace_id) {
-            let index = ws.editors.iter().position(|e| e.id == id).unwrap_or(0);
-            ws.editors.retain(|e| e.id != id);
-            if ws.active_editor.as_deref() == Some(&id) {
-                let next = index.min(ws.editors.len().saturating_sub(1));
-                ws.active_editor = ws.editors.get(next).map(|e| e.id.clone());
+            if let Some(group) = ws.group_of_editor_mut(&id) {
+                let index = group.editors.iter().position(|e| e.id == id).unwrap_or(0);
+                group.editors.retain(|e| e.id != id);
+                if group.active_editor.as_deref() == Some(&id) {
+                    let next = index.min(group.editors.len().saturating_sub(1));
+                    group.active_editor = group.editors.get(next).map(|e| e.id.clone());
+                }
             }
+            if ws.groups.len() > 1 {
+                ws.groups.retain(|g| !g.editors.is_empty());
+            }
+            ws.ensure_groups();
         }
     }
     watch::sync(&app);
@@ -268,8 +289,12 @@ pub fn set_active_editor(app: AppHandle, state: tauri::State<AppState>, workspac
     {
         let mut session = state.session.lock();
         if let Some(ws) = session.workspace_mut(&workspace_id) {
-            if ws.editors.iter().any(|e| e.id == id) {
-                ws.active_editor = Some(id);
+            let group_id = ws.group_of_editor_mut(&id).map(|g| {
+                g.active_editor = Some(id.clone());
+                g.id.clone()
+            });
+            if let Some(g) = group_id {
+                ws.active_group = Some(g);
             }
         }
     }
@@ -277,14 +302,100 @@ pub fn set_active_editor(app: AppHandle, state: tauri::State<AppState>, workspac
 }
 
 #[tauri::command]
-pub fn reorder_editors(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, ids: Vec<String>) {
+pub fn set_active_group(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, group_id: String) {
     {
         let mut session = state.session.lock();
         if let Some(ws) = session.workspace_mut(&workspace_id) {
-            reorder(&mut ws.editors, &ids, |e| &e.id);
+            if ws.groups.iter().any(|g| g.id == group_id) {
+                ws.active_group = Some(group_id);
+            }
         }
     }
     publish(&app);
+}
+
+#[tauri::command]
+pub fn reorder_editors(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, group_id: String, ids: Vec<String>) {
+    {
+        let mut session = state.session.lock();
+        if let Some(group) = session.workspace_mut(&workspace_id).and_then(|ws| ws.group_mut(&group_id)) {
+            reorder(&mut group.editors, &ids, |e| &e.id);
+        }
+    }
+    publish(&app);
+}
+
+/// Opens a second group beside the active one showing the same file, so two
+/// views — or two files — sit side by side.
+#[tauri::command]
+pub fn split_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String) -> Result<(), String> {
+    {
+        let mut session = state.session.lock();
+        let ws = session.workspace_mut(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+        ws.ensure_groups();
+        let (index, tab) = {
+            let active = ws.active_group_mut();
+            let tab = active.active_editor.as_deref().and_then(|id| active.editors.iter().find(|e| e.id == id)).cloned();
+            (ws.groups.iter().position(|g| Some(&g.id) == ws.active_group.as_ref()).unwrap_or(0), tab)
+        };
+        let id = crate::state::new_id();
+        let editors = tab.map(|t| vec![EditorTab { id: crate::state::new_id(), path: t.path, mode: t.mode, line: t.line }]).unwrap_or_default();
+        let active_editor = editors.first().map(|e| e.id.clone());
+        ws.groups.insert(index + 1, EditorGroup { id: id.clone(), editors, active_editor });
+        ws.active_group = Some(id);
+    }
+    watch::sync(&app);
+    publish(&app);
+    Ok(())
+}
+
+/// Moves a tab into another group, or into a new group to the right when
+/// `group_id` is empty. The tab keeps its id, so its editor state travels.
+#[tauri::command]
+pub fn move_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String, group_id: String, index: Option<usize>) -> Result<(), String> {
+    {
+        let mut session = state.session.lock();
+        let ws = session.workspace_mut(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+        let tab = {
+            let Some(from) = ws.group_of_editor_mut(&id) else { return Err(format!("no editor {id}")) };
+            let pos = from.editors.iter().position(|e| e.id == id).ok_or("no such tab")?;
+            let tab = from.editors.remove(pos);
+            if from.active_editor.as_deref() == Some(&id) {
+                from.active_editor = from.editors.get(pos.min(from.editors.len().saturating_sub(1))).map(|e| e.id.clone());
+            }
+            tab
+        };
+        let target = if group_id.is_empty() {
+            let gid = crate::state::new_id();
+            ws.groups.push(EditorGroup { id: gid.clone(), editors: Vec::new(), active_editor: None });
+            gid
+        } else {
+            group_id
+        };
+        if let Some(group) = ws.group_mut(&target) {
+            let at = index.unwrap_or(group.editors.len()).min(group.editors.len());
+            group.editors.insert(at, tab);
+            group.active_editor = Some(id);
+        }
+        ws.active_group = Some(target);
+        if ws.groups.len() > 1 {
+            ws.groups.retain(|g| !g.editors.is_empty());
+        }
+        ws.ensure_groups();
+    }
+    publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_split_ratio(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, ratio: f32) {
+    {
+        let mut session = state.session.lock();
+        if let Some(ws) = session.workspace_mut(&workspace_id) {
+            ws.split_ratio = ratio.clamp(0.15, 0.85);
+        }
+    }
+    persist(&app);
 }
 
 /// Raises a window. Under Wayland the compositor decides whether to honour

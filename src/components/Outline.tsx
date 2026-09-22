@@ -6,7 +6,8 @@ import type { Workspace } from "../types";
 export function Outline({ ws }: { ws: Workspace }) {
   const [, bump] = useState(0);
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
-  const doc = ws.activeEditor ? editors.doc(ws.activeEditor) : undefined;
+  const activeId = editors.activeEditorId(ws);
+  const doc = activeId ? editors.doc(activeId) : undefined;
   if (!doc) return <div className="tree-loading">Open a markdown file to see its outline.</div>;
   if (!doc.isMarkdown) return <div className="tree-loading">{doc.path} is not a markdown file.</div>;
   const headings = doc.outline();

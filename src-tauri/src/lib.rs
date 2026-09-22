@@ -50,6 +50,8 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         }
     };
 
+    let mut session = session;
+    session.workspaces.iter_mut().for_each(state::Workspace::ensure_groups);
     handle.manage(AppState {
         session: Mutex::new(session),
         settings: Mutex::new(settings::load(&data_dir)),
@@ -181,6 +183,10 @@ pub fn run() {
             session::close_file,
             session::set_active_editor,
             session::reorder_editors,
+            session::set_active_group,
+            session::split_editor,
+            session::move_editor,
+            session::set_split_ratio,
             session::set_editor_view,
             settings::get_settings,
             settings::update_settings,

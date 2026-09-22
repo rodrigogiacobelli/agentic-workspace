@@ -174,7 +174,7 @@ pub fn sync(app: &AppHandle) {
                 wanted.insert(ws.path.clone());
                 wanted.extend(ws.expanded.iter().map(|rel| ws.path.join(rel)));
             }
-            for tab in &ws.editors {
+            for tab in ws.all_editors() {
                 let file = ws.path.join(&tab.path);
                 if let Some(dir) = file.parent() {
                     wanted.insert(dir.to_path_buf());

@@ -145,6 +145,7 @@ cd src-tauri && cargo test --lib     # unit tests; no compositor or PTY needed
 | `Ctrl+P` | workspace | Quick open a file |
 | `Ctrl+S` / `Ctrl+W` | workspace | Save / close the editor tab |
 | `Ctrl+E` | workspace | Cycle the markdown editor: source → split → rich |
+| `Ctrl+\` / `Ctrl+Alt+\` | workspace | Split the editor area / move the tab to the other group |
 | `Ctrl+,` | both | Settings |
 | `Ctrl+Alt+Shift+C` | workspace | Copy the selected path, relative to the workspace |
 

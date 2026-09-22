@@ -38,9 +38,18 @@ pub struct Workspace {
     pub terminals: Vec<TerminalTab>,
     #[serde(default)]
     pub active_terminal: Option<String>,
+    /// Editor groups side by side, left to right. Never empty once published.
     #[serde(default)]
+    pub groups: Vec<EditorGroup>,
+    #[serde(default)]
+    pub active_group: Option<String>,
+    /// Width of the first group as a fraction of the editor area.
+    #[serde(default = "default_ratio")]
+    pub split_ratio: f32,
+    /// Session files from before editor groups existed hold these two.
+    #[serde(default, skip_serializing)]
     pub editors: Vec<EditorTab>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub active_editor: Option<String>,
     /// Expanded tree directories, relative to `path`.
     #[serde(default)]
@@ -85,6 +94,20 @@ pub struct TerminalTab {
     pub attention: bool,
 }
 
+fn default_ratio() -> f32 {
+    0.5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorGroup {
+    pub id: String,
+    #[serde(default)]
+    pub editors: Vec<EditorTab>,
+    #[serde(default)]
+    pub active_editor: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorTab {
@@ -101,6 +124,40 @@ pub struct EditorTab {
 
 fn default_mode() -> String {
     "rich".into()
+}
+
+impl Workspace {
+    /// Every workspace has at least one group; older session files and new
+    /// workspaces get theirs here.
+    pub fn ensure_groups(&mut self) {
+        if self.groups.is_empty() {
+            let id = new_id();
+            self.groups.push(EditorGroup { id: id.clone(), editors: std::mem::take(&mut self.editors), active_editor: self.active_editor.take() });
+            self.active_group = Some(id);
+        }
+        if self.active_group.as_deref().map(|g| !self.groups.iter().any(|x| x.id == g)).unwrap_or(true) {
+            self.active_group = self.groups.first().map(|g| g.id.clone());
+        }
+    }
+
+    pub fn group_mut(&mut self, id: &str) -> Option<&mut EditorGroup> {
+        self.groups.iter_mut().find(|g| g.id == id)
+    }
+
+    pub fn active_group_mut(&mut self) -> &mut EditorGroup {
+        self.ensure_groups();
+        let id = self.active_group.clone().unwrap_or_default();
+        let index = self.groups.iter().position(|g| g.id == id).unwrap_or(0);
+        &mut self.groups[index]
+    }
+
+    pub fn group_of_editor_mut(&mut self, editor_id: &str) -> Option<&mut EditorGroup> {
+        self.groups.iter_mut().find(|g| g.editors.iter().any(|e| e.id == editor_id))
+    }
+
+    pub fn all_editors(&self) -> impl Iterator<Item = &EditorTab> {
+        self.groups.iter().flat_map(|g| g.editors.iter())
+    }
 }
 
 impl Session {

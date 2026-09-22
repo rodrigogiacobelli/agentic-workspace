@@ -24,8 +24,16 @@ export const api = {
     invoke<void>("close_file", { workspaceId, id }),
   setActiveEditor: (workspaceId: string, id: string) =>
     invoke<void>("set_active_editor", { workspaceId, id }),
-  reorderEditors: (workspaceId: string, ids: string[]) =>
-    invoke<void>("reorder_editors", { workspaceId, ids }),
+  reorderEditors: (workspaceId: string, groupId: string, ids: string[]) =>
+    invoke<void>("reorder_editors", { workspaceId, groupId, ids }),
+  setActiveGroup: (workspaceId: string, groupId: string) =>
+    invoke<void>("set_active_group", { workspaceId, groupId }),
+  splitEditor: (workspaceId: string) => invoke<void>("split_editor", { workspaceId }),
+  /** An empty `groupId` opens a new group to the right. */
+  moveEditor: (workspaceId: string, id: string, groupId: string, index: number | null) =>
+    invoke<void>("move_editor", { workspaceId, id, groupId, index }),
+  setSplitRatio: (workspaceId: string, ratio: number) =>
+    invoke<void>("set_split_ratio", { workspaceId, ratio }),
   setEditorView: (workspaceId: string, id: string, mode: string, line: number) =>
     invoke<void>("set_editor_view", { workspaceId, id, mode, line }),
   focusWindow: (label: WindowRole) => invoke<void>("focus_window", { label }),

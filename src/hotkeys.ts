@@ -17,6 +17,8 @@ export type Action =
   | "copy-relative-path"
   | "cycle-mode"
   | "git"
+  | "split-editor"
+  | "move-editor"
   | "settings"
   | "quit";
 
@@ -27,6 +29,7 @@ export function actionFor(e: KeyboardEvent): Action | null {
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   if (!ctrl) return null;
   if (alt && shift && key === "c") return "copy-relative-path";
+  if (alt && key === "\\") return "move-editor";
   if (alt) return null;
   if (shift) {
     switch (key) {
@@ -48,6 +51,7 @@ export function actionFor(e: KeyboardEvent): Action | null {
     case "s": return "save";
     case "w": return "close-editor";
     case "e": return "cycle-mode";
+    case "\\": return "split-editor";
     case ",": return "settings";
     case "q": return "quit";
   }
