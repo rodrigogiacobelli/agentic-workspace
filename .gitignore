@@ -1,6 +1,7 @@
 # Throwaway files — scratch scripts, experiments, one-off output, agent
 # scratchpads. Nothing here is ever committed. See standards-repository.
 **/working/**
+clipboard/
 
 # Node
 node_modules/
