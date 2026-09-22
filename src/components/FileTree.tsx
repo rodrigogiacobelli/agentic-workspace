@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
-import type { Entry, Workspace } from "../types";
+import type { Entry, StatusEntry, Workspace } from "../types";
 import { Prompt } from "./Prompt";
 import { report } from "./Switcher";
 
@@ -10,6 +10,24 @@ interface Props {
   onOpen: (path: string) => void;
   selected: string | null;
   onSelect: (path: string | null) => void;
+  gitStatus?: StatusEntry[];
+}
+
+/** One letter per path, and a summary letter for every ancestor directory. */
+function statusMap(status: StatusEntry[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const s of status) {
+    const letter = s.conflicted ? "!" : s.untracked ? "U" : s.index !== "." ? s.index : s.worktree;
+    map.set(s.path, letter);
+    const parts = s.path.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      const dir = parts.slice(0, i).join("/");
+      const prev = map.get(dir);
+      if (prev === "!" ) continue;
+      map.set(dir, letter === "!" ? "!" : prev === "U" || letter === "U" ? "U" : "M");
+    }
+  }
+  return map;
 }
 
 interface Menu {
@@ -33,7 +51,8 @@ function join(dir: string, name: string): string {
 }
 
 /** The tree rooted at the workspace, read one directory at a time. */
-export function FileTree({ ws, onOpen, selected, onSelect }: Props) {
+export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Props) {
+  const gitMap = useMemo(() => statusMap(gitStatus), [gitStatus]);
   const [listings, setListings] = useState<Map<string, Entry[]>>(new Map());
   const [menu, setMenu] = useState<Menu | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
@@ -114,7 +133,7 @@ export function FileTree({ ws, onOpen, selected, onSelect }: Props) {
 
   const row = (e: Entry, depth: number, expanded: boolean, onClick: () => void) => (
     <div
-      className={`tree-row${e.ignored ? " ignored" : ""}${selected === e.path ? " selected" : ""}`}
+      className={`tree-row${e.ignored ? " ignored" : ""}${selected === e.path ? " selected" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
       style={{ paddingLeft: 8 + depth * 14 }}
       onClick={onClick}
       onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); onSelect(e.path); setMenu({ x: ev.clientX, y: ev.clientY, entry: e }); }}
@@ -122,6 +141,7 @@ export function FileTree({ ws, onOpen, selected, onSelect }: Props) {
     >
       <span className="tree-chevron">{e.isDir ? (expanded ? "▾" : "▸") : ""}</span>
       <span className="tree-name">{e.name}</span>
+      {gitMap.has(e.path) && <span className="tree-git">{e.isDir ? "•" : gitMap.get(e.path)}</span>}
     </div>
   );
 

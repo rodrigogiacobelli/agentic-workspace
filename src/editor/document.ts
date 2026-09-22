@@ -4,7 +4,7 @@
 import { Annotation, Compartment, EditorState, Text, type Extension } from "@codemirror/state";
 import {
   EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection,
-  dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine,
+  dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, gutter, GutterMarker,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from "@codemirror/commands";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -15,6 +15,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import * as settings from "../settings";
 import { languageExtension, type LanguageId } from "./languages";
+import type { BlameLine } from "../types";
 import { livePreview, mediaKind, type PreviewContext } from "./preview";
 
 export type Mode = "source" | "split" | "rich";
@@ -29,6 +30,21 @@ export interface DocHooks {
   /** Follow a link to a file inside the workspace. */
   openFile(relPath: string): void;
   notice(message: string): void;
+  /** Show a commit, from a blame annotation. */
+  showCommit(hash: string): void;
+}
+
+class BlameMarker extends GutterMarker {
+  constructor(readonly info: BlameLine, readonly onClick: () => void) { super(); }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-blame-line";
+    el.textContent = `${this.info.short} ${this.info.author} · ${this.info.date}`;
+    el.title = `${this.info.hash}\n${this.info.author} · ${this.info.date}`;
+    el.onclick = this.onClick;
+    return el;
+  }
+  eq(other: BlameMarker) { return other.info.hash === this.info.hash && other.info.line === this.info.line; }
 }
 
 const highlight = HighlightStyle.define([
@@ -96,6 +112,8 @@ export class Doc {
   private root: HTMLDivElement | null = null;
   private listeners = new Set<() => void>();
   private mergeComp = new Compartment();
+  private blameComp = new Compartment();
+  blameOn = false;
   private autosaveTimer: number | null = null;
   private viewTimer: number | null = null;
   private syncingScroll = false;
@@ -166,6 +184,7 @@ export class Doc {
       ]),
       ...this.common(),
       this.mergeComp.of([]),
+      this.blameComp.of([]),
       EditorView.updateListener.of((u) => this.onUpdate(u, this.source)),
     ];
   }
@@ -412,6 +431,25 @@ export class Doc {
     if (!this.diffOpen) return;
     this.source.dispatch({ effects: this.mergeComp.reconfigure([]) });
     this.diffOpen = false;
+  }
+
+  /** Annotates every line with its last commit, or clears the annotations. */
+  setBlame(lines: BlameLine[] | null): void {
+    this.blameOn = lines !== null;
+    const ext = lines
+      ? gutter({
+          class: "cm-blame-gutter",
+          lineMarker: (view, line) => {
+            const n = view.state.doc.lineAt(line.from).number;
+            const info = lines[n - 1];
+            return info ? new BlameMarker(info, () => { if (!/^0+$/.test(info.hash)) this.hooks.showCommit(info.hash); }) : null;
+          },
+          lineMarkerChange: () => false,
+        })
+      : [];
+    this.source.dispatch({ effects: this.blameComp.reconfigure(ext) });
+    if (lines && this.mode === "rich") this.setMode("source");
+    this.emit();
   }
 
   /** Line and column of the main cursor, 1-based. */

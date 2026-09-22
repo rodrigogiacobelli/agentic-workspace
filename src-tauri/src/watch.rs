@@ -13,6 +13,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const EVENT_DIR_CHANGED: &str = "dir-changed";
+pub const EVENT_GIT_CHANGED: &str = "git-changed";
 const SETTLE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +119,27 @@ fn emit(app: &AppHandle, dirs: HashSet<PathBuf>) {
         .iter()
         .map(|w| (w.id.clone(), w.path.clone()))
         .collect();
+    // A change under a repository's git directory means the branch, the
+    // index or the refs moved: the summary is refreshed and the panel told.
+    let git_dirs: Vec<(String, Vec<PathBuf>)> = state
+        .git
+        .lock()
+        .iter()
+        .map(|(id, g)| (id.clone(), g.git_dir.iter().chain(g.common_dir.iter()).cloned().collect()))
+        .collect();
+    let mut git_touched: HashSet<String> = HashSet::new();
+    for dir in &dirs {
+        for (id, gdirs) in &git_dirs {
+            if gdirs.iter().any(|g| dir.starts_with(g)) {
+                git_touched.insert(id.clone());
+            }
+        }
+    }
+    for id in git_touched {
+        crate::git::refresh_summary(app, &id);
+        let _ = app.emit(EVENT_GIT_CHANGED, &id);
+        session::publish(app);
+    }
     let mut per_workspace: HashMap<String, Vec<String>> = HashMap::new();
     for dir in dirs {
         // A directory may sit inside several workspaces (a worktree inside its
@@ -156,6 +178,16 @@ pub fn sync(app: &AppHandle) {
                 let file = ws.path.join(&tab.path);
                 if let Some(dir) = file.parent() {
                     wanted.insert(dir.to_path_buf());
+                }
+            }
+        }
+        // HEAD, the index and the refs of the active repository, so the
+        // branch shown follows a checkout made in the terminal.
+        if let Some(active) = session.active.as_deref() {
+            if let Some(g) = state.git.lock().get(active) {
+                for dir in g.git_dir.iter().chain(g.common_dir.iter()) {
+                    wanted.insert(dir.clone());
+                    wanted.insert(dir.join("refs/heads"));
                 }
             }
         }

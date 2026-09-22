@@ -138,7 +138,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
       {ws.terminals.map((tab) => (
         <div
           key={tab.id}
-          className={`tab${tab.id === ws.activeTerminal ? " active" : ""}`}
+          className={`tab${tab.id === ws.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}`}
           draggable
           onDragStart={() => { dragging.current = tab.id; }}
           onDragOver={(e) => e.preventDefault()}

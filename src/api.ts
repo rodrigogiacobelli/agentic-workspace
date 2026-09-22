@@ -3,14 +3,17 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { DirChanged, Entry, SearchHit, Session, Settings, StoredAsset, WindowRole } from "./types";
+import type {
+  BlameLine, Branches, CommitDetail, DirChanged, Entry, LogEntry, RepoInfo, SearchHit, Session, Settings,
+  StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
+} from "./types";
 
 export type OutputChunk = ArrayBuffer | Uint8Array | number[];
 
 export const api = {
   getSession: () => invoke<Session>("get_session"),
   takeNotices: () => invoke<string[]>("take_notices"),
-  addWorkspace: (path: string) => invoke<string>("add_workspace", { path }),
+  addWorkspace: (path: string, name?: string) => invoke<string>("add_workspace", { path, name: name ?? null }),
   switchWorkspace: (id: string) => invoke<void>("switch_workspace", { id }),
   removeWorkspace: (id: string) => invoke<void>("remove_workspace", { id }),
   setExpanded: (workspaceId: string, path: string, expanded: boolean) =>
@@ -80,6 +83,50 @@ export const api = {
   writeFile: (workspaceId: string, path: string, content: string) =>
     invoke<void>("write_file", { workspaceId, path, content }),
 
+  gitInfo: (workspaceId: string) => invoke<RepoInfo>("git_info", { workspaceId }),
+  gitInit: (workspaceId: string) => invoke<void>("git_init", { workspaceId }),
+  gitStatus: (workspaceId: string) => invoke<StatusEntry[]>("git_status", { workspaceId }),
+  gitDiff: (workspaceId: string, path: string, staged: boolean, untracked: boolean) =>
+    invoke<string>("git_diff", { workspaceId, path, staged, untracked }),
+  gitShowFile: (workspaceId: string, rev: string, path: string) =>
+    invoke<string>("git_show_file", { workspaceId, rev, path }),
+  gitCommitFileDiff: (workspaceId: string, hash: string, path: string) =>
+    invoke<string>("git_commit_file_diff", { workspaceId, hash, path }),
+  gitStage: (workspaceId: string, paths: string[]) => invoke<void>("git_stage", { workspaceId, paths }),
+  gitUnstage: (workspaceId: string, paths: string[]) => invoke<void>("git_unstage", { workspaceId, paths }),
+  gitStageAll: (workspaceId: string) => invoke<void>("git_stage_all", { workspaceId }),
+  gitUnstageAll: (workspaceId: string) => invoke<void>("git_unstage_all", { workspaceId }),
+  gitApplyHunk: (workspaceId: string, patch: string, reverse: boolean) =>
+    invoke<void>("git_apply_hunk", { workspaceId, patch, reverse }),
+  gitDiscard: (workspaceId: string, path: string, untracked: boolean) =>
+    invoke<void>("git_discard", { workspaceId, path, untracked }),
+  gitCommit: (workspaceId: string, message: string, amend: boolean) =>
+    invoke<string>("git_commit", { workspaceId, message, amend }),
+  gitLastMessage: (workspaceId: string) => invoke<string>("git_last_message", { workspaceId }),
+  gitLog: (workspaceId: string, skip: number, limit: number, path: string | null) =>
+    invoke<LogEntry[]>("git_log", { workspaceId, skip, limit, path }),
+  gitShow: (workspaceId: string, hash: string) => invoke<CommitDetail>("git_show", { workspaceId, hash }),
+  gitBlame: (workspaceId: string, path: string) => invoke<BlameLine[]>("git_blame", { workspaceId, path }),
+  gitBranches: (workspaceId: string) => invoke<Branches>("git_branches", { workspaceId }),
+  gitCreateBranch: (workspaceId: string, name: string, start: string | null) =>
+    invoke<void>("git_create_branch", { workspaceId, name, start }),
+  gitCheckout: (workspaceId: string, name: string, stash: boolean) =>
+    invoke<string>("git_checkout", { workspaceId, name, stash }),
+  gitDeleteBranch: (workspaceId: string, name: string, force: boolean) =>
+    invoke<string>("git_delete_branch", { workspaceId, name, force }),
+  gitUnmergedCommits: (workspaceId: string, name: string) =>
+    invoke<string[]>("git_unmerged_commits", { workspaceId, name }),
+  gitWorktrees: (workspaceId: string) => invoke<WorktreeEntry[]>("git_worktrees", { workspaceId }),
+  gitAddWorktree: (workspaceId: string, path: string, branch: string, create: boolean) =>
+    invoke<string>("git_add_worktree", { workspaceId, path, branch, create }),
+  gitRemoveWorktree: (workspaceId: string, path: string, force: boolean) =>
+    invoke<string>("git_remove_worktree", { workspaceId, path, force }),
+  gitWorktreeDirty: (path: string) => invoke<string[]>("git_worktree_dirty", { path }),
+  gitPruneWorktrees: (workspaceId: string, dryRun: boolean) =>
+    invoke<string[]>("git_prune_worktrees", { workspaceId, dryRun }),
+  gitRemote: (workspaceId: string, action: "fetch" | "pull" | "push", setUpstream: boolean) =>
+    invoke<string>("git_remote", { workspaceId, action, setUpstream }),
+
   copyText: (text: string) => writeText(text),
   pasteText: () => readText(),
   /** Asks the workspace window, which knows about unsaved buffers, to quit. */
@@ -97,6 +144,8 @@ export const events = {
     listen("quit-requested", () => cb()),
   onSettings: (cb: (s: Settings) => void): Promise<UnlistenFn> =>
     listen<Settings>("settings-changed", (e) => cb(e.payload)),
+  onGitChanged: (cb: (workspaceId: string) => void): Promise<UnlistenFn> =>
+    listen<string>("git-changed", (e) => cb(e.payload)),
 };
 
 export function toBytes(chunk: OutputChunk): Uint8Array {

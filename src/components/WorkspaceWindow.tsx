@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, events } from "../api";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
-import type { Session, Workspace } from "../types";
+import type { DiffTarget, RepoInfo, Session, StatusEntry, Workspace } from "../types";
 import { EditorArea, closeTab } from "./EditorArea";
 import { FileTree } from "./FileTree";
+import { GitPanel } from "./GitPanel";
 import { Palette, type PaletteItem } from "./Palette";
 import { SearchPanel } from "./SearchPanel";
 import { report } from "./Switcher";
@@ -20,8 +21,35 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   const ws = session.workspaces.find((w) => w.id === session.active);
   const [selected, setSelected] = useState<string | null>(null);
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
-  const [sidebar, setSidebar] = useState<"files" | "search">("files");
+  const [sidebar, setSidebar] = useState<"files" | "search" | "git">("files");
+  const [diff, setDiff] = useState<DiffTarget | null>(null);
+  const [gitStatus, setGitStatus] = useState<StatusEntry[]>([]);
+  const [gitInfo, setGitInfo] = useState<RepoInfo | null>(null);
+  const [gitTick, setGitTick] = useState(0);
   const [, bump] = useState(0);
+
+  // Git status follows the working tree: any change in the workspace, or in
+  // its repository, refreshes it.
+  const refreshGit = useCallback(() => setGitTick((n) => n + 1), []);
+  useEffect(() => {
+    if (!ws) return;
+    let cancelled = false;
+    api.gitInfo(ws.id).then((i) => { if (!cancelled) setGitInfo(i); }).catch(() => setGitInfo({ isRepo: false, branch: null, detached: false, state: null, isWorktree: false, mainWorktree: null, upstream: null, ahead: 0, behind: 0 }));
+    api.gitStatus(ws.id).then((s) => { if (!cancelled) setGitStatus(s); }).catch(() => setGitStatus([]));
+    return () => { cancelled = true; };
+  }, [ws?.id, gitTick]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    let timer: number | null = null;
+    const schedule = (id: string) => {
+      if (id !== ws?.id) return;
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(refreshGit, 300);
+    };
+    const a = events.onDirChanged((c) => schedule(c.workspaceId));
+    const b = events.onGitChanged(schedule);
+    return () => { void a.then((u) => u()); void b.then((u) => u()); if (timer) window.clearTimeout(timer); };
+  }, [ws?.id, refreshGit]);
+  useEffect(() => { setDiff(null); }, [ws?.id]);
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
   useEffect(() => {
@@ -33,6 +61,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     editors.setHooks({
       openFile: (rel) => { if (ws) void api.openFile(ws.id, rel).catch(report); },
       notice: (m) => report(m),
+      showCommit: (hash) => { setSidebar("git"); window.dispatchEvent(new CustomEvent("show-commit", { detail: hash })); },
     });
   }, [ws]);
 
@@ -72,6 +101,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
         case "focus-other-window": void api.focusWindow("terminal"); break;
         case "quick-open": void openQuickOpen(); break;
         case "search": setSidebar("search"); break;
+        case "git": setSidebar("git"); break;
         case "settings": openSettings(); break;
         case "save": if (ws?.activeEditor) void editors.save(ws.activeEditor).catch(report); break;
         case "close-editor": if (ws?.activeEditor) void closeTab(ws, ws.activeEditor); break;
@@ -107,16 +137,19 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
         <div className="sidebar-tabs">
           <button className={sidebar === "files" ? "active" : ""} onClick={() => setSidebar("files")}>Files</button>
           <button className={sidebar === "search" ? "active" : ""} onClick={() => setSidebar("search")} title="Ctrl+Shift+F">Search</button>
+          <button className={sidebar === "git" ? "active" : ""} onClick={() => setSidebar("git")} title="Ctrl+Shift+G">Git{gitStatus.length ? ` ${gitStatus.length}` : ""}</button>
         </div>
         {!ws.available ? (
           <div className="tree-loading">The directory {ws.path} is missing.</div>
         ) : sidebar === "files" ? (
-          <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p) => void api.openFile(ws.id, p).catch(report)} />
-        ) : (
+          <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p) => void api.openFile(ws.id, p).catch(report)} gitStatus={gitStatus} />
+        ) : sidebar === "search" ? (
           <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />
+        ) : (
+          <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={setDiff} onOpenFile={(p) => void api.openFile(ws.id, p).catch(report)} />
         )}
       </aside>
-      <EditorArea ws={ws} />
+      <EditorArea ws={ws} diff={diff} onCloseDiff={() => setDiff(null)} onDiffChanged={refreshGit} />
       {quickOpen && (
         <Palette
           title="Open file"

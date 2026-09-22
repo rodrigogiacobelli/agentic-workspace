@@ -1,13 +1,14 @@
 ---
 id: 007-workspace-is-one-directory
-title: "ADR-007: A workspace is exactly one directory"
-summary: Why a workspace maps to a single directory rather than a named set of
-  roots, why the list is curated by hand rather than discovered by scanning, and
-  how that makes a git worktree an ordinary workspace.
+title: 'ADR-007: A workspace is exactly one directory'
+summary: Why a workspace maps to a single directory rather than a named set of roots,
+  why the list is curated by hand rather than discovered by scanning, and how that
+  makes a git worktree an ordinary workspace.
 related:
-  - vision-agentic-workspace
-  - 002-backend-owned-terminal-sessions
-  - 004-central-settings-store
+- vision-agentic-workspace
+- 002-backend-owned-terminal-sessions
+- 004-central-settings-store
+- 012-git-through-the-git-binary
 ---
 
 # ADR-007: A workspace is exactly one directory

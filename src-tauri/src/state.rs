@@ -51,6 +51,26 @@ pub struct Workspace {
     /// Whether `path` is a directory right now. Computed when published.
     #[serde(default, skip_deserializing)]
     pub available: bool,
+    /// A background terminal here printed since it was last viewed.
+    #[serde(default, skip_deserializing)]
+    pub attention: bool,
+    /// Branch and state of the repository, when the directory is one.
+    #[serde(default, skip_deserializing)]
+    pub git: Option<GitSummary>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSummary {
+    pub is_repo: bool,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub state: Option<String>,
+    pub is_worktree: bool,
+    #[serde(skip)]
+    pub git_dir: Option<PathBuf>,
+    #[serde(skip)]
+    pub common_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +81,8 @@ pub struct TerminalTab {
     #[serde(default)]
     pub name: Option<String>,
     pub cwd: PathBuf,
+    #[serde(default, skip_deserializing)]
+    pub attention: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +112,10 @@ impl Session {
         self.workspaces.iter_mut().find(|w| w.id == id)
     }
 
+    pub fn workspace_of_terminal_mut_ref(&self, terminal_id: &str) -> Option<&Workspace> {
+        self.workspaces.iter().find(|w| w.terminals.iter().any(|t| t.id == terminal_id))
+    }
+
     pub fn workspace_of_terminal_mut(&mut self, terminal_id: &str) -> Option<&mut Workspace> {
         self.workspaces.iter_mut().find(|w| w.terminals.iter().any(|t| t.id == terminal_id))
     }
@@ -98,6 +124,11 @@ impl Session {
 pub struct AppState {
     pub session: Mutex<Session>,
     pub settings: Mutex<crate::settings::Settings>,
+    /// Terminal ids that printed while out of view.
+    pub attention: Mutex<std::collections::HashSet<String>>,
+    pub activities: crate::agent::Activities,
+    /// Repository summaries keyed by workspace id, refreshed on git changes.
+    pub git: Mutex<HashMap<String, GitSummary>>,
     /// Live pseudoterminals keyed by terminal tab id. Locked after `session`,
     /// never before it.
     pub ptys: Mutex<HashMap<String, pty::Live>>,

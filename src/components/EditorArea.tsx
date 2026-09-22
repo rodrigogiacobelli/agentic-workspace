@@ -5,7 +5,8 @@ import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { LANGUAGES, languageFor } from "../editor/languages";
 import * as settings from "../settings";
-import type { Workspace } from "../types";
+import type { DiffTarget, Workspace } from "../types";
+import { DiffView } from "./DiffView";
 import { report } from "./Switcher";
 
 export async function closeTab(ws: Workspace, id: string): Promise<void> {
@@ -19,7 +20,14 @@ export async function closeTab(ws: Workspace, id: string): Promise<void> {
   await api.closeFile(ws.id, id);
 }
 
-export function EditorArea({ ws }: { ws: Workspace }) {
+interface AreaProps {
+  ws: Workspace;
+  diff: DiffTarget | null;
+  onCloseDiff: () => void;
+  onDiffChanged: () => void;
+}
+
+export function EditorArea({ ws, diff, onCloseDiff, onDiffChanged }: AreaProps) {
   const host = useRef<HTMLDivElement>(null);
   const shownRef = useRef<string | null>(null);
   const dragging = useRef<string | null>(null);
@@ -69,18 +77,19 @@ export function EditorArea({ ws }: { ws: Workspace }) {
           </div>
         ))}
       </div>
-      {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
-      {doc && <Banner doc={doc} />}
-      <div className="editor-host" ref={host}>
+      {tab && !diff && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
+      {doc && !diff && <Banner doc={doc} />}
+      <div className="editor-host" ref={host} hidden={!!diff}>
         {ws.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
       </div>
+      {diff && <DiffView ws={ws} target={diff} onClose={onCloseDiff} onChanged={onDiffChanged} />}
       {entry && "binary" in entry && tab && (
         <div className="binary-notice">
           <p>{tab.path} is not a text file.</p>
           <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
         </div>
       )}
-      {tab && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
+      {tab && !diff && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
     </section>
   );
 }
@@ -155,10 +164,21 @@ function StatusBar({ ws, tabId, path, doc }: { ws: Workspace; tabId: string; pat
     // The tab is re-mounted by the area's effect on the next render.
     void api.setActiveEditor(ws.id, tabId);
   };
+  const toggleBlame = async () => {
+    if (!doc) return;
+    if (doc.blameOn) { doc.setBlame(null); return; }
+    try {
+      doc.setBlame(await api.gitBlame(ws.id, path));
+    } catch (e) {
+      report(e);
+    }
+  };
   return (
     <div className="statusbar">
+      {ws.git?.isRepo && <span title={ws.git.state ? `${ws.git.state} in progress` : "branch"}>{ws.git.detached ? "detached" : ""} {ws.git.branch ?? ""}{ws.git.state ? ` · ${ws.git.state}` : ""}</span>}
       {cursor && <span>Ln {cursor.line}, Col {cursor.col}</span>}
       {doc?.isMarkdown && <span>{doc.mode}</span>}
+      {doc && ws.git?.isRepo && <button className={doc.blameOn ? "active" : ""} onClick={() => void toggleBlame()} title="Blame">blame</button>}
       <span>UTF-8</span>
       <span>LF</span>
       <select value={language} onChange={(e) => void setLanguage(e.target.value)} title="Language for this file">

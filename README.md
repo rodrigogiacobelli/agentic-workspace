@@ -3,10 +3,10 @@
 A native Linux desktop app for running several agent-driven projects at once —
 without losing the one you just switched away from.
 
-> **Status: second milestone.** Workspaces, the two windows, terminals that
-> survive a switch, the file tree, session restore and the three-mode markdown
-> editor run. Git and agent signals are next. `.lore/codex/` holds the
-> decisions behind it.
+> **Status: third milestone.** Workspaces, the two windows, terminals that
+> survive a switch, the file tree, session restore, the three-mode markdown
+> editor, git with worktrees, and the two agent signals run. `.lore/codex/`
+> holds the decisions behind it.
 
 ---
 
@@ -106,7 +106,7 @@ Project knowledge lives in Lore. `lore codex list` is the index.
 Arch / CachyOS:
 
 ```bash
-sudo pacman -S --needed base-devel webkit2gtk-4.1 git ripgrep
+sudo pacman -S --needed base-devel webkit2gtk-4.1 git ripgrep libnotify
 ```
 
 Rust via [rustup](https://rustup.rs) (1.88 or newer) and Node with pnpm.
@@ -140,6 +140,7 @@ cd src-tauri && cargo test --lib     # unit tests; no compositor or PTY needed
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | both | Next / previous tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | terminal | Copy / paste |
 | `Ctrl+Shift+F` | terminal / workspace | Search scrollback / search the project |
+| `Ctrl+Shift+G` | workspace | The git panel |
 | `Ctrl+P` | workspace | Quick open a file |
 | `Ctrl+S` / `Ctrl+W` | workspace | Save / close the editor tab |
 | `Ctrl+E` | workspace | Cycle the markdown editor: source → split → rich |
@@ -150,6 +151,10 @@ In the rendered markdown view, syntax shows on the lines the cursor touches and
 is hidden elsewhere; `Ctrl`+click follows a link. Paste an image or drop a file
 onto a document and it lands in the workspace's clipboard folder with a link
 relative to the note.
+
+Git runs through the `git` binary on your machine, so hooks run and your
+configuration applies. Desktop notifications go through `notify-send`; clicking
+one switches to the terminal that went quiet.
 
 Double-click a terminal tab to rename it; drag tabs to reorder them. Right-click
 in the file tree for file operations; deleting moves to the trash through GIO.

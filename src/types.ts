@@ -21,12 +21,24 @@ export interface Workspace {
   /** Recently opened files, relative to `path`, most recent first. */
   recentFiles: string[];
   available: boolean;
+  /** A background terminal here printed since it was last viewed. */
+  attention: boolean;
+  git: GitSummary | null;
+}
+
+export interface GitSummary {
+  isRepo: boolean;
+  branch: string | null;
+  detached: boolean;
+  state: string | null;
+  isWorktree: boolean;
 }
 
 export interface TerminalTab {
   id: string;
   name: string | null;
   cwd: string;
+  attention: boolean;
 }
 
 export interface EditorTab {
@@ -89,3 +101,80 @@ export interface StoredAsset {
   link: string;
   bytes: number;
 }
+
+export interface RepoInfo {
+  isRepo: boolean;
+  branch: string | null;
+  detached: boolean;
+  state: string | null;
+  isWorktree: boolean;
+  mainWorktree: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+}
+
+export interface StatusEntry {
+  path: string;
+  origPath: string | null;
+  index: string;
+  worktree: string;
+  untracked: boolean;
+  conflicted: boolean;
+}
+
+export interface LogEntry {
+  hash: string;
+  short: string;
+  subject: string;
+  author: string;
+  date: string;
+  timestamp: number;
+}
+
+export interface CommitDetail {
+  hash: string;
+  author: string;
+  email: string;
+  date: string;
+  message: string;
+  files: { status: string; path: string }[];
+}
+
+export interface BlameLine {
+  line: number;
+  hash: string;
+  short: string;
+  author: string;
+  date: string;
+}
+
+export interface Branch {
+  name: string;
+  current: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  worktree: string | null;
+}
+
+export interface Branches {
+  local: Branch[];
+  remote: string[];
+}
+
+export interface WorktreeEntry {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  isMain: boolean;
+  locked: boolean;
+  prunable: boolean;
+  bare: boolean;
+}
+
+/** What the diff view shows. */
+export type DiffTarget =
+  | { kind: "worktree"; path: string; untracked: boolean }
+  | { kind: "staged"; path: string }
+  | { kind: "commit"; hash: string; path: string; short: string };

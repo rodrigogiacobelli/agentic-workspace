@@ -16,6 +16,7 @@ export type Action =
   | "close-editor"
   | "copy-relative-path"
   | "cycle-mode"
+  | "git"
   | "settings"
   | "quit";
 
@@ -36,6 +37,7 @@ export function actionFor(e: KeyboardEvent): Action | null {
       case "c": return "copy";
       case "v": return "paste";
       case "f": return "search";
+      case "g": return "git";
       case "Tab": return "prev-tab";
     }
     return null;

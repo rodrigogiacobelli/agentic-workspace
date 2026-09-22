@@ -46,10 +46,18 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
         {session.workspaces.length === 0 && <option value="">No workspaces</option>}
         {session.workspaces.map((w) => (
           <option key={w.id} value={w.id}>
-            {w.name}{w.available ? "" : " (unavailable)"}
+            {w.attention ? "● " : ""}{w.name}{w.available ? "" : " (unavailable)"}
           </option>
         ))}
       </select>
+      {session.workspaces.some((w) => w.attention && w.id !== session.active) && (
+        <span className="attention-badge" title="A background workspace has new terminal output">●</span>
+      )}
+      {active?.git?.isRepo && (
+        <span className="switcher-branch" title={active.git.state ? `${active.git.state} in progress` : "Current branch"}>
+          ⑂ {active.git.detached ? "detached @ " : ""}{active.git.branch ?? ""}{active.git.state ? ` · ${active.git.state}` : ""}
+        </span>
+      )}
       <button onClick={() => void addFolder()} title="Add folder…">＋</button>
       {active && <button onClick={() => void remove()} title="Remove this workspace">－</button>}
       <span className="switcher-path">{active?.available === false ? `Missing: ${active.path}` : active?.path}</span>

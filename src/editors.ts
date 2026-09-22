@@ -12,7 +12,7 @@ export type Entry = { doc: Doc } | { binary: string };
 const registry = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const pending = new Map<string, { line: number; column: number }>();
-let hooks: DocHooks = { openFile: () => {}, notice: () => {} };
+let hooks: DocHooks = { openFile: () => {}, notice: () => {}, showCommit: () => {} };
 
 export function setHooks(h: DocHooks): void {
   hooks = h;

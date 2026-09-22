@@ -98,16 +98,19 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
                     Ok(n) => n,
                 };
                 let chunk = &buf[..n];
-                let mut out = pump.lock();
-                out.buffer.extend_from_slice(chunk);
-                trim(&mut out.buffer);
-                let delivered = match &out.sink {
-                    Some(sink) => sink.send(InvokeResponseBody::Raw(chunk.to_vec())).is_ok(),
-                    None => true,
-                };
-                if !delivered {
-                    out.sink = None;
+                {
+                    let mut out = pump.lock();
+                    out.buffer.extend_from_slice(chunk);
+                    trim(&mut out.buffer);
+                    let delivered = match &out.sink {
+                        Some(sink) => sink.send(InvokeResponseBody::Raw(chunk.to_vec())).is_ok(),
+                        None => true,
+                    };
+                    if !delivered {
+                        out.sink = None;
+                    }
                 }
+                crate::agent::on_output(&app, &exited_id);
             }
             let _ = child.wait();
             on_exit(&app, &exited_id);
@@ -144,6 +147,7 @@ fn on_exit(app: &AppHandle, id: &str) {
             }
         }
         state.ptys.lock().remove(id);
+        crate::agent::forget(&state, id);
     }
     session::publish(app);
 }
@@ -197,7 +201,7 @@ pub fn terminal_open(app: AppHandle, state: tauri::State<AppState>, workspace_id
         let ws = session
             .workspace_mut(&workspace_id)
             .ok_or_else(|| format!("no workspace {workspace_id}"))?;
-        ws.terminals.push(TerminalTab { id: id.clone(), name: None, cwd: ws.path.clone() });
+        ws.terminals.push(TerminalTab { id: id.clone(), name: None, cwd: ws.path.clone(), attention: false });
         ws.active_terminal = Some(id.clone());
     }
     ensure_live(&app, &workspace_id).map_err(|e| format!("{e:#}"))?;
@@ -220,6 +224,7 @@ pub fn terminal_close(app: AppHandle, state: tauri::State<AppState>, id: String)
         if let Some(mut live) = state.ptys.lock().remove(&id) {
             live.hangup();
         }
+        crate::agent::forget(&state, &id);
     }
     session::publish(&app);
     Ok(())

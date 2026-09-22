@@ -20,12 +20,25 @@ pub fn persist(app: &AppHandle) -> Session {
     let snapshot = {
         let mut session = state.session.lock();
         let ptys = state.ptys.lock();
+        let mut attention = state.attention.lock();
+        let git = state.git.lock();
+        let active = session.active.clone();
         for ws in session.workspaces.iter_mut() {
             ws.available = ws.path.is_dir();
+            ws.git = git.get(&ws.id).cloned();
+            // The tab on screen cannot need attention.
+            if active.as_deref() == Some(&ws.id) {
+                if let Some(t) = ws.active_terminal.as_deref() {
+                    attention.remove(t);
+                }
+            }
+            ws.attention = false;
             for tab in ws.terminals.iter_mut() {
                 if let Some(cwd) = ptys.get(&tab.id).and_then(|live| live.cwd()) {
                     tab.cwd = cwd;
                 }
+                tab.attention = attention.contains(&tab.id);
+                ws.attention |= tab.attention;
             }
         }
         session.clone()
@@ -63,7 +76,7 @@ pub fn reorder<T>(items: &mut Vec<T>, ids: &[String], id_of: impl Fn(&T) -> &str
     *items = ordered;
 }
 
-fn activate(app: &AppHandle, id: &str) -> Result<()> {
+pub fn activate(app: &AppHandle, id: &str) -> Result<()> {
     let state = app.state::<AppState>();
     {
         let mut session = state.session.lock();
@@ -75,6 +88,7 @@ fn activate(app: &AppHandle, id: &str) -> Result<()> {
         session.recent.insert(0, id.to_string());
     }
     let spawned = pty::ensure_live(app, id);
+    crate::git::refresh_summary(app, id);
     watch::sync(app);
     spawned
 }
@@ -90,7 +104,7 @@ pub fn take_notices(state: tauri::State<AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String) -> Result<String, String> {
+pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String, name: Option<String>) -> Result<String, String> {
     let path = PathBuf::from(path);
     let path = std::fs::canonicalize(&path)
         .with_context(|| format!("resolving {}", path.display()))
@@ -105,21 +119,24 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
             None => {
                 let id = crate::state::new_id();
                 let terminal = crate::state::new_id();
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
+                let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string())
+                });
                 session.workspaces.push(Workspace {
                     id: id.clone(),
                     path: path.clone(),
                     name,
-                    terminals: vec![TerminalTab { id: terminal.clone(), name: None, cwd: path.clone() }],
+                    terminals: vec![TerminalTab { id: terminal.clone(), name: None, cwd: path.clone(), attention: false }],
                     active_terminal: Some(terminal),
                     editors: Vec::new(),
                     active_editor: None,
                     expanded: Vec::new(),
                     recent_files: Vec::new(),
                     available: true,
+                    attention: false,
+                    git: None,
                 });
                 id
             }
@@ -151,7 +168,9 @@ pub fn remove_workspace(app: AppHandle, state: tauri::State<AppState>, id: Strin
             if let Some(mut live) = ptys.remove(&tab.id) {
                 live.hangup();
             }
+            crate::agent::forget(&state, &tab.id);
         }
+        state.git.lock().remove(&id);
         if session.active.as_deref() == Some(&id) {
             session.active = None;
             session.recent.first().cloned()

@@ -1,5 +1,7 @@
+mod agent;
 mod assets;
 mod desktop;
+mod git;
 mod files;
 mod pty;
 mod session;
@@ -49,6 +51,9 @@ fn setup(app: &mut tauri::App) -> Result<()> {
     handle.manage(AppState {
         session: Mutex::new(session),
         settings: Mutex::new(settings::load(&data_dir)),
+        attention: Mutex::new(std::collections::HashSet::new()),
+        activities: Mutex::new(HashMap::new()),
+        git: Mutex::new(HashMap::new()),
         ptys: Mutex::new(HashMap::new()),
         watcher: Mutex::new(watch::Watcher::new(handle.clone())),
         data_dir,
@@ -60,9 +65,13 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         if let Err(e) = pty::ensure_live(&handle, &id) {
             session::notice(&handle, format!("Could not restore the active workspace's terminals: {e:#}"));
         }
+        git::refresh_summary(&handle, &id);
     }
     watch::sync(&handle);
     session::persist(&handle);
+
+    let quiet = handle.clone();
+    std::thread::Builder::new().name("quiet-watch".into()).spawn(move || agent::quiet_loop(quiet)).ok();
 
     // Terminal working directories change with no event to observe; a periodic
     // save keeps the session file close to the truth if the process is killed.
@@ -167,6 +176,34 @@ pub fn run() {
             settings::update_settings,
             assets::save_asset,
             assets::import_asset,
+            git::git_info,
+            git::git_init,
+            git::git_status,
+            git::git_diff,
+            git::git_show_file,
+            git::git_commit_file_diff,
+            git::git_stage,
+            git::git_unstage,
+            git::git_stage_all,
+            git::git_unstage_all,
+            git::git_apply_hunk,
+            git::git_discard,
+            git::git_commit,
+            git::git_last_message,
+            git::git_log,
+            git::git_show,
+            git::git_blame,
+            git::git_branches,
+            git::git_create_branch,
+            git::git_checkout,
+            git::git_delete_branch,
+            git::git_unmerged_commits,
+            git::git_worktrees,
+            git::git_add_worktree,
+            git::git_remove_worktree,
+            git::git_worktree_dirty,
+            git::git_prune_worktrees,
+            git::git_remote,
             session::focus_window,
             session::quit,
             pty::terminal_open,
