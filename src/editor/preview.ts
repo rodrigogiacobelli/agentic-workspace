@@ -4,15 +4,22 @@
 // source. See ADR-011.
 
 import { syntaxTree } from "@codemirror/language";
-import { EditorState, StateField, type EditorSelection, type Extension, type Range } from "@codemirror/state";
+import { EditorState, StateEffect, StateField, type EditorSelection, type Extension, type Range } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
 import type { SyntaxNodeRef, Tree } from "@lezer/common";
+import { ChipWidget, citedPath, type CitationContext } from "./citation";
 
 export interface PreviewContext {
-  /** Turns a link target into something the webview can load, or null. */
+  /** Turns a link target, relative to the note, into something the webview can load, or null. */
   resolveUrl(href: string): string | null;
+  /** The same for a path from the workspace root, as a citation names it. */
+  resolveRoot(path: string): string | null;
   openLink(href: string): void;
+  citation: CitationContext;
 }
+
+/** Something outside the document changed what it renders as — a cited file appeared or vanished. */
+export const refreshPreview = StateEffect.define<null>();
 
 const AUDIO = new Set(["mp3", "ogg", "oga", "wav", "flac", "m4a", "weba", "opus", "aac"]);
 const VIDEO = new Set(["mp4", "webm", "mkv", "mov", "ogv", "m4v"]);
@@ -82,11 +89,11 @@ class TaskWidget extends WidgetType {
 }
 
 class MediaWidget extends WidgetType {
-  constructor(readonly href: string, readonly alt: string, readonly ctx: PreviewContext) { super(); }
+  constructor(readonly href: string, readonly alt: string, readonly url: string | null) { super(); }
   toDOM() {
     const wrap = document.createElement("span");
     wrap.className = "cm-lp-media";
-    const url = this.ctx.resolveUrl(this.href);
+    const url = this.url;
     const kind = mediaKind(this.href);
     const broken = () => {
       wrap.replaceChildren();
@@ -376,7 +383,18 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
             const text = state.doc.sliceString(n.from, n.to);
             const m = /^!\[([^\]]*)\]\(\s*<?([^\s>)]+)>?(?:\s+"[^"]*")?\s*\)$/.exec(text);
             if (!m) return true;
-            marks.push(Decoration.replace({ widget: new MediaWidget(m[2], m[1], ctx) }).range(n.from, n.to));
+            marks.push(Decoration.replace({ widget: new MediaWidget(m[2], m[1], ctx.resolveUrl(m[2])) }).range(n.from, n.to));
+            return false;
+          }
+          case "Citation": {
+            // Cited media renders as the media; anything else is a chip (CITE-06, CITE-07).
+            if (isRevealed(n)) return false;
+            const path = citedPath(state.doc.sliceString(n.from, n.to));
+            const kind = mediaKind(path);
+            const widget = kind !== "file"
+              ? new MediaWidget(path, path.split("/").pop() ?? path, ctx.resolveRoot(path))
+              : new ChipWidget(path, (() => { const e = ctx.citation.exists(path.replace(/\/$/, "")); return e === undefined ? undefined : !e; })(), ctx.citation);
+            marks.push(Decoration.replace({ widget }).range(n.from, n.to));
             return false;
           }
           case "Link": {
@@ -417,7 +435,8 @@ export function livePreview(ctx: PreviewContext): Extension {
       decorations: DecorationSet;
       constructor(view: EditorView) { this.decorations = inlineDecorations(view, ctx); }
       update(u: ViewUpdate) {
-        if (u.docChanged || u.viewportChanged || u.selectionSet || syntaxTree(u.state) !== syntaxTree(u.startState)) {
+        const refreshed = u.transactions.some((tr) => tr.effects.some((e) => e.is(refreshPreview)));
+        if (u.docChanged || u.viewportChanged || u.selectionSet || refreshed || syntaxTree(u.state) !== syntaxTree(u.startState)) {
           this.decorations = inlineDecorations(u.view, ctx);
         }
       }

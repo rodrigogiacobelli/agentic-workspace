@@ -104,6 +104,15 @@ export const api = {
   listDir: (workspaceId: string, path: string) =>
     invoke<Entry[]>("list_dir", { workspaceId, path }),
   listFiles: (workspaceId: string) => invoke<string[]>("list_files", { workspaceId }),
+  /** Name, kind, ignored and missing state for each workspace-relative path. */
+  statEntries: (workspaceId: string, paths: string[]) => invoke<Entry[]>("stat_entries", { workspaceId, paths }),
+  viewCreate: (workspaceId: string, name: string) => invoke<string>("view_create", { workspaceId, name }),
+  viewRename: (workspaceId: string, viewId: string, name: string) => invoke<void>("view_rename", { workspaceId, viewId, name }),
+  viewDelete: (workspaceId: string, viewId: string) => invoke<void>("view_delete", { workspaceId, viewId }),
+  viewAdd: (workspaceId: string, viewId: string, path: string) => invoke<void>("view_add", { workspaceId, viewId, path }),
+  viewRemove: (workspaceId: string, viewId: string, path: string) => invoke<void>("view_remove", { workspaceId, viewId, path }),
+  viewReorder: (workspaceId: string, viewId: string, paths: string[]) => invoke<void>("view_reorder", { workspaceId, viewId, paths }),
+  setActiveView: (workspaceId: string, viewId: string | null) => invoke<void>("set_active_view", { workspaceId, viewId }),
   createEntry: (workspaceId: string, path: string, isDir: boolean) =>
     invoke<void>("create_entry", { workspaceId, path, isDir }),
   renameEntry: (workspaceId: string, from: string, to: string) =>

@@ -4,7 +4,7 @@
 import { Annotation, Compartment, EditorState, Text, type Extension } from "@codemirror/state";
 import {
   EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection,
-  dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine, gutter, GutterMarker, scrollPastEnd,
+  dropCursor, highlightActiveLine, gutter, GutterMarker, scrollPastEnd,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from "@codemirror/commands";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -15,8 +15,9 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import * as settings from "../settings";
 import { languageExtension, type LanguageId } from "./languages";
-import type { BlameLine } from "../types";
-import { livePreview, mediaKind, type PreviewContext } from "./preview";
+import type { BlameLine, StoredAsset } from "../types";
+import { livePreview, mediaKind, refreshPreview, type PreviewContext } from "./preview";
+import { typingHelpers } from "./typing";
 
 export type Mode = "source" | "split" | "rich";
 export const MODES: Mode[] = ["source", "split", "rich"];
@@ -124,6 +125,9 @@ export class Doc {
   blameOn = false;
   private autosaveTimer: number | null = null;
   private viewTimer: number | null = null;
+  private existence = new Map<string, boolean>();
+  private pendingExists = new Set<string>();
+  private existsTimer: number | null = null;
   private syncingScroll = false;
   private disposed = false;
 
@@ -165,8 +169,7 @@ export class Doc {
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
       bracketMatching(),
-      rectangularSelection(),
-      crosshairCursor(),
+      ...typingHelpers(this.language, this.path),
       highlightSelectionMatches(),
       EditorView.lineWrapping,
       languageExtension(this.language),
@@ -204,9 +207,14 @@ export class Doc {
         if (/^(https?:|data:|blob:)/i.test(href)) return href;
         return convertFileSrc(`${this.workspacePath}/${resolveLink(this.path, href)}`);
       },
+      resolveRoot: (path) => convertFileSrc(`${this.workspacePath}/${normalize(path.split("/"))}`),
       openLink: (href) => {
         if (/^[a-z]+:/i.test(href)) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(href)).catch((e) => this.hooks.notice(String(e)));
         else this.hooks.openFile(resolveLink(this.path, href));
+      },
+      citation: {
+        exists: (path) => this.exists(path),
+        open: (path) => this.hooks.openFile(normalize(path.split("/"))),
       },
     };
     const source = this.source;
@@ -542,6 +550,54 @@ export class Doc {
     this.jumpTo(Math.min(l.from + column, l.to));
   }
 
+  // --- Citations ------------------------------------------------------------
+
+  /** Whether a cited path exists, answered from a cache that is filled in batches. */
+  private exists(path: string): boolean | undefined {
+    const known = this.existence.get(path);
+    if (known === undefined) this.lookUp([path]);
+    return known;
+  }
+
+  /** Stats the paths in one batch and redraws the rendered pane if an answer changed. */
+  private lookUp(paths: string[]): void {
+    paths.forEach((p) => this.pendingExists.add(p));
+    if (this.existsTimer !== null) return;
+    this.existsTimer = window.setTimeout(() => {
+      this.existsTimer = null;
+      const batch = [...this.pendingExists];
+      this.pendingExists.clear();
+      api.statEntries(this.workspaceId, batch).then((entries) => {
+        if (this.disposed) return;
+        let changed = false;
+        for (const e of entries) {
+          const exists = !e.missing;
+          if (this.existence.get(e.path) !== exists) changed = true;
+          this.existence.set(e.path, exists);
+        }
+        if (changed) this.rich?.dispatch({ effects: refreshPreview.of(null) });
+      }).catch(() => {});
+    }, 50);
+  }
+
+  /** The workspace changed on disk: every cited path is looked up again, keeping its last answer until the new one lands. */
+  invalidateExistence(): void {
+    if (this.existence.size > 0) this.lookUp([...this.existence.keys()]);
+  }
+
+  /**
+   * Inserts `@/path` at the caret, on its line, with one space before it when
+   * the caret is not already after whitespace (CITE-01).
+   */
+  insertCitation(path: string): void {
+    const view = this.active();
+    const pos = view.state.selection.main.head;
+    const before = pos > view.state.doc.lineAt(pos).from ? view.state.doc.sliceString(pos - 1, pos) : "";
+    const insert = `${before && !/\s/.test(before) ? " " : ""}@/${path}`;
+    view.dispatch({ changes: { from: pos, to: view.state.selection.main.to, insert }, selection: { anchor: pos + insert.length }, scrollIntoView: true });
+    view.focus();
+  }
+
   // --- Assets ---------------------------------------------------------------
 
   private onPaste(e: ClipboardEvent, view: EditorView): boolean {
@@ -560,7 +616,7 @@ export class Doc {
         const name = file.name && !/^image\.(png|jpe?g|bmp|gif)$/i.test(file.name) ? file.name : null;
         const bytes = await file.arrayBuffer();
         const stored = await api.saveAsset(this.workspaceId, this.path, name, file.type || "application/octet-stream", bytes);
-        pos = this.insertLink(view, pos, stored.link, name ?? stored.path.split("/").pop() ?? "asset");
+        pos = this.insertLink(view, pos, stored, name ?? stored.path.split("/").pop() ?? "asset");
         this.warnIfLarge(stored.bytes, stored.path);
       } catch (err) {
         this.hooks.notice(`Could not store ${file.name || "the pasted file"}: ${String(err)}`);
@@ -575,7 +631,7 @@ export class Doc {
     for (const source of paths) {
       try {
         const stored = await api.importAsset(this.workspaceId, this.path, source);
-        pos = this.insertLink(view, pos, stored.link, source.split("/").pop() ?? "file");
+        pos = this.insertLink(view, pos, stored, source.split("/").pop() ?? "file");
         this.warnIfLarge(stored.bytes, stored.path);
       } catch (err) {
         this.hooks.notice(`Could not import ${source}: ${String(err)}`);
@@ -583,10 +639,13 @@ export class Doc {
     }
   }
 
-  private insertLink(view: EditorView, pos: number, link: string, name: string): number {
+  /** The stored asset as text: a note-relative markdown link, or a root-relative citation (CITE-03). */
+  private insertLink(view: EditorView, pos: number, stored: StoredAsset, name: string): number {
     const label = name.replace(/\.[^.]+$/, "");
-    const kind = mediaKind(link);
-    const insert = kind === "file" ? `[${label}](${link})` : `![${label}](${link})`;
+    const kind = mediaKind(stored.link);
+    const insert = settings.get()?.assetLinks === "citation"
+      ? `@/${stored.path}`
+      : kind === "file" ? `[${label}](${stored.link})` : `![${label}](${stored.link})`;
     view.dispatch({ changes: { from: pos, insert }, selection: { anchor: pos + insert.length } });
     return pos + insert.length;
   }
@@ -601,6 +660,7 @@ export class Doc {
     if (this.draftTimer) window.clearTimeout(this.draftTimer);
     if (this.autosaveTimer) window.clearTimeout(this.autosaveTimer);
     if (this.viewTimer) window.clearTimeout(this.viewTimer);
+    if (this.existsTimer) window.clearTimeout(this.existsTimer);
     this.rich?.destroy();
     this.source.destroy();
     this.root?.remove();

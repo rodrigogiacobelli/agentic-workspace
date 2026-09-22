@@ -170,13 +170,21 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     api.openFile(ws.id, path, true).then((id) => editors.revealLine(id, line, column)).catch(report);
   };
 
+  // Quote to AI: a citation into the active document, whatever the link setting (CITE-01, CITE-05).
+  const quote = (path: string) => {
+    const id = editors.activeEditorId(ws);
+    const doc = id ? editors.doc(id) : undefined;
+    if (!doc) { report("Open a document to quote into first."); return; }
+    doc.insertCitation(path);
+  };
+
   // Files with work-tree changes or not yet tracked; what is only staged does not count (FIX-06).
   const unstaged = gitStatus.filter((s) => s.untracked || s.conflicted || s.worktree !== ".").length;
 
   const renderPanel = (id: PanelId) => {
     if (!ws.available) return <div className="tree-loading">The directory {ws.path} is missing.</div>;
     switch (id) {
-      case "files": return <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p, preview) => void api.openFile(ws.id, p, preview).catch(report)} gitStatus={gitStatus} />;
+      case "files": return <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p, preview) => void api.openFile(ws.id, p, preview).catch(report)} onQuote={quote} gitStatus={gitStatus} />;
       case "search": return <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />;
       case "outline": return <Outline ws={ws} />;
       case "git": return <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={(p, d) => void api.openDiff(ws.id, p, d).catch(report)} onOpenFile={(p) => void api.openFile(ws.id, p, true).catch(report)} />;

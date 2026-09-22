@@ -28,6 +28,9 @@ pub struct Settings {
     pub notifications: bool,
     pub quiet_threshold_s: u32,
     pub asset_warn_mb: u32,
+    /// What paste and drop write for a stored asset: `markdown` for a link
+    /// relative to the note, `citation` for `@/path` from the workspace root.
+    pub asset_links: String,
     /// Preferred trigger for the raise-from-anywhere hotkey, in the portal's
     /// syntax. The compositor may assign something else, or nothing.
     pub global_hotkey: String,
@@ -67,6 +70,7 @@ impl Default for Settings {
             notifications: true,
             quiet_threshold_s: 20,
             asset_warn_mb: 5,
+            asset_links: "markdown".into(),
             global_hotkey: "CTRL+ALT+a".into(),
             languages: HashMap::new(),
             panel_layout: serde_json::Value::Null,

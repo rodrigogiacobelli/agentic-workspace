@@ -130,10 +130,15 @@ export function revealLine(id: string, line: number, column = 0): void {
   else pending.set(id, { line, column });
 }
 
-/** A directory changed on disk: every open document inside it re-reads its file. */
+/**
+ * A directory changed on disk: every open document inside it re-reads its
+ * file, and every document of the workspace looks its citations up again.
+ */
 export function checkDisk(workspaceId: string, dirs: string[]): void {
+  const inTree = dirs.some((d) => d !== ".git" && !d.startsWith(".git/"));
   for (const entry of registry.values()) {
     if (!("doc" in entry) || entry.doc.workspaceId !== workspaceId) continue;
+    if (inTree) entry.doc.invalidateExistence();
     const dir = entry.doc.path.includes("/") ? entry.doc.path.slice(0, entry.doc.path.lastIndexOf("/")) : "";
     if (dirs.includes(dir)) void entry.doc.checkDisk();
   }

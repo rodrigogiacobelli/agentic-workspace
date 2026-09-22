@@ -3,6 +3,7 @@
 use crate::pty;
 use crate::state::{AppState, DiffSpec, EditorGroup, EditorTab, Layout, Session, TerminalTab, Workspace};
 use crate::store;
+use crate::tree;
 use crate::watch;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -140,6 +141,8 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
                     active_editor: None,
                     expanded: Vec::new(),
                     recent_files: Vec::new(),
+                    views: Vec::new(),
+                    active_view: None,
                     available: true,
                     attention: false,
                     git: None,
@@ -557,6 +560,106 @@ pub fn set_layout_sizes(app: AppHandle, state: tauri::State<AppState>, workspace
         }
     }
     persist(&app);
+}
+
+// --- Custom views ------------------------------------------------------------
+
+fn with_view<T>(state: &AppState, workspace_id: &str, view_id: &str, f: impl FnOnce(&mut crate::state::View) -> T) -> Result<T, String> {
+    let mut session = state.session.lock();
+    let ws = session.workspace_mut(workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+    let view = ws.views.iter_mut().find(|v| v.id == view_id).ok_or_else(|| format!("no view {view_id}"))?;
+    Ok(f(view))
+}
+
+#[tauri::command]
+pub fn view_create(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, name: String) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("a view needs a name".into());
+    }
+    let id = {
+        let mut session = state.session.lock();
+        let ws = session.workspace_mut(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+        if ws.views.iter().any(|v| v.name == name) {
+            return Err(format!("a view named {name} already exists"));
+        }
+        let id = crate::state::new_id();
+        ws.views.push(crate::state::View { id: id.clone(), name, entries: Vec::new() });
+        ws.active_view = Some(id.clone());
+        id
+    };
+    publish(&app);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn view_rename(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("a view needs a name".into());
+    }
+    with_view(&state, &workspace_id, &view_id, |v| v.name = name)?;
+    publish(&app);
+    Ok(())
+}
+
+/// Deletes the list only; every file it pointed at is untouched (VIEW-10).
+#[tauri::command]
+pub fn view_delete(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String) -> Result<(), String> {
+    {
+        let mut session = state.session.lock();
+        let ws = session.workspace_mut(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+        ws.views.retain(|v| v.id != view_id);
+        if ws.active_view.as_deref() == Some(&view_id) {
+            ws.active_view = None;
+        }
+    }
+    publish(&app);
+    Ok(())
+}
+
+/// Adds a workspace-relative path to a view; a path already there is left
+/// where it is.
+#[tauri::command]
+pub fn view_add(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, path: String) -> Result<(), String> {
+    tree::resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+    let path = path.trim_matches('/').to_string();
+    if path.is_empty() {
+        return Err("the workspace root cannot be sent to a view".into());
+    }
+    with_view(&state, &workspace_id, &view_id, |v| {
+        if !v.entries.contains(&path) {
+            v.entries.push(path);
+        }
+    })?;
+    publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn view_remove(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, path: String) -> Result<(), String> {
+    with_view(&state, &workspace_id, &view_id, |v| v.entries.retain(|e| e != &path))?;
+    publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn view_reorder(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, paths: Vec<String>) -> Result<(), String> {
+    with_view(&state, &workspace_id, &view_id, |v| reorder(&mut v.entries, &paths, |p| p.as_str()))?;
+    publish(&app);
+    Ok(())
+}
+
+/// Which view the Files panel shows; `None` for the tree itself (VIEW-09).
+#[tauri::command]
+pub fn set_active_view(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: Option<String>) {
+    {
+        let mut session = state.session.lock();
+        if let Some(ws) = session.workspace_mut(&workspace_id) {
+            ws.active_view = view_id.filter(|id| ws.views.iter().any(|v| &v.id == id));
+        }
+    }
+    publish(&app);
 }
 
 /// Raises a window at its remembered geometry. Under Wayland the compositor

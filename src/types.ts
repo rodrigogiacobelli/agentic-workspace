@@ -23,6 +23,10 @@ export interface Workspace {
   expanded: string[];
   /** Recently opened files, relative to `path`, most recent first. */
   recentFiles: string[];
+  /** Custom views: named lists of workspace-relative paths. */
+  views: View[];
+  /** The view the Files panel shows; null is the tree itself. */
+  activeView: string | null;
   available: boolean;
   /** A background terminal here printed since it was last viewed. */
   attention: boolean;
@@ -52,6 +56,12 @@ export interface PanelLayout {
   hidden: PanelId[];
   /** The region each hidden panel left, so it returns there. */
   lastRegion: Partial<Record<PanelId, string>>;
+}
+
+export interface View {
+  id: string;
+  name: string;
+  entries: string[];
 }
 
 export interface GitSummary {
@@ -99,6 +109,8 @@ export interface Entry {
   path: string;
   isDir: boolean;
   ignored: boolean;
+  /** The path no longer exists; a view or a citation still names it. */
+  missing?: boolean;
 }
 
 export interface DirChanged {
@@ -136,6 +148,8 @@ export interface Settings {
   notifications: boolean;
   quietThresholdS: number;
   assetWarnMb: number;
+  /** What paste and drop write: a note-relative markdown link, or an `@/` citation. */
+  assetLinks: "markdown" | "citation";
   globalHotkey: string;
   languages: Record<string, string>;
   panelLayout: PanelLayout | null;

@@ -108,6 +108,14 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
         {toggle("Autosave", current.autosave, (v) => set({ autosave: v }))}
         {number("Autosave delay (ms)", current.autosaveDelayMs, (v) => set({ autosaveDelayMs: v }), 200, 60000, 100)}
         {number("Warn for assets above (MB)", current.assetWarnMb, (v) => set({ assetWarnMb: v }), 1, 1000)}
+        <label className="setting">
+          <span>Asset links — what paste and drop write</span>
+          <Dropdown
+            value={current.assetLinks}
+            options={[{ id: "markdown", label: "Markdown link, relative to the note" }, { id: "citation", label: "Citation: @/path from the workspace root" }]}
+            onChange={(id) => set({ assetLinks: id as "markdown" | "citation" })}
+          />
+        </label>
         <h3>Panels</h3>
         {normalize(current.panelLayout ?? defaultLayout()).hidden.map((id) => (
           <div className="setting" key={id}>

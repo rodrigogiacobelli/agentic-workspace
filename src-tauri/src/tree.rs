@@ -20,6 +20,9 @@ pub struct Entry {
     pub path: String,
     pub is_dir: bool,
     pub ignored: bool,
+    /// The path no longer exists; a view or a citation still names it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
 }
 
 /// Resolves a workspace-relative path, refusing anything that leaves the root.
@@ -90,13 +93,37 @@ pub fn list_dir(state: tauri::State<AppState>, workspace_id: String, path: Strin
             }
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false)
                 || (e.file_type().map(|t| t.is_symlink()).unwrap_or(false) && e.path().is_dir());
-            Some(Entry { path: join_rel(&path, &name), name, is_dir, ignored: false })
+            Some(Entry { path: join_rel(&path, &name), name, is_dir, ignored: false, missing: false })
         })
         .collect();
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
 
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let ignored = ignored_by_git(&root, &paths);
+    for e in entries.iter_mut() {
+        e.ignored = ignored.contains(&e.path);
+    }
+    Ok(entries)
+}
+
+/// One entry per workspace-relative path, as a view's root or a citation
+/// needs it: its name, whether it is a directory, whether git ignores it,
+/// and whether it is there at all.
+#[tauri::command]
+pub fn stat_entries(state: tauri::State<AppState>, workspace_id: String, paths: Vec<String>) -> Result<Vec<Entry>, String> {
+    let (root, _) = resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
+    let mut entries: Vec<Entry> = paths
+        .iter()
+        .map(|p| {
+            let rel = p.trim_matches('/').to_string();
+            let abs = root.join(&rel);
+            let inside = Path::new(&rel).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+            let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+            Entry { name, is_dir: inside && abs.is_dir(), ignored: false, missing: !inside || !abs.exists(), path: rel }
+        })
+        .collect();
+    let present: Vec<String> = entries.iter().filter(|e| !e.missing).map(|e| e.path.clone()).collect();
+    let ignored = ignored_by_git(&root, &present);
     for e in entries.iter_mut() {
         e.ignored = ignored.contains(&e.path);
     }

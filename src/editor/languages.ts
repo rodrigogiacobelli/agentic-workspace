@@ -9,6 +9,7 @@ import { LanguageDescription, StreamLanguage, type LanguageSupport } from "@code
 import { toml } from "@codemirror/legacy-modes/mode/toml";
 import { GFM } from "@lezer/markdown";
 import type { Extension } from "@codemirror/state";
+import { citation } from "./citation";
 import { frontmatter } from "./frontmatter";
 
 export type LanguageId = "markdown" | "html" | "json" | "yaml" | "toml" | "plain";
@@ -53,7 +54,7 @@ export function languageExtension(id: LanguageId): Extension {
       return markdown({
         base: markdownLanguage,
         codeLanguages: fenceLanguages,
-        extensions: [GFM, frontmatter],
+        extensions: [GFM, frontmatter, citation],
         addKeymap: true,
         completeHTMLTags: false,
       });

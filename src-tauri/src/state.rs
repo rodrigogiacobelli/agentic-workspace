@@ -64,6 +64,12 @@ pub struct Workspace {
     /// Recently opened files, relative to `path`, most recent first.
     #[serde(default)]
     pub recent_files: Vec<String>,
+    /// Custom views: named lists of workspace-relative paths (VIEW-01).
+    #[serde(default)]
+    pub views: Vec<View>,
+    /// The view the Files panel last showed; `None` is the file tree.
+    #[serde(default)]
+    pub active_view: Option<String>,
     /// Whether `path` is a directory right now. Computed when published.
     #[serde(default, skip_deserializing)]
     pub available: bool,
@@ -73,6 +79,17 @@ pub struct Workspace {
     /// Branch and state of the repository, when the directory is one.
     #[serde(default, skip_deserializing)]
     pub git: Option<GitSummary>,
+}
+
+/// A flat, ordered list of shortcuts into the workspace. Each entry sits at
+/// the view's root whatever its depth on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct View {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub entries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

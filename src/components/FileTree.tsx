@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
-import type { Entry, StatusEntry, Workspace } from "../types";
+import type { Entry, StatusEntry, View, Workspace } from "../types";
+import { ContextMenu, Dropdown } from "./Menu";
 import { Prompt } from "./Prompt";
 import { FILE_MIME } from "./SplitTree";
 import { report } from "./Switcher";
@@ -10,6 +11,8 @@ interface Props {
   ws: Workspace;
   /** A single click opens a preview tab; a double click or a new file opens a permanent one. */
   onOpen: (path: string, preview: boolean) => void;
+  /** Inserts a citation of the path into the active document. */
+  onQuote: (path: string) => void;
   selected: string | null;
   onSelect: (path: string | null) => void;
   gitStatus?: StatusEntry[];
@@ -36,12 +39,18 @@ interface Menu {
   x: number;
   y: number;
   entry: Entry | null;
+  /** The row is one of the open view's own entries. */
+  viewRoot: boolean;
 }
 
 type Dialog =
   | { kind: "new-file"; dir: string }
   | { kind: "new-folder"; dir: string }
-  | { kind: "rename"; entry: Entry };
+  | { kind: "rename"; entry: Entry }
+  | { kind: "new-view"; then?: string }
+  | { kind: "rename-view"; view: View };
+
+const NEW_VIEW = "__new-view";
 
 function dirOf(path: string): string {
   const i = path.lastIndexOf("/");
@@ -52,15 +61,22 @@ function join(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
-/** The tree rooted at the workspace, read one directory at a time. */
-export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Props) {
+/**
+ * The tree rooted at the workspace, read one directory at a time — or a
+ * custom view: its entries at the root whatever their depth, each expanding
+ * to its real children (VIEW-03, VIEW-04).
+ */
+export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = [] }: Props) {
   const gitMap = useMemo(() => statusMap(gitStatus), [gitStatus]);
   const [listings, setListings] = useState<Map<string, Entry[]>>(new Map());
   const [menu, setMenu] = useState<Menu | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [filter, setFilter] = useState("");
   const [allFiles, setAllFiles] = useState<string[] | null>(null);
+  const [viewEntries, setViewEntries] = useState<Entry[] | null>(null);
   const inflight = useRef(new Set<string>());
+  const view = ws.views.find((v) => v.id === ws.activeView) ?? null;
+  const entriesKey = view?.entries.join("\n") ?? "";
 
   const load = useCallback((dir: string) => {
     if (inflight.current.has(dir)) return;
@@ -71,6 +87,11 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
       .finally(() => inflight.current.delete(dir));
   }, [ws.id]);
 
+  const loadView = useCallback(() => {
+    if (!view) { setViewEntries(null); return; }
+    api.statEntries(ws.id, view.entries).then(setViewEntries).catch(report);
+  }, [ws.id, view?.id, entriesKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     load("");
     ws.expanded.forEach((dir) => { if (!listings.has(dir)) load(dir); });
@@ -78,22 +99,17 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.expanded, load]);
 
+  useEffect(() => { loadView(); }, [loadView]);
+
   useEffect(() => {
     const unlisten = events.onDirChanged((change) => {
       if (change.workspaceId !== ws.id) return;
       change.dirs.forEach((dir) => { if (dir === "" || listings.has(dir)) load(dir); });
       if (filter) setAllFiles(null);
+      loadView();
     });
     return () => { void unlisten.then((u) => u()); };
-  }, [ws.id, listings, load, filter]);
-
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", close);
-    return () => { window.removeEventListener("mousedown", close); window.removeEventListener("keydown", close); };
-  }, [menu]);
+  }, [ws.id, listings, load, filter, loadView]);
 
   // The filter needs every path; it is fetched once per filter session.
   useEffect(() => {
@@ -115,6 +131,11 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
     if (yes) await api.trashEntry(ws.id, entry.path).catch(report);
   };
 
+  const deleteView = async (v: View) => {
+    const yes = await ask(`Delete the view "${v.name}"? Only the list goes; every file it points at stays.`, { title: "Delete view", kind: "warning", okLabel: "Delete view", cancelLabel: "Keep" });
+    if (yes) await api.viewDelete(ws.id, v.id).catch(report);
+  };
+
   const submitDialog = async (value: string) => {
     const d = dialog;
     setDialog(null);
@@ -127,25 +148,30 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
         if (d.kind === "new-file") onOpen(path, false);
       } else if (d.kind === "rename") {
         await api.renameEntry(ws.id, d.entry.path, join(dirOf(d.entry.path), value));
+      } else if (d.kind === "new-view") {
+        const id = await api.viewCreate(ws.id, value);
+        if (d.then) await api.viewAdd(ws.id, id, d.then);
+      } else if (d.kind === "rename-view") {
+        await api.viewRename(ws.id, d.view.id, value);
       }
     } catch (e) {
       report(e);
     }
   };
 
-  const row = (e: Entry, depth: number, expanded: boolean, onClick: () => void) => (
+  const row = (e: Entry, depth: number, expanded: boolean, onClick: () => void, viewRoot = false) => (
     <div
-      className={`tree-row${e.ignored ? " ignored" : ""}${selected === e.path ? " selected" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
+      className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected === e.path ? " selected" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
       style={{ paddingLeft: 8 + depth * 14 }}
       onClick={onClick}
-      onDoubleClick={() => { if (!e.isDir) onOpen(e.path, false); }}
-      draggable={!e.isDir}
+      onDoubleClick={() => { if (!e.isDir && !e.missing) onOpen(e.path, false); }}
+      draggable={!e.isDir && !e.missing}
       onDragStart={(ev) => { ev.dataTransfer.setData(FILE_MIME, e.path); ev.dataTransfer.effectAllowed = "copyMove"; }}
-      onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); onSelect(e.path); setMenu({ x: ev.clientX, y: ev.clientY, entry: e }); }}
-      title={e.path}
+      onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); onSelect(e.path); setMenu({ x: ev.clientX, y: ev.clientY, entry: e, viewRoot }); }}
+      title={e.missing ? `Missing: ${e.path}` : e.path}
     >
       <span className="tree-chevron">{e.isDir ? (expanded ? "▾" : "▸") : ""}</span>
-      <span className="tree-name">{e.name}</span>
+      <span className="tree-name">{e.missing ? e.path : e.name}</span>
       {gitMap.has(e.path) && <span className="tree-git">{e.isDir ? "•" : gitMap.get(e.path)}</span>}
     </div>
   );
@@ -164,11 +190,31 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
     });
   };
 
+  // A view's root: its entries in order, each expanding to real children.
+  const renderView = (): React.ReactNode => {
+    if (!viewEntries) return <div className="tree-loading">Loading…</div>;
+    if (viewEntries.length === 0) return <div className="tree-loading">Nothing has been sent to this view yet. Right-click a file or folder in Files and choose “Send to {view?.name}”.</div>;
+    return viewEntries.map((e) => {
+      const expanded = e.isDir && ws.expanded.includes(e.path);
+      const open = () => { onSelect(e.path); if (e.missing) return; if (e.isDir) toggle(e.path); else onOpen(e.path, true); };
+      return (
+        <div key={e.path}>
+          {row(e, 0, expanded, open, true)}
+          {expanded && (listings.has(e.path) ? render(e.path, 1) : (load(e.path), null))}
+        </div>
+      );
+    });
+  };
+
   // Filtered view: matching files and their ancestors, every directory open.
   const filtered = useMemo(() => {
     if (!filter || !allFiles) return null;
     const needle = filter.toLowerCase();
-    const matches = allFiles.filter((p) => p.toLowerCase().includes(needle)).slice(0, 2000);
+    const roots = view?.entries ?? null;
+    const matches = allFiles
+      .filter((p) => p.toLowerCase().includes(needle))
+      .filter((p) => !roots || roots.some((r) => p === r || p.startsWith(`${r}/`)))
+      .slice(0, 2000);
     const children = new Map<string, Map<string, boolean>>();
     for (const file of matches) {
       const parts = file.split("/");
@@ -181,7 +227,7 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
       });
     }
     return children;
-  }, [filter, allFiles]);
+  }, [filter, allFiles, view?.entries]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const renderFiltered = (dir: string, depth: number): React.ReactNode => {
     const kids = filtered?.get(dir);
@@ -199,8 +245,38 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
       });
   };
 
+  // A filtered view keeps its entries at the root and filters beneath them.
+  const renderFilteredView = (): React.ReactNode => {
+    if (!filtered || !viewEntries) return <div className="tree-loading">Loading…</div>;
+    return viewEntries
+      .filter((e) => e.isDir ? filtered.has(e.path) : e.path.toLowerCase().includes(filter.toLowerCase()))
+      .map((e) => (
+        <div key={e.path}>
+          {row(e, 0, true, () => { onSelect(e.path); if (!e.isDir && !e.missing) onOpen(e.path, true); }, true)}
+          {e.isDir && renderFiltered(e.path, 1)}
+        </div>
+      ));
+  };
+
+  const viewOptions = [
+    { id: "", label: "Files" },
+    ...ws.views.map((v) => ({ id: v.id, label: v.name })),
+    { id: NEW_VIEW, label: "New view…" },
+  ];
+
+  const sendTargets = (path: string) => ws.views.filter((v) => !v.entries.includes(path));
+  const citation = (e: Entry) => (e.isDir ? `${e.path}/` : e.path);
+
   return (
     <div className="sidebar-body">
+      <div className="tree-head">
+        <Dropdown
+          value={ws.activeView ?? ""}
+          options={viewOptions}
+          onChange={(id) => { if (id === NEW_VIEW) setDialog({ kind: "new-view" }); else void api.setActiveView(ws.id, id || null).catch(report); }}
+          title={view ? `View: ${view.name}` : "The workspace's files"}
+        />
+      </div>
       <input
         className="tree-filter"
         placeholder="Filter files"
@@ -211,16 +287,42 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
       <nav
         className="tree"
         onMouseDown={(e) => { if (e.target === e.currentTarget) onSelect(null); }}
-        onContextMenu={(ev) => { ev.preventDefault(); setMenu({ x: ev.clientX, y: ev.clientY, entry: null }); }}
+        onContextMenu={(ev) => { ev.preventDefault(); setMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
       >
-        {filter ? (filtered ? renderFiltered("", 0) : <div className="tree-loading">Loading…</div>) : render("", 0)}
+        {view
+          ? (filter ? renderFilteredView() : renderView())
+          : (filter ? (filtered ? renderFiltered("", 0) : <div className="tree-loading">Loading…</div>) : render("", 0))}
       </nav>
       {menu && (
-        <div className="menu" style={{ left: menu.x, top: menu.y }} onMouseDown={(e) => e.stopPropagation()}>
-          <button onClick={() => { setDialog({ kind: "new-file", dir: targetDir() }); setMenu(null); }}>New file…</button>
-          <button onClick={() => { setDialog({ kind: "new-folder", dir: targetDir() }); setMenu(null); }}>New folder…</button>
-          {menu.entry && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          {/* A view's root is a list of shortcuts, not a directory: nothing new is created there (VIEW-06). */}
+          {(!view || menu.entry) && !menu.entry?.missing && (
             <>
+              <button onClick={() => { setDialog({ kind: "new-file", dir: targetDir() }); setMenu(null); }}>New file…</button>
+              <button onClick={() => { setDialog({ kind: "new-folder", dir: targetDir() }); setMenu(null); }}>New folder…</button>
+            </>
+          )}
+          {view && !menu.entry && (
+            <>
+              <button onClick={() => { setDialog({ kind: "new-view" }); setMenu(null); }}>New view…</button>
+              <button onClick={() => { setDialog({ kind: "rename-view", view }); setMenu(null); }}>Rename view…</button>
+              <button onClick={() => { void deleteView(view); setMenu(null); }}>Delete view</button>
+            </>
+          )}
+          {menu.entry && menu.viewRoot && view && (
+            <>
+              <hr />
+              <button onClick={() => { void api.viewRemove(ws.id, view.id, menu.entry!.path).catch(report); setMenu(null); }}>Remove from view</button>
+            </>
+          )}
+          {menu.entry && !menu.entry.missing && (
+            <>
+              <hr />
+              <button onClick={() => { onQuote(citation(menu.entry!)); setMenu(null); }}>Quote to AI</button>
+              {sendTargets(menu.entry.path).map((v) => (
+                <button key={v.id} onClick={() => { void api.viewAdd(ws.id, v.id, menu.entry!.path).catch(report); setMenu(null); }}>Send to {v.name} view</button>
+              ))}
+              <button onClick={() => { setDialog({ kind: "new-view", then: menu.entry!.path }); setMenu(null); }}>Send to a new view…</button>
               <hr />
               <button onClick={() => { setDialog({ kind: "rename", entry: menu.entry! }); setMenu(null); }}>Rename…</button>
               <button onClick={() => { void api.duplicateEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Duplicate</button>
@@ -231,12 +333,18 @@ export function FileTree({ ws, onOpen, selected, onSelect, gitStatus = [] }: Pro
               <button onClick={() => { void api.revealEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Reveal in file manager</button>
             </>
           )}
-        </div>
+        </ContextMenu>
       )}
       {dialog && (
         <Prompt
-          title={dialog.kind === "new-file" ? "New file name" : dialog.kind === "new-folder" ? "New folder name" : "New name"}
-          initial={dialog.kind === "rename" ? dialog.entry.name : ""}
+          title={
+            dialog.kind === "new-file" ? "New file name"
+              : dialog.kind === "new-folder" ? "New folder name"
+              : dialog.kind === "new-view" ? "Name for the new view"
+              : dialog.kind === "rename-view" ? "New name for the view"
+              : "New name"
+          }
+          initial={dialog.kind === "rename" ? dialog.entry.name : dialog.kind === "rename-view" ? dialog.view.name : ""}
           selectEnd={dialog.kind === "rename" && !dialog.entry.isDir && dialog.entry.name.lastIndexOf(".") > 0 ? dialog.entry.name.lastIndexOf(".") : undefined}
           onSubmit={(v) => void submitDialog(v)}
           onClose={() => setDialog(null)}
