@@ -15,6 +15,8 @@ export interface EditorInstance {
 }
 
 const registry = new Map<string, EditorInstance>();
+/** Positions to jump to once a tab's view exists, from search or quick open. */
+const pendingReveal = new Map<string, { line: number; column: number }>();
 const dirty = new Set<string>();
 const dirtyListeners = new Set<() => void>();
 
@@ -78,8 +80,27 @@ export async function mount(id: string, workspaceId: string, path: string, conta
     registry.set(id, inst);
   }
   if (inst.el.parentElement !== container) container.replaceChildren(inst.el);
+  const target = pendingReveal.get(id);
+  if (target) {
+    pendingReveal.delete(id);
+    jump(inst.view, target.line, target.column);
+  }
   inst.view.focus();
   return inst;
+}
+
+/** Scrolls to a 1-based line, now if the view exists, else when it is mounted. */
+export function revealLine(id: string, line: number, column = 0): void {
+  const inst = registry.get(id);
+  if (inst) jump(inst.view, line, column);
+  else pendingReveal.set(id, { line, column });
+}
+
+function jump(view: EditorView, line: number, column: number): void {
+  const doc = view.state.doc;
+  const l = doc.line(Math.max(1, Math.min(line, doc.lines)));
+  const pos = Math.min(l.from + column, l.to);
+  view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: "center" }) });
 }
 
 export function unmount(id: string): void {

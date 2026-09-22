@@ -47,3 +47,10 @@ export interface DirChanged {
 }
 
 export type WindowRole = "workspace" | "terminal";
+
+export interface SearchHit {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+}

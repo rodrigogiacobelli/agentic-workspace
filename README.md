@@ -106,7 +106,7 @@ Project knowledge lives in Lore. `lore codex list` is the index.
 Arch / CachyOS:
 
 ```bash
-sudo pacman -S --needed base-devel webkit2gtk-4.1 git
+sudo pacman -S --needed base-devel webkit2gtk-4.1 git ripgrep
 ```
 
 Rust via [rustup](https://rustup.rs) (1.88 or newer) and Node with pnpm.
@@ -139,9 +139,10 @@ cd src-tauri && cargo test --lib     # unit tests; no compositor or PTY needed
 | `Ctrl+Shift+T` / `Ctrl+Shift+W` | terminal | New / close terminal tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | both | Next / previous tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | terminal | Copy / paste |
-| `Ctrl+Shift+F` | terminal | Search scrollback |
+| `Ctrl+Shift+F` | terminal / workspace | Search scrollback / search the project |
 | `Ctrl+P` | workspace | Quick open a file |
 | `Ctrl+S` / `Ctrl+W` | workspace | Save / close the editor tab |
 | `Ctrl+Alt+Shift+C` | workspace | Copy the selected path, relative to the workspace |
 
-Double-click a terminal tab to rename it; drag tabs to reorder them.
+Double-click a terminal tab to rename it; drag tabs to reorder them. Right-click
+in the file tree for file operations; deleting moves to the trash through GIO.

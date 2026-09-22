@@ -5,6 +5,7 @@ import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
 import type { Session, Workspace } from "../types";
 import { FileTree } from "./FileTree";
+import { SearchPanel } from "./SearchPanel";
 import { Palette, type PaletteItem } from "./Palette";
 import { report } from "./Switcher";
 
@@ -17,6 +18,7 @@ export function WorkspaceWindow({ session, openSwitcher }: Props) {
   const ws = session.workspaces.find((w) => w.id === session.active);
   const [selected, setSelected] = useState<string | null>(null);
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
+  const [sidebar, setSidebar] = useState<"files" | "search">("files");
   const [, bump] = useState(0);
 
   useEffect(() => editors.onDirty(() => bump((n) => n + 1)), []);
@@ -40,6 +42,7 @@ export function WorkspaceWindow({ session, openSwitcher }: Props) {
         case "switch-workspace": openSwitcher(); break;
         case "focus-other-window": void api.focusWindow("terminal"); break;
         case "quick-open": void openQuickOpen(); break;
+        case "search": setSidebar("search"); break;
         case "save": if (ws?.activeEditor) void editors.save(ws.activeEditor).catch(report); break;
         case "close-editor": if (ws?.activeEditor) void closeTab(ws, ws.activeEditor); break;
         case "next-tab": cycle(ws, 1); break;
@@ -63,13 +66,25 @@ export function WorkspaceWindow({ session, openSwitcher }: Props) {
     return <main className="empty">Add a folder to start.</main>;
   }
 
+  const openAt = (path: string, line: number, column: number) => {
+    api.openFile(ws.id, path).then((id) => editors.revealLine(id, line, column)).catch(report);
+  };
+
   return (
     <main className="workspace-main">
-      {ws.available ? (
-        <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p) => void api.openFile(ws.id, p).catch(report)} />
-      ) : (
-        <nav className="tree"><div className="tree-loading">The directory {ws.path} is missing.</div></nav>
-      )}
+      <aside className="sidebar">
+        <div className="sidebar-tabs">
+          <button className={sidebar === "files" ? "active" : ""} onClick={() => setSidebar("files")}>Files</button>
+          <button className={sidebar === "search" ? "active" : ""} onClick={() => setSidebar("search")} title="Ctrl+Shift+F">Search</button>
+        </div>
+        {!ws.available ? (
+          <div className="tree-loading">The directory {ws.path} is missing.</div>
+        ) : sidebar === "files" ? (
+          <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p) => void api.openFile(ws.id, p).catch(report)} />
+        ) : (
+          <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />
+        )}
+      </aside>
       <EditorArea ws={ws} />
       {quickOpen && (
         <Palette

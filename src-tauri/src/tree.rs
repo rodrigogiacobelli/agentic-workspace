@@ -144,3 +144,148 @@ pub fn list_files(state: tauri::State<AppState>, workspace_id: String) -> Result
     }
     Ok(files)
 }
+
+fn parent_and_name(rel: &str) -> (String, String) {
+    match rel.rsplit_once('/') {
+        Some((dir, name)) => (dir.to_string(), name.to_string()),
+        None => (String::new(), rel.to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn create_entry(state: tauri::State<AppState>, workspace_id: String, path: String, is_dir: bool) -> Result<(), String> {
+    let (_, abs) = resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+    if abs.exists() {
+        return Err(format!("{path} already exists"));
+    }
+    let result = if is_dir {
+        std::fs::create_dir_all(&abs)
+    } else {
+        abs.parent().map(std::fs::create_dir_all).unwrap_or(Ok(()))
+            .and_then(|_| std::fs::write(&abs, b""))
+    };
+    result.with_context(|| format!("creating {}", abs.display())).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn rename_entry(state: tauri::State<AppState>, workspace_id: String, from: String, to: String) -> Result<(), String> {
+    let (_, src) = resolve(&state, &workspace_id, &from).map_err(|e| format!("{e:#}"))?;
+    let (_, dst) = resolve(&state, &workspace_id, &to).map_err(|e| format!("{e:#}"))?;
+    if dst.exists() {
+        return Err(format!("{to} already exists"));
+    }
+    std::fs::rename(&src, &dst)
+        .with_context(|| format!("renaming {} to {}", src.display(), dst.display()))
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Copies `path` beside itself as `<stem> copy<ext>`, numbering collisions.
+#[tauri::command]
+pub fn duplicate_entry(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<String, String> {
+    let (root, src) = resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+    let (dir, name) = parent_and_name(&path);
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.clone(), String::new()),
+    };
+    let candidate = (1..1000)
+        .map(|n| if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") })
+        .map(|n| join_rel(&dir, &n))
+        .find(|rel| !root.join(rel).exists())
+        .ok_or("no free name for the copy")?;
+    let dst = root.join(&candidate);
+    let result = if src.is_dir() { copy_dir(&src, &dst) } else { std::fs::copy(&src, &dst).map(|_| ()) };
+    result
+        .with_context(|| format!("copying {} to {}", src.display(), dst.display()))
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(candidate)
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Moves the entry to the desktop's trash through GIO, never `rm`.
+#[tauri::command]
+pub fn trash_entry(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {
+    let (_, abs) = resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+    let output = Command::new("gio")
+        .arg("trash")
+        .arg(&abs)
+        .output()
+        .with_context(|| format!("running gio trash on {}", abs.display()))
+        .map_err(|e| format!("{e:#}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("gio trash failed: {}", String::from_utf8_lossy(&output.stderr).trim()))
+    }
+}
+
+#[tauri::command]
+pub fn reveal_entry(app: tauri::AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let (_, abs) = resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+    app.opener().reveal_item_in_dir(&abs).map_err(|e| format!("{e:#}"))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub path: String,
+    pub line: u64,
+    pub column: u64,
+    pub text: String,
+}
+
+const SEARCH_MAX: usize = 2000;
+
+/// Project-wide text search through ripgrep. Ignored paths are excluded unless
+/// asked for; dotfiles are searched, `.git` never is.
+#[tauri::command]
+pub fn search_project(state: tauri::State<AppState>, workspace_id: String, query: String, include_ignored: bool) -> Result<Vec<SearchHit>, String> {
+    let (root, _) = resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cmd = Command::new("rg");
+    cmd.current_dir(&root)
+        .args(["--json", "--smart-case", "--fixed-strings", "--hidden", "--glob", "!.git", "--max-count", "200", "--max-filesize", "2M"])
+        .arg("--");
+    if include_ignored {
+        cmd.arg("--no-ignore");
+    }
+    cmd.arg(&query).arg(".");
+    let output = cmd.output().context("running ripgrep (is it installed?)").map_err(|e| format!("{e:#}"))?;
+    let mut hits = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if event["type"] != "match" {
+            continue;
+        }
+        let data = &event["data"];
+        let Some(path) = data["path"]["text"].as_str() else { continue };
+        let text = data["lines"]["text"].as_str().unwrap_or("").trim_end_matches(['\n', '\r']).to_string();
+        let column = data["submatches"][0]["start"].as_u64().unwrap_or(0);
+        hits.push(SearchHit {
+            path: path.trim_start_matches("./").to_string(),
+            line: data["line_number"].as_u64().unwrap_or(0),
+            column,
+            text,
+        });
+        if hits.len() >= SEARCH_MAX {
+            break;
+        }
+    }
+    Ok(hits)
+}

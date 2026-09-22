@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
 
 pub const EVENT_QUIT_REQUESTED: &str = "quit-requested";
 
@@ -118,8 +119,25 @@ pub fn run() {
     apply_webkit_workaround();
 
     tauri::Builder::default()
+        // Registered first so a second launch is answered before anything
+        // else initialises: it raises the running instance's windows.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            for label in ["workspace", "terminal"] {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }))
+        // Size is restored; position is requested, which Wayland ignores.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             setup(app).map_err(|e| -> Box<dyn std::error::Error> { format!("{e:#}").into() })?;
             Ok(())
@@ -154,6 +172,12 @@ pub fn run() {
             pty::reorder_terminals,
             tree::list_dir,
             tree::list_files,
+            tree::create_entry,
+            tree::rename_entry,
+            tree::duplicate_entry,
+            tree::trash_entry,
+            tree::reveal_entry,
+            tree::search_project,
             files::read_file,
             files::write_file,
         ])

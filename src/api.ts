@@ -3,7 +3,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { DirChanged, Entry, Session, WindowRole } from "./types";
+import type { DirChanged, Entry, SearchHit, Session, WindowRole } from "./types";
 
 export type OutputChunk = ArrayBuffer | Uint8Array | number[];
 
@@ -45,6 +45,18 @@ export const api = {
   listDir: (workspaceId: string, path: string) =>
     invoke<Entry[]>("list_dir", { workspaceId, path }),
   listFiles: (workspaceId: string) => invoke<string[]>("list_files", { workspaceId }),
+  createEntry: (workspaceId: string, path: string, isDir: boolean) =>
+    invoke<void>("create_entry", { workspaceId, path, isDir }),
+  renameEntry: (workspaceId: string, from: string, to: string) =>
+    invoke<void>("rename_entry", { workspaceId, from, to }),
+  duplicateEntry: (workspaceId: string, path: string) =>
+    invoke<string>("duplicate_entry", { workspaceId, path }),
+  trashEntry: (workspaceId: string, path: string) =>
+    invoke<void>("trash_entry", { workspaceId, path }),
+  revealEntry: (workspaceId: string, path: string) =>
+    invoke<void>("reveal_entry", { workspaceId, path }),
+  searchProject: (workspaceId: string, query: string, includeIgnored: boolean) =>
+    invoke<SearchHit[]>("search_project", { workspaceId, query, includeIgnored }),
   readFile: (workspaceId: string, path: string) =>
     invoke<string>("read_file", { workspaceId, path }),
   writeFile: (workspaceId: string, path: string, content: string) =>
