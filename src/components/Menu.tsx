@@ -97,6 +97,8 @@ export interface Row {
   selected?: boolean;
   onPick: () => void;
   onRename?: () => void;
+  /** What the rename control says it does, when "Rename" is not it. */
+  renameLabel?: string;
   onRemove?: () => void;
   /** Rows nested under this one, revealed by its disclosure. */
   children?: Row[];
@@ -157,7 +159,7 @@ export function RowMenu({ label, title, className, rows, footer, empty, minWidth
           </span>
           {(r.onRename || r.onRemove) && (
             <span className="row-actions" onClick={(e) => e.stopPropagation()}>
-              {r.onRename && <button title="Rename" onClick={() => { setOpen(null); r.onRename!(); }}><Icon name="rename" size={13} /></button>}
+              {r.onRename && <button title={r.renameLabel ?? "Rename"} onClick={() => { setOpen(null); r.onRename!(); }}><Icon name="rename" size={13} /></button>}
               {r.onRemove && <button title="Remove" onClick={() => { setOpen(null); r.onRemove!(); }}><Icon name="close" size={13} /></button>}
             </span>
           )}

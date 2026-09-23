@@ -137,18 +137,7 @@ button.row-disclose:hover { color: var(--fg); background: transparent; }
 /* Room the name cannot take. A worktree's name and branch together run past
    any width this menu has, and the actions are the last thing that should give
    way to them: the text ellipsises and the buttons stay whole. */
-.row-actions {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  /* Two slots wide whether or not both are filled, so the rename of a row
-     that cannot be removed sits in the same column as every other one. */
-  width: 46px;
-  gap: 2px;
-  opacity: 0;
-  pointer-events: none;
-}
+.row-actions { flex: none; display: flex; align-items: center; gap: 2px; opacity: 0; pointer-events: none; }
 .row:hover .row-actions, .row-actions:focus-within { opacity: 1; pointer-events: auto; }
 .row-actions button { display: flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; color: var(--fg-dim); }
 .row-actions button:hover { color: var(--fg); background: var(--bg); }

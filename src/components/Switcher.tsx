@@ -27,7 +27,8 @@ interface Props {
 export function Switcher({ session, role, unsaved, onSettings }: Props) {
   const active = session.workspaces.find((w) => w.id === session.active);
   const other: WindowRole = role === "terminal" ? "workspace" : "terminal";
-  const [renaming, setRenaming] = useState<Workspace | null>(null);
+  /** The one text prompt this row opens, whatever asked for it. */
+  const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (name: string) => void } | null>(null);
   const [maximized, setMaximized] = useState(false);
 
   // The window's own border and resize band exist only while it is not
@@ -67,7 +68,11 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
     detail: w.path,
     selected: w.id === session.active,
     onPick: () => { if (w.id !== session.active) void api.switchWorkspace(w.id).catch(report); },
-    onRename: () => setRenaming(w),
+    onRename: () => setPrompt({
+      title: "Workspace name",
+      initial: w.name,
+      submit: (name) => void api.renameWorkspace(w.id, name).catch(report),
+    }),
     onRemove: () => void remove(w),
     children,
   });
@@ -101,7 +106,7 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           const branch = t.branch ? ` · ${t.branch}` : "";
           return already
             ? {
-                // Renaming labels the workspace, which is this row's to do.
+                // Naming labels the workspace, which is this row's to do.
                 // Removing is not: under its repository a worktree is git's,
                 // and the git panel's worktree list is where it is deleted —
                 // with the warning about running processes that BR-10 wants.
@@ -115,6 +120,17 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
                 name: `⑂ ${t.name}${branch}`,
                 detail: t.path,
                 onPick: () => void api.addWorkspace(t.path, undefined, true).catch(report),
+                // A worktree nothing is open on has no name of its own yet —
+                // the row shows git's. Naming it is what opens it, so the row
+                // offers the same control as one already open: the row itself
+                // opens it under the directory's name, this under a chosen
+                // one (BR-08).
+                renameLabel: "Open as workspace…",
+                onRename: () => setPrompt({
+                  title: "Open this worktree as…",
+                  initial: t.name,
+                  submit: (name) => void api.addWorkspace(t.path, name, true).catch(report),
+                }),
               };
         }),
       );
@@ -169,12 +185,12 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
         </div>
       </header>
       {!maximized && <ResizeEdges />}
-      {renaming && (
+      {prompt && (
         <Prompt
-          title="Workspace name"
-          initial={renaming.name}
-          onClose={() => setRenaming(null)}
-          onSubmit={(name) => { const w = renaming; setRenaming(null); void api.renameWorkspace(w.id, name).catch(report); }}
+          title={prompt.title}
+          initial={prompt.initial}
+          onClose={() => setPrompt(null)}
+          onSubmit={(name) => { const answered = prompt; setPrompt(null); answered.submit(name); }}
         />
       )}
     </>
