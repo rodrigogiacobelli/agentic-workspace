@@ -100,7 +100,16 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           const already = workspaceOn(t.path);
           const branch = t.branch ? ` · ${t.branch}` : "";
           return already
-            ? { ...row(already), id: `${w.id}:${t.path}`, name: `⑂ ${already.name}${branch}${already.available ? "" : " (unavailable)"}` }
+            ? {
+                // Renaming labels the workspace, which is this row's to do.
+                // Removing is not: under its repository a worktree is git's,
+                // and the git panel's worktree list is where it is deleted —
+                // with the warning about running processes that BR-10 wants.
+                ...row(already),
+                onRemove: undefined,
+                id: `${w.id}:${t.path}`,
+                name: `⑂ ${already.name}${branch}${already.available ? "" : " (unavailable)"}`,
+              }
             : {
                 id: `${w.id}:${t.path}`,
                 name: `⑂ ${t.name}${branch}`,

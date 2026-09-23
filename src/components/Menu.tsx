@@ -4,6 +4,7 @@
 
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useDismiss } from "../motion";
+import { Icon } from "./icons";
 
 /**
  * A menu anchored at a point, dismissed by a click elsewhere or Escape. `x` is
@@ -156,8 +157,8 @@ export function RowMenu({ label, title, className, rows, footer, empty, minWidth
           </span>
           {(r.onRename || r.onRemove) && (
             <span className="row-actions" onClick={(e) => e.stopPropagation()}>
-              {r.onRename && <button title="Rename" onClick={() => { setOpen(null); r.onRename!(); }}>✎</button>}
-              {r.onRemove && <button title="Remove" onClick={() => { setOpen(null); r.onRemove!(); }}>✕</button>}
+              {r.onRename && <button title="Rename" onClick={() => { setOpen(null); r.onRename!(); }}><Icon name="rename" size={13} /></button>}
+              {r.onRemove && <button title="Remove" onClick={() => { setOpen(null); r.onRemove!(); }}><Icon name="close" size={13} /></button>}
             </span>
           )}
         </div>

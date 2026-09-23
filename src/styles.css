@@ -134,10 +134,24 @@ button.row-disclose:hover { color: var(--fg); background: transparent; }
 .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-detail { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-actions { display: flex; gap: 2px; opacity: 0; pointer-events: none; }
+/* Room the name cannot take. A worktree's name and branch together run past
+   any width this menu has, and the actions are the last thing that should give
+   way to them: the text ellipsises and the buttons stay whole. */
+.row-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  /* Two slots wide whether or not both are filled, so the rename of a row
+     that cannot be removed sits in the same column as every other one. */
+  width: 46px;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
 .row:hover .row-actions, .row-actions:focus-within { opacity: 1; pointer-events: auto; }
-.row-actions button { padding: 0 6px; height: 20px; line-height: 1; color: var(--fg-dim); }
-.row-actions button:hover { color: var(--fg); }
+.row-actions button { display: flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; color: var(--fg-dim); }
+.row-actions button:hover { color: var(--fg); background: var(--bg); }
 .row-footer { text-align: left; }
 .win-controls { display: flex; align-self: stretch; margin-left: 4px; }
 .win-controls button { width: 40px; height: 30px; padding: 0; border-radius: 0; color: var(--fg-dim); font-size: 12px; }

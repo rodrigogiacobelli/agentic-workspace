@@ -24,6 +24,8 @@ const PATHS = {
   newFolder: "M1.5 3.5h4.5l1.5 1.5h7v4 M1.5 3.5v10h6 M12.5 11v4 M10.5 13h4",
   copy: "M6 6h8v8.5h-8z M10.5 6v-4.5h-8v8.5h3",
   chevronDown: "M4 6.5l4 4 4-4",
+  rename: "M11 2.5l2.5 2.5-7.5 7.5-3.5 1 1-3.5z M9.5 4l2.5 2.5",
+  close: "M4 4l8 8 M12 4l-8 8",
 } as const;
 
 export type IconName = keyof typeof PATHS;
