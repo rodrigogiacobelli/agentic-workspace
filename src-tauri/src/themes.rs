@@ -408,7 +408,7 @@ fn import(path: &Path) -> Result<Vec<Theme>> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_themes(state: tauri::State<AppState>, path: String) -> Result<Vec<Theme>, String> {
     let themes = import(Path::new(&path)).map_err(|e| format!("{e:#}"))?;
     for t in &themes {
@@ -417,7 +417,7 @@ pub fn import_themes(state: tauri::State<AppState>, path: String) -> Result<Vec<
     Ok(themes)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_themes(state: tauri::State<AppState>) -> Vec<Theme> {
     list(&state.data_dir)
 }

@@ -13,11 +13,19 @@ interface Props {
 export function Prompt({ title, initial = "", selectEnd, onSubmit, onClose }: Props) {
   const [value, setValue] = useState(initial);
   const input = useRef<HTMLInputElement>(null);
+  /** Where the keyboard was when this opened, and whether it was answered. */
+  const from = useRef<HTMLElement | null>(null);
+  const submitted = useRef(false);
   useEffect(() => {
+    from.current = document.activeElement as HTMLElement | null;
     const el = input.current;
     if (!el) return;
     el.focus();
     el.setSelectionRange(0, selectEnd ?? initial.length);
+    // Dismissing gives the keyboard back to whatever had it — the file tree,
+    // usually. Left on the body, the next key pressed would do nothing.
+    // Answering does not: what the answer opened is owed the keyboard.
+    return () => { if (!submitted.current) from.current?.focus?.(); };
   }, [initial, selectEnd]);
   return (
     <div className="overlay" onMouseDown={onClose}>
@@ -29,7 +37,7 @@ export function Prompt({ title, initial = "", selectEnd, onSubmit, onClose }: Pr
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && value.trim()) onSubmit(value.trim());
+            if (e.key === "Enter" && value.trim()) { submitted.current = true; onSubmit(value.trim()); }
             if (e.key === "Escape") onClose();
           }}
         />

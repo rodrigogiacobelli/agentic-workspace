@@ -77,7 +77,7 @@ fn ignored_by_git(root: &Path, paths: &[String]) -> HashSet<String> {
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_dir(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<Vec<Entry>, String> {
     let (root, dir) = resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
     let read = std::fs::read_dir(&dir)
@@ -109,7 +109,7 @@ pub fn list_dir(state: tauri::State<AppState>, workspace_id: String, path: Strin
 /// One entry per workspace-relative path, as a view's root or a citation
 /// needs it: its name, whether it is a directory, whether git ignores it,
 /// and whether it is there at all.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stat_entries(state: tauri::State<AppState>, workspace_id: String, paths: Vec<String>) -> Result<Vec<Entry>, String> {
     let (root, _) = resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
     let mut entries: Vec<Entry> = paths
@@ -132,7 +132,7 @@ pub fn stat_entries(state: tauri::State<AppState>, workspace_id: String, paths: 
 
 /// Every file quick open can reach: what git tracks plus what it would add,
 /// or a bounded walk outside a repository.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_files(state: tauri::State<AppState>, workspace_id: String) -> Result<Vec<String>, String> {
     let (root, _) = resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
     let listed = Command::new("git")
@@ -326,7 +326,7 @@ const SEARCH_MAX: usize = 2000;
 
 /// Project-wide text search through ripgrep. Ignored paths are excluded unless
 /// asked for; dotfiles are searched, `.git` never is.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_project(state: tauri::State<AppState>, workspace_id: String, query: String, include_ignored: bool) -> Result<Vec<SearchHit>, String> {
     let (root, _) = resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
     if query.trim().is_empty() {

@@ -90,12 +90,17 @@ class TaskWidget extends WidgetType {
 
 class MediaWidget extends WidgetType {
   constructor(readonly href: string, readonly alt: string, readonly url: string | null) { super(); }
-  toDOM() {
+  toDOM(view: EditorView) {
     const wrap = document.createElement("span");
     wrap.className = "cm-lp-media";
     const url = this.url;
     const kind = mediaKind(this.href);
+    // Media arrives after the line was measured: without this the heights the
+    // viewport is computed from stay wrong and the images further down the
+    // document are never decorated, which is what a narrow split pane shows.
+    const measured = () => view.requestMeasure();
     const broken = () => {
+      measured();
       wrap.replaceChildren();
       const ph = document.createElement("span");
       ph.className = "cm-lp-broken";
@@ -108,6 +113,7 @@ class MediaWidget extends WidgetType {
       img.src = url;
       img.alt = this.alt;
       img.title = this.href;
+      img.onload = measured;
       img.onerror = broken;
       wrap.appendChild(img);
     } else if (kind === "audio" || kind === "video") {
@@ -116,6 +122,7 @@ class MediaWidget extends WidgetType {
       media.controls = true;
       media.preload = "metadata";
       media.title = this.href;
+      media.onloadedmetadata = measured;
       media.onerror = broken;
       if (kind === "audio") {
         const label = document.createElement("span");

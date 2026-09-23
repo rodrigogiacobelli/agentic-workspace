@@ -11,6 +11,16 @@
   --danger: #f87171;
   --mono: "JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", "Cascadia Code", "DejaVu Sans Mono", monospace;
   --ui: system-ui, "Noto Sans", sans-serif;
+  /* Layering, lowest first. Every floating layer sits above the window's
+     resize band, whose invisible 5 px strips would otherwise swallow a click
+     on a menu at the edge of the screen. */
+  --z-drop: 5;
+  --z-resize: 10;
+  --z-menu: 100;
+  --z-overlay: 200;
+  --z-notice: 300;
+  --z-scrollbar: 350;
+  --z-tooltip: 400;
 }
 
 * { box-sizing: border-box; }
@@ -67,14 +77,15 @@ input:focus { border-color: var(--accent); }
 .switcher-path { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon { flex: none; vertical-align: -3px; }
 .row-menu { display: flex; flex-direction: column; max-width: 560px; }
-.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.row { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
 .row:hover { background: var(--bg-hover); }
 .row.selected .row-name { color: var(--accent); }
+.row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-detail { grid-column: 1; color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 2px; visibility: hidden; }
+.row-detail { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-actions { display: flex; gap: 2px; visibility: hidden; }
 .row:hover .row-actions { visibility: visible; }
-.row-actions button { padding: 0 6px; color: var(--fg-dim); }
+.row-actions button { padding: 0 6px; height: 20px; line-height: 1; color: var(--fg-dim); }
 .row-actions button:hover { color: var(--fg); }
 .row-footer { text-align: left; }
 .win-controls { display: flex; align-self: stretch; margin-left: 4px; }
@@ -82,7 +93,7 @@ input:focus { border-color: var(--accent); }
 .win-controls button:hover { color: var(--fg); }
 .win-controls .close:hover { background: #e81123; color: #fff; }
 /* The resize band of an undecorated window (CHR-05): 5 px edges, 10 px corners. */
-.resize-edge { position: fixed; z-index: 100; }
+.resize-edge { position: fixed; z-index: var(--z-resize); }
 .resize-n { top: 0; left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
 .resize-s { bottom: 0; left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
 .resize-e { right: 0; top: 10px; bottom: 10px; width: 5px; cursor: ew-resize; }
@@ -95,7 +106,7 @@ input:focus { border-color: var(--accent); }
 .menu button:disabled:hover { background: transparent; }
 .submenu { position: relative; display: flex; flex-direction: column; }
 .submenu > button { width: 100%; }
-.submenu-list { position: absolute; left: 100%; top: -4px; min-width: 160px; }
+.menu.submenu-list { position: absolute; left: 100%; top: -4px; min-width: 160px; }
 .sidebar-tabs [role="tab"].drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .menu-check { display: inline-block; width: 16px; color: var(--accent); }
 .menu-label { flex: 1; }
@@ -128,24 +139,26 @@ main { flex: 1; display: flex; min-height: 0; }
 .workspace-main { flex-direction: row; }
 .empty { display: flex; align-items: center; justify-content: center; color: var(--fg-dim); height: 100%; width: 100%; }
 
-.tabs {
+/* The strip scrolls; the controls at its end do not go with it. */
+.tab-bar {
   display: flex;
   align-items: stretch;
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  overflow-y: hidden;
   flex: none;
   height: 30px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
 }
-/* The strip's scrollbar keeps to 4 px along the bottom edge (FIX-04). */
-.tabs::-webkit-scrollbar { height: 4px; }
-.tabs::-webkit-scrollbar-track { background: transparent; }
-.tabs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-.tabs::-webkit-scrollbar-thumb:hover { background: var(--fg-faint); }
+.tabs {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .tab.preview .tab-label { font-style: italic; }
+/* Tabs narrow to 120 px before the strip scrolls at all, so ten of them fit
+   where six did (TAB-01). Past that floor the overflow control takes over. */
 .tab {
   display: flex;
   align-items: center;
@@ -155,14 +168,23 @@ main { flex: 1; display: flex; min-height: 0; }
   color: var(--fg-dim);
   cursor: pointer;
   white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 120px;
   max-width: 240px;
 }
 .tab:hover { background: var(--bg-hover); }
 .tab.active { color: var(--fg); background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent); }
-.tab-label { overflow: hidden; text-overflow: ellipsis; }
-.tab-close { padding: 0 4px; color: var(--fg-faint); line-height: 1; }
-.tab:hover .tab-close, .tab.active .tab-close { color: var(--fg-dim); }
+.tab-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The close button is room a narrowed tab needs for its name, so it is drawn
+   only where it can be used. A dirty tab keeps a dot in its place (TAB-06). */
+.tab-close { padding: 0 4px; color: var(--fg-faint); line-height: 1; visibility: hidden; }
+.tab:hover .tab-close, .tab.active .tab-close { color: var(--fg-dim); visibility: visible; }
 .tab-close:hover { color: var(--fg); }
+.tabs-overflow { flex: none; padding: 0 8px; color: var(--fg-dim); border-left: 1px solid var(--border); }
+.tabs-overflow:hover { background: var(--bg-hover); color: var(--fg); }
+.tabs-overflow-count { font-size: 10px; margin-left: 3px; }
+.tab-list button.selected { color: var(--accent); }
+.tab-list .menu-hint { margin-left: 12px; }
 .tab-add { padding: 0 10px; color: var(--fg-dim); }
 .tab-rename { width: 140px; padding: 1px 4px; }
 
@@ -192,7 +214,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .divider-row { width: 4px; cursor: col-resize; }
 .divider-column { height: 4px; cursor: row-resize; }
 .divider:hover { background: var(--accent); }
-.drop-zone { position: absolute; inset: 0; background: color-mix(in srgb, var(--accent) 22%, transparent); border: 2px solid var(--accent); pointer-events: none; z-index: 5; }
+.drop-zone { position: absolute; inset: 0; background: color-mix(in srgb, var(--accent) 22%, transparent); border: 2px solid var(--accent); pointer-events: none; z-index: var(--z-drop); }
 .drop-left { right: 50%; }
 .drop-right { left: 50%; }
 .drop-top { bottom: 50%; }
@@ -204,8 +226,6 @@ main { flex: 1; display: flex; min-height: 0; }
 .sidebar-tabs [role="tab"] { flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; color: var(--fg-dim); padding: 5px 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-tabs [role="tab"]:hover { background: var(--bg-hover); }
 .sidebar-tabs [role="tab"].active { color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
-.sidebar-tabs .panel-hide { flex: none; padding: 0 8px; color: var(--fg-faint); border-radius: 0; }
-.sidebar-tabs .panel-hide:hover { color: var(--fg); }
 .tab-count { font-size: 10px; color: var(--fg-dim); }
 .media-view { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; overflow: auto; background: var(--bg); }
 .media-view img, .media-view video { max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -230,9 +250,21 @@ main { flex: 1; display: flex; min-height: 0; }
   outline: none;
 }
 .tree:focus .tree-row.selected { box-shadow: inset 2px 0 0 var(--accent); }
+/* Not one native scrollbar anywhere: WebKitGTK draws its overlay bar above
+   every layer and at whatever size it likes. src/scrollbars.ts draws them all
+   instead (SCR-01). */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { width: 0; height: 0; }
+
+.sbars { position: fixed; inset: 0; pointer-events: none; z-index: var(--z-scrollbar); }
+.sbar-track, .sbar-thumb { position: fixed; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.sbar-track.on, .sbar-thumb.on { opacity: 1; pointer-events: auto; }
+.sbar-thumb { background: var(--fg-faint); border-radius: 3px; }
+.sbar-thumb:hover, .sbar-thumb.dragging { background: var(--fg-dim); }
+.sbar-x { cursor: default; }
 .tooltip {
   position: fixed;
-  z-index: 200;
+  z-index: var(--z-tooltip);
   max-width: 480px;
   padding: 3px 8px;
   font-size: 11px;
@@ -281,7 +313,7 @@ main { flex: 1; display: flex; min-height: 0; }
   border-radius: 6px;
   padding: 4px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-  z-index: 10;
+  z-index: var(--z-menu);
 }
 .menu button { display: flex; align-items: center; gap: 4px; text-align: left; padding: 4px 10px; }
 
@@ -414,7 +446,7 @@ main { flex: 1; display: flex; min-height: 0; }
   justify-content: center;
   align-items: flex-start;
   padding-top: 12vh;
-  z-index: 20;
+  z-index: var(--z-overlay);
 }
 .palette {
   width: min(560px, 90vw);
@@ -432,7 +464,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .palette-detail { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; }
 .palette-empty { color: var(--fg-dim); }
 
-.notices { position: fixed; bottom: 12px; right: 12px; display: flex; flex-direction: column; gap: 6px; z-index: 30; max-width: 480px; }
+.notices { position: fixed; bottom: 12px; right: 12px; display: flex; flex-direction: column; gap: 6px; z-index: var(--z-notice); max-width: 480px; }
 .notice {
   display: flex;
   gap: 8px;
@@ -463,11 +495,15 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-state { color: var(--danger); font-weight: 600; }
 .git-ab { color: var(--fg-dim); }
 .git-note { padding: 4px 8px; color: var(--fg-dim); border-bottom: 1px solid var(--border); }
-.git-body { flex: 1; overflow: auto; }
+/* Two sections, one scroller each: the changes, at a height the edge below
+   them sets, and the history with whatever is left. */
+.git-changes { flex: none; overflow: auto; }
+.git-resize { flex: none; height: 5px; background: var(--border); cursor: row-resize; }
+.git-resize:hover { background: var(--accent); }
 .git-empty { padding: 16px; color: var(--fg-dim); }
 .git-empty button { border: 1px solid var(--border); }
 .git-section { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
-.git-section-title { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px 2px; font-weight: 600; }
+.git-section-title { position: sticky; top: 0; z-index: 1; background: var(--bg); display: flex; justify-content: space-between; align-items: center; padding: 6px 8px 2px; font-weight: 600; }
 .git-section-title button { font-size: 11px; color: var(--fg-dim); }
 .git-row { display: flex; align-items: center; gap: 6px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
 .git-row:hover { background: var(--bg-hover); }
@@ -477,32 +513,29 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-letter.s-D { color: var(--danger); }
 .git-letter.s-\! { color: var(--danger); }
 .git-path { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.git-actions { display: none; gap: 2px; }
+.git-actions { display: none; gap: 2px; margin-left: auto; padding-left: 8px; }
 .git-row:hover .git-actions { display: flex; }
 .git-actions button { padding: 0 5px; }
-.git-commit { padding: 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); }
+.git-commit { flex: none; padding: 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); }
 .git-commit textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; resize: vertical; }
-.git-commit-actions { display: flex; justify-content: space-between; align-items: center; }
+.git-commit-actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
 .git-commit-actions button { border: 1px solid var(--border); }
-.git-commit-actions label { color: var(--fg-dim); }
-.git-history { display: flex; flex-direction: column; min-height: 200px; }
+.git-history { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .git-filter { margin: 4px 8px; }
-.git-log { max-height: 40vh; overflow: auto; }
-.git-commit-row { display: grid; grid-template-columns: 12px auto 1fr; column-gap: 6px; padding: 3px 8px; cursor: pointer; }
+.git-log { flex: 1; overflow: auto; }
+.git-commit-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 6px; padding: 3px 8px; cursor: pointer; }
 .git-commit-row:hover { background: var(--bg-hover); }
 .git-commit-row.selected { background: var(--bg-hover); }
 .git-chevron { color: var(--fg-dim); font-size: 10px; padding-top: 2px; }
-.git-hash { font-family: var(--mono); color: var(--accent); font-size: 11px; }
+.git-copy { grid-column: 3; grid-row: 1 / span 2; align-self: center; padding: 0 4px; color: var(--fg-dim); visibility: hidden; }
+.git-commit-row:hover .git-copy { visibility: visible; }
+.git-copy:hover { color: var(--fg); }
 .git-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.git-meta { grid-column: 3; color: var(--fg-dim); font-size: 11px; }
+.git-meta { grid-column: 2; color: var(--fg-dim); font-size: 11px; }
 .git-commit-files { padding: 0 0 6px 14px; border-bottom: 1px solid var(--border); }
-.git-commit-files .git-message { margin: 4px 8px 6px; font-size: 11px; }
 .git-dir { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-row .git-path { flex: 0 1 auto; }
-.git-detail { border-top: 1px solid var(--border); padding: 6px 0; }
-.git-detail-head { display: flex; gap: 8px; align-items: center; padding: 0 8px; }
-.git-detail-head .git-meta { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.git-message { font-family: var(--prose); white-space: pre-wrap; margin: 6px 8px; user-select: text; }
+.git-row .git-dir { flex: 1 1 auto; }
 .list-actions { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .list-actions button { border: 1px solid var(--border); }
 .row-action { margin-left: auto; padding: 0 6px; color: var(--fg-dim); }
@@ -512,7 +545,15 @@ main { flex: 1; display: flex; min-height: 0; }
 .diff-header { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .diff-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diff-header button.active { background: var(--bg-hover); }
-.diff-host { flex: 1; min-height: 0; position: relative; user-select: text; }
+.diff-body { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.diff-host { flex: 1; min-height: 0; position: relative; user-select: text; overflow: hidden; }
+/* Where the changes are. The whole file is shown, so this is what says
+   where to look; it sits over the scrollbar, as the platform's does. */
+.diff-ruler { position: absolute; top: 0; right: 0; bottom: 0; width: 8px; pointer-events: none; }
+.diff-mark { position: absolute; left: 1px; right: 1px; min-height: 2px; border-radius: 1px; }
+.diff-mark.add { background: #86efac; }
+.diff-mark.del { background: var(--danger); }
+.diff-mark.mod { background: #e0b35a; }
 .diff-empty { padding: 24px; color: var(--fg-dim); text-align: center; }
 .diff-empty button { border: 1px solid var(--border); }
 /* The selection layer sits above the text (see editorTheme); a blend mode
@@ -520,6 +561,13 @@ main { flex: 1; display: flex; min-height: 0; }
 [data-theme="dark"] .cm-selectionBackground { mix-blend-mode: screen; }
 [data-theme="light"] .cm-selectionBackground { mix-blend-mode: multiply; }
 .diff-host .cm-editor { height: 100%; }
+/* Side by side, the merge view is the one scroller: @codemirror/merge forces
+   `height: auto` on both editors inside it, so bounding the merge view is the
+   only thing that makes the diff scrollable, and it scrolls both sides
+   together (DIF-01, DIF-02). A rule for it cannot live in an EditorView.theme
+   — that scopes every selector under the editor root, which is a descendant
+   of this element, so such a rule never matches. */
+.diff-host .cm-mergeView { height: 100%; }
 .hunk-action { display: inline-block; margin-right: 8px; font-size: 11px; border: 1px solid var(--border); padding: 0 6px; background: var(--bg-raised); vertical-align: middle; }
 .cm-blame-gutter .cm-blame-line { display: inline-block; width: 220px; padding: 0 8px; color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .statusbar button { padding: 0 6px; font-size: 11px; color: var(--fg-dim); }

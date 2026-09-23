@@ -131,7 +131,7 @@ pub fn refresh_summary(app: &tauri::AppHandle, workspace_id: &str) {
     state.git.lock().insert(workspace_id.to_string(), summary);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_info(state: tauri::State<AppState>, workspace_id: String) -> Result<RepoInfo, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     Ok(info(&root))
@@ -158,7 +158,7 @@ pub struct StatusEntry {
     pub conflicted: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_status(state: tauri::State<AppState>, workspace_id: String) -> Result<Vec<StatusEntry>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let out = git(&root, &["status", "--porcelain=v2", "-z", "--untracked-files=all"]).map_err(err)?;
@@ -221,7 +221,7 @@ pub fn git_status(state: tauri::State<AppState>, workspace_id: String) -> Result
 
 /// The unified diff for one path: against the index for worktree changes,
 /// against HEAD for staged ones, and against nothing for an untracked file.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_diff(state: tauri::State<AppState>, workspace_id: String, path: String, staged: bool, untracked: bool) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     if untracked {
@@ -238,14 +238,17 @@ pub fn git_diff(state: tauri::State<AppState>, workspace_id: String, path: Strin
 
 /// File contents at a revision (`HEAD`, a hash, or `:` for the index), or
 /// empty when the path does not exist there.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_show_file(state: tauri::State<AppState>, workspace_id: String, rev: String, path: String) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
-    let spec = format!("{rev}:{path}");
+    // `:` is git's own name for the index, and it is the whole revision: the
+    // separator must not be doubled, or the spec names nothing and the caller
+    // is handed an empty file (FIX-09).
+    let spec = format!("{}:{path}", rev.trim_end_matches(':'));
     Ok(git(&root, &["show", &spec]).unwrap_or_default())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_commit_file_diff(state: tauri::State<AppState>, workspace_id: String, hash: String, path: String) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     git(&root, &["show", "--format=", "--", &path].iter().map(|s| *s).collect::<Vec<_>>().as_slice()).map_err(err).and_then(|_| {
@@ -342,7 +345,7 @@ pub fn git_commit(state: tauri::State<AppState>, workspace_id: String, message: 
     git(&root, &args).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_last_message(state: tauri::State<AppState>, workspace_id: String) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     Ok(git(&root, &["log", "-1", "--format=%B"]).unwrap_or_default().trim_end().to_string())
@@ -352,19 +355,20 @@ pub fn git_last_message(state: tauri::State<AppState>, workspace_id: String) -> 
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     pub hash: String,
-    pub short: String,
     pub subject: String,
     pub author: String,
     pub date: String,
     pub timestamp: i64,
+    /// Subject and body together, as the history's hover popup shows it.
+    pub message: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_log(state: tauri::State<AppState>, workspace_id: String, skip: u32, limit: u32, path: Option<String>) -> Result<Vec<LogEntry>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let skip = format!("--skip={skip}");
     let limit = format!("--max-count={limit}");
-    let mut args = vec!["log", "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ar%x1f%at%x1e", skip.as_str(), limit.as_str()];
+    let mut args = vec!["log", "--format=%H%x1f%s%x1f%an%x1f%ar%x1f%at%x1f%B%x1e", skip.as_str(), limit.as_str()];
     if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
         args.push("--");
         args.push(p);
@@ -384,11 +388,11 @@ pub fn git_log(state: tauri::State<AppState>, workspace_id: String, skip: u32, l
             }
             Some(LogEntry {
                 hash: f[0].into(),
-                short: f[1].into(),
-                subject: f[2].into(),
-                author: f[3].into(),
-                date: f[4].into(),
-                timestamp: f[5].trim().parse().unwrap_or(0),
+                subject: f[1].into(),
+                author: f[2].into(),
+                date: f[3].into(),
+                timestamp: f[4].trim().parse().unwrap_or(0),
+                message: f[5].trim().into(),
             })
         })
         .collect())
@@ -412,7 +416,7 @@ pub struct CommitFile {
     pub path: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_show(state: tauri::State<AppState>, workspace_id: String, hash: String) -> Result<CommitDetail, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let out = git(&root, &["show", "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%B%x1e", "--name-status", "--root", "--date=iso", &hash]).map_err(err)?;
@@ -446,7 +450,7 @@ pub struct BlameLine {
     pub date: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_blame(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<Vec<BlameLine>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let out = git(&root, &["blame", "--line-porcelain", "--", &path]).map_err(err)?;
@@ -515,7 +519,7 @@ pub struct Branches {
     pub remote: Vec<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_branches(state: tauri::State<AppState>, workspace_id: String) -> Result<Branches, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let out = git(&root, &["for-each-ref", "--format=%(refname:short)%1f%(upstream:short)%1f%(upstream:track)%1f%(HEAD)%1f%(worktreepath)", "refs/heads"]).map_err(err)?;
@@ -586,7 +590,7 @@ pub fn git_delete_branch(state: tauri::State<AppState>, workspace_id: String, na
 }
 
 /// Commits on `name` that no other branch holds, for a delete confirmation.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_unmerged_commits(state: tauri::State<AppState>, workspace_id: String, name: String) -> Result<Vec<String>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let spec = format!("{name}");
@@ -613,7 +617,7 @@ pub struct WorktreeEntry {
     pub bare: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_worktrees(state: tauri::State<AppState>, workspace_id: String) -> Result<Vec<WorktreeEntry>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let out = git(&root, &["worktree", "list", "--porcelain"]).map_err(err)?;
@@ -661,7 +665,7 @@ pub fn git_remove_worktree(state: tauri::State<AppState>, workspace_id: String, 
 }
 
 /// Uncommitted changes in a worktree, for the delete confirmation.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_worktree_dirty(path: String) -> Result<Vec<String>, String> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {

@@ -176,6 +176,8 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
     }
     if (cut) clipboard = null;
     if (dir && !ws.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true).catch(() => {});
+    // The folder was not watched while collapsed; its listing is read again.
+    load(dir);
     if (last) onSelect(last);
   };
 
@@ -210,6 +212,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
         const path = join(d.dir, value);
         await api.createEntry(ws.id, path, d.kind === "new-folder");
         if (d.dir && !ws.expanded.includes(d.dir)) await api.setExpanded(ws.id, d.dir, true);
+        load(d.dir);
         if (d.kind === "new-file") onOpen(path, false);
       } else if (d.kind === "rename") {
         await api.renameEntry(ws.id, d.entry.path, join(dirOf(d.entry.path), value));

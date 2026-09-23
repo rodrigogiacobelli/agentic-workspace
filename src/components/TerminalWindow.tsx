@@ -5,7 +5,7 @@ import * as terminals from "../terminals";
 import type { Session, TerminalTab, Workspace } from "../types";
 import { ContextMenu } from "./Menu";
 import { report } from "./Switcher";
-import { useTabStrip } from "./tabs";
+import { TabOverflow, useTabStrip } from "./tabs";
 
 interface Props {
   session: Session;
@@ -146,7 +146,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
 }) {
   const dragging = useRef<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
-  const strip = useTabStrip(ws.activeTerminal);
+  const strip = useTabStrip(ws.activeTerminal, ws.terminals.length);
 
   const drop = (targetId: string) => {
     const from = dragging.current;
@@ -159,7 +159,8 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
   };
 
   return (
-    <div className="tabs" ref={strip.ref} onWheel={strip.onWheel}>
+    <div className="tab-bar">
+      <div className="tabs" ref={strip.ref} onWheel={strip.onWheel}>
       {ws.terminals.map((tab) => (
         <div
           key={tab.id}
@@ -192,6 +193,13 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
           <button className="tab-close" onClick={(e) => { e.stopPropagation(); void api.terminalClose(tab.id); }} title="Close (Ctrl+Shift+W)">×</button>
         </div>
       ))}
+      <span className="tabs-spacer" />
+      </div>
+      <TabOverflow
+        strip={strip}
+        entries={ws.terminals.map((t) => ({ id: t.id, label: labelOf(t), active: t.id === ws.activeTerminal }))}
+        onPick={(id) => void api.setActiveTerminal(ws.id, id)}
+      />
       <button className="tab-add" onClick={() => void api.terminalOpen(ws.id).catch(report)} title="New terminal (Ctrl+Shift+T)">＋</button>
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>

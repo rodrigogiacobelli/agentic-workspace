@@ -280,11 +280,16 @@ export class Doc {
       }
     }
     // Focus moves to the document only when it is newly shown; a re-mount of
-    // what is already on screen must not take it from an input elsewhere.
+    // what is already on screen must not take it from an input elsewhere, and
+    // a preview opened by a click in the file tree leaves the tree its keys.
     if (this.root.parentElement !== container) {
       container.replaceChildren(this.root);
-      this.active().focus();
+      if (!document.activeElement?.closest(".tree")) this.active().focus();
     }
+  }
+
+  focus(): void {
+    this.active().focus();
   }
 
   unmount(): void {

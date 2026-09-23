@@ -174,6 +174,14 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     api.openFile(ws.id, path, true).then((id) => editors.revealLine(id, line, column)).catch(report);
   };
 
+  // A single click previews and the tree keeps its focus, so Ctrl+C and the
+  // other tree keys still reach it; a double click or Enter opens for keeps
+  // and hands focus to the document.
+  const openFromTree = (path: string, preview: boolean) => {
+    if (!preview) (document.activeElement as HTMLElement | null)?.blur();
+    api.openFile(ws.id, path, preview).then((id) => { if (!preview) editors.doc(id)?.focus(); }).catch(report);
+  };
+
   // Quote to AI: a citation into the active document, whatever the link setting (CITE-01, CITE-05).
   const quote = (paths: string[]) => {
     const id = editors.activeEditorId(ws);
@@ -188,7 +196,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   const renderPanel = (id: PanelId) => {
     if (!ws.available) return <div className="tree-loading">The directory {ws.path} is missing.</div>;
     switch (id) {
-      case "files": return <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={(p, preview) => void api.openFile(ws.id, p, preview).catch(report)} onQuote={quote} gitStatus={gitStatus} />;
+      case "files": return <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={openFromTree} onQuote={quote} gitStatus={gitStatus} />;
       case "search": return <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />;
       case "outline": return <Outline ws={ws} />;
       case "git": return <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={(p, d) => void api.openDiff(ws.id, p, d).catch(report)} onOpenFile={(p) => void api.openFile(ws.id, p, true).catch(report)} />;

@@ -5,8 +5,10 @@ import { App } from "./App";
 import type { WindowRole } from "./types";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
+import { installScrollbars } from "./scrollbars";
 import { installTooltips } from "./tooltip";
 
+installScrollbars();
 installTooltips();
 
 const role: WindowRole = getCurrentWindow().label === "terminal" ? "terminal" : "workspace";

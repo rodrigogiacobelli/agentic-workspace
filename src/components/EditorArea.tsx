@@ -11,7 +11,7 @@ import { DiffView } from "./DiffView";
 import { Dropdown } from "./Menu";
 import { FILE_MIME, SplitTree, TAB_MIME, useDropZone } from "./SplitTree";
 import { report } from "./Switcher";
-import { useTabStrip } from "./tabs";
+import { TabOverflow, useTabStrip } from "./tabs";
 
 export async function closeTab(ws: Workspace, id: string): Promise<void> {
   if (editors.isDirty(id)) {
@@ -71,7 +71,7 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
   const [, bump] = useState(0);
   const activeId = group.activeEditor;
   const tab = group.editors.find((t) => t.id === activeId);
-  const strip = useTabStrip(activeId);
+  const strip = useTabStrip(activeId, group.editors.length);
 
   // A tab or a file dropped on the group: the centre joins it, an edge
   // splits it (ED-36, ED-37, ED-41). The tab strip handles its own drops.
@@ -83,7 +83,7 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
       if (z === "center" && editor && group.editors.some((t) => t.id === editor)) return;
       void api.dropEditor(ws.id, editor ? { editor } : { path }, group.id, z, null).catch(report);
     },
-    { ignore: (target) => !!target.closest(".tabs") },
+    { ignore: (target) => !!target.closest(".tab-bar") },
   );
 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
@@ -133,25 +133,32 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
       className={`editor-group${active ? " active" : ""}`}
       onMouseDownCapture={() => { if (ws.activeGroup !== group.id) void api.setActiveGroup(ws.id, group.id); }}
     >
-      <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={acceptsTab} onDrop={(e) => dropOnTab(e, null)}>
-        {group.editors.map((t, i) => (
-          <div
-            key={t.id}
-            data-tab={t.id}
-            className={`tab${t.id === activeId ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
-            draggable
-            onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
-            onDragOver={acceptsTab}
-            onDrop={(e) => dropOnTab(e, i)}
-            onClick={() => void api.setActiveEditor(ws.id, t.id)}
-            onDoubleClick={() => { if (t.preview) void api.pinEditor(ws.id, t.id); }}
-            title={t.preview ? `${t.path} (preview — double-click to keep)` : t.path}
-          >
-            <span className="tab-label">{editors.isDirty(t.id) ? "● " : ""}{tabLabel(t)}</span>
-            <button className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(ws, t.id); }} title="Close (Ctrl+W)">×</button>
-          </div>
-        ))}
-        <span className="tabs-spacer" />
+      <div className="tab-bar">
+        <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={acceptsTab} onDrop={(e) => dropOnTab(e, null)}>
+          {group.editors.map((t, i) => (
+            <div
+              key={t.id}
+              data-tab={t.id}
+              className={`tab${t.id === activeId ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
+              draggable
+              onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
+              onDragOver={acceptsTab}
+              onDrop={(e) => dropOnTab(e, i)}
+              onClick={() => void api.setActiveEditor(ws.id, t.id)}
+              onDoubleClick={() => { if (t.preview) void api.pinEditor(ws.id, t.id); }}
+              title={t.preview ? `${t.path} (preview — double-click to keep)` : t.path}
+            >
+              <span className="tab-label">{editors.isDirty(t.id) ? "● " : ""}{tabLabel(t)}</span>
+              <button className="tab-close" onClick={(e) => { e.stopPropagation(); void closeTab(ws, t.id); }} title="Close (Ctrl+W)">×</button>
+            </div>
+          ))}
+          <span className="tabs-spacer" />
+        </div>
+        <TabOverflow
+          strip={strip}
+          entries={group.editors.map((t) => ({ id: t.id, label: tabLabel(t), active: t.id === activeId }))}
+          onPick={(id) => void api.setActiveEditor(ws.id, id)}
+        />
         <button className="tab-add" onClick={() => void api.splitEditor(ws.id).catch(report)} title="Split the editor (Ctrl+\)">⫿</button>
       </div>
       {tab?.diff ? (

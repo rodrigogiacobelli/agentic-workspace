@@ -22,6 +22,8 @@ const PATHS = {
   workspace: "M2 3h12v10h-12z M2 6h12 M6 6v7",
   newFile: "M4 1.5h5l3 3v5 M9 1.5v3h3 M4 1.5v13h4 M11.5 11v4 M9.5 13h4",
   newFolder: "M1.5 3.5h4.5l1.5 1.5h7v4 M1.5 3.5v10h6 M12.5 11v4 M10.5 13h4",
+  copy: "M6 6h8v8.5h-8z M10.5 6v-4.5h-8v8.5h3",
+  chevronDown: "M4 6.5l4 4 4-4",
 } as const;
 
 export type IconName = keyof typeof PATHS;

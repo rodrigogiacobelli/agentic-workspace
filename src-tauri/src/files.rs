@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<String, String> {
     let (_, abs) = tree::resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
     let bytes = std::fs::read(&abs)
@@ -80,7 +80,7 @@ pub fn save_draft(state: tauri::State<AppState>, workspace_id: String, path: Str
     write_atomic(&target, content.as_bytes()).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_draft(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<Option<String>, String> {
     let target = draft_path(&state, &workspace_id, &path)?;
     match std::fs::read_to_string(&target) {

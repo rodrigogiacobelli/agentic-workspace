@@ -3,6 +3,8 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
 import type { CommitDetail, DiffSpec, LogEntry, RepoInfo, Session, StatusEntry, Workspace } from "../types";
 import { BranchList } from "./BranchList";
+import { Icon } from "./icons";
+import { MenuButton } from "./Menu";
 import { report } from "./Switcher";
 import { WorktreeList } from "./WorktreeList";
 
@@ -18,12 +20,17 @@ interface Props {
 
 const PAGE = 50;
 
+/** The height of the list of changes, kept while the panel is remounted. */
+let changesHeight = 240;
+
 export function GitPanel({ ws, session, status, info, refresh, onDiff, onOpenFile }: Props) {
   const [message, setMessage] = useState("");
   const [amend, setAmend] = useState(false);
   const [branches, setBranches] = useState(false);
   const [worktrees, setWorktrees] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [height, setHeight] = useState(changesHeight);
+  const panel = useRef<HTMLDivElement>(null);
 
   if (!info) return <div className="tree-loading">Loading…</div>;
   if (!info.isRepo) {
@@ -64,6 +71,23 @@ export function GitPanel({ ws, session, status, info, refresh, onDiff, onOpenFil
       { title: "Discard changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep" },
     );
     if (yes) await run("discard", () => api.gitDiscard(ws.id, entry.path, entry.untracked));
+  };
+
+  // The edge between the changes and the commit box: dragging it gives the
+  // list more room and the history less, and nothing else moves.
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const origin = e.clientY;
+    const start = height;
+    const room = panel.current?.getBoundingClientRect().height ?? 600;
+    const move = (ev: MouseEvent) => {
+      const next = Math.max(64, Math.min(room - 220, start + ev.clientY - origin));
+      changesHeight = next;
+      setHeight(next);
+    };
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
   };
 
   const remote = (action: "fetch" | "pull" | "push") => run(action, async () => {
@@ -108,7 +132,7 @@ export function GitPanel({ ws, session, status, info, refresh, onDiff, onOpenFil
     );
 
   return (
-    <div className="git-panel">
+    <div className="git-panel" ref={panel}>
       <div className="git-header">
         <button className="git-branch" onClick={() => setBranches(true)} title="Branches">
           {info.detached ? `detached @ ${info.branch ?? "?"}` : info.branch ?? "no branch"}
@@ -123,27 +147,35 @@ export function GitPanel({ ws, session, status, info, refresh, onDiff, onOpenFil
       {info.isWorktree && (
         <div className="git-note">Worktree of {info.mainWorktree}</div>
       )}
-      <div className="git-body">
+      <div className="git-changes" style={{ height }}>
         {section("Conflicts", conflicted, "conflicted")}
         {section("Staged", staged, "staged", { label: "Unstage all", run: () => void run("unstage", () => api.gitUnstageAll(ws.id)) })}
         {section("Changes", changed, "changed", { label: "Stage all", run: () => void run("stage", () => api.gitStageAll(ws.id)) })}
         {section("Untracked", untracked, "untracked", { label: "Stage all", run: () => void run("stage", () => api.gitStageAll(ws.id)) })}
         {status.length === 0 && <div className="tree-loading">Working tree clean.</div>}
-        <div className="git-commit">
-          <textarea
-            placeholder={amend ? "Amended commit message" : "Commit message"}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && e.ctrlKey) commit(); }}
-            rows={3}
-          />
-          <div className="git-commit-actions">
-            <label><input type="checkbox" checked={amend} onChange={(e) => void toggleAmend(e.target.checked)} /> Amend last commit</label>
-            <button onClick={commit} disabled={!!busy || (!amend && staged.length === 0)}>{busy === "commit" ? "Committing…" : "Commit"}</button>
-          </div>
-        </div>
-        <History ws={ws} onDiff={onDiff} />
       </div>
+      <div className="git-resize" onMouseDown={startResize} title="Drag to give the changes more or less room" />
+      <div className="git-commit">
+        <textarea
+          placeholder={amend ? "Amended commit message" : "Commit message"}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && e.ctrlKey) commit(); }}
+          rows={3}
+        />
+        <div className="git-commit-actions">
+          <button onClick={commit} disabled={!!busy || (!amend && staged.length === 0)}>
+            {busy === "commit" ? "Committing…" : amend ? "Amend commit" : "Commit"}
+          </button>
+          <MenuButton label="⋯" title="Other ways to commit">
+            <button onClick={() => void toggleAmend(!amend)}>
+              <span className="menu-check">{amend ? "✓" : ""}</span>
+              <span className="menu-label">Amend last commit</span>
+            </button>
+          </MenuButton>
+        </div>
+      </div>
+      <History ws={ws} onDiff={onDiff} />
       {branches && <BranchList ws={ws} session={session} info={info} onClose={() => { setBranches(false); refresh(); }} />}
       {worktrees && <WorktreeList ws={ws} session={session} onClose={() => { setWorktrees(false); refresh(); }} />}
     </div>
@@ -175,7 +207,7 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: D
 
   useEffect(() => { void load(true); }, [ws.id, filter]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    const unlisten = events.onGitChanged((id) => { if (id === ws.id) { setDetails(new Map()); void load(true); } });
+    const unlisten = events.onGitChanged((id) => { if (id === ws.id) void load(true); });
     return () => { void unlisten.then((u) => u()); };
   }, [ws.id, load]);
 
@@ -183,7 +215,9 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: D
   const open = useCallback((hash: string) => {
     setExpanded(hash);
     if (!details.has(hash)) {
-      api.gitShow(ws.id, hash).then((d) => setDetails((m) => new Map(m).set(hash, d))).catch(report);
+      api.gitShow(ws.id, hash)
+        .then((d) => setDetails((m) => new Map(m).set(hash, d)))
+        .catch((e) => { report(e); setExpanded((h) => (h === hash ? null : h)); });
     }
   }, [ws.id, details]);
   const toggle = (hash: string) => { if (expanded === hash) setExpanded(null); else open(hash); };
@@ -219,16 +253,15 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: D
           const detail = details.get(c.hash);
           return (
             <div key={c.hash} data-commit={c.hash}>
-              <div className={`git-commit-row${isOpen ? " selected" : ""}`} onClick={() => toggle(c.hash)} title={`${c.hash}\n${c.author} · ${c.date}`}>
+              <div className={`git-commit-row${isOpen ? " selected" : ""}`} onClick={() => toggle(c.hash)} title={`${c.author} · ${c.date}\n\n${c.message}`}>
                 <span className="git-chevron">{isOpen ? "▾" : "▸"}</span>
-                <span className="git-hash">{c.short}</span>
                 <span className="git-subject">{c.subject}</span>
                 <span className="git-meta">{c.author} · {c.date}</span>
+                <button className="git-copy" title="Copy the commit hash" onClick={(e) => { e.stopPropagation(); void api.copyText(c.hash); }}><Icon name="copy" size={13} /></button>
               </div>
               {isOpen && (
                 <div className="git-commit-files">
                   {!detail && <div className="tree-loading">Loading…</div>}
-                  {detail && detail.message.includes("\n") && <pre className="git-message">{detail.message}</pre>}
                   {detail?.files.map((f) => {
                     const { name, dir } = split(f.path);
                     return (

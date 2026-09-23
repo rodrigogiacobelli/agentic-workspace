@@ -114,8 +114,10 @@ export function RowMenu({ label, title, className, rows, footer, empty, minWidth
           <div className="row-menu" style={{ minWidth: open.width }}>
             {rows.map((r) => (
               <div key={r.id} className={`row${r.selected ? " selected" : ""}`} onClick={() => { setOpen(null); r.onPick(); }} title={r.detail}>
-                <span className="row-name">{r.name}</span>
-                {r.detail && <span className="row-detail">{r.detail}</span>}
+                <span className="row-text">
+                  <span className="row-name">{r.name}</span>
+                  {r.detail && <span className="row-detail">{r.detail}</span>}
+                </span>
                 {(r.onRename || r.onRemove) && (
                   <span className="row-actions" onClick={(e) => e.stopPropagation()}>
                     {r.onRename && <button title="Rename" onClick={() => { setOpen(null); r.onRename!(); }}>✎</button>}
