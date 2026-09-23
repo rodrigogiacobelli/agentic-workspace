@@ -1,0 +1,105 @@
+id: diagnose-terminal-input-latency
+title: Diagnose a terminal that feels slow to type in
+summary: Find why a keystroke takes noticeable time to appear in a terminal tab, separating the renderer, the output path and the machine from the shell.
+trigger: >-
+  Typing in a terminal tab lags, stalls, or appears in bursts — a character
+  arriving late, a pause at the end of a word, a completion that hangs. Also
+  reach for this when output is smooth but input is not, or when the delay is
+  blamed on the shell.
+
+nodes:
+  - id: compare-against-a-native-terminal
+    do: >-
+      Ask the owner to run the same keystrokes in a terminal that is not this
+      application — Konsole, or the terminal inside another editor — in the same
+      directory with the same shell. This costs a minute and is the only
+      measurement that separates the application from the machine. Record
+      whether the delay reproduces there.
+    then:
+      - if: the delay reproduces outside the application
+        goto: outside-the-application
+      - if: the delay appears only in this application
+        goto: check-the-renderer
+
+  - id: check-the-renderer
+    do: >-
+      Establish which renderer the terminal is drawing with, and whether the
+      webview reaches the GPU. Count the canvases inside `.xterm-screen`: a
+      WebGL terminal has them, a DOM terminal has `.xterm-rows` instead. Read
+      `WEBKIT_DISABLE_DMABUF_RENDERER` — the application sets it on every
+      Wayland session, and with it set there is no GPU path.
+    then:
+      - if: the terminal draws on a canvas while that variable is set
+        goto: renderer-mismatch
+      - if: the renderer already matches what the webview can present
+        goto: measure-keystroke-to-pixel
+
+  - id: measure-keystroke-to-pixel
+    do: >-
+      Measure the only span that contains the whole fault: a physical key press
+      to the character appearing on screen. Nothing else settles it. A probe
+      that injects bytes with `terminal_write` skips the input path and the
+      renderer, and a timer that stops at `requestAnimationFrame` stops before
+      the frame is presented — both report a fast application while the owner
+      watches a slow one. The owner pressing a key is the instrument, so ask
+      them to reproduce while a trace records, and do not edit the trace while
+      they type.
+    then:
+      - if: the key reaches the page late, with little time between arrival and the frame
+        goto: input-delivery
+      - if: the key is handled quickly and the character still appears late
+        goto: renderer-mismatch
+      - if: the character appears quickly and only bursts of output are slow
+        goto: measure-the-message-rate
+
+  - id: measure-the-message-rate
+    do: >-
+      Count messages, not bytes. Wrap the terminal's `write` and record calls
+      per second and mean payload while a program produces output. A read of a
+      pseudoterminal returns on the first byte available, so a redrawing
+      program can produce hundreds of small messages a second, and the cost
+      falls on the thread that also delivers key presses. Compare against
+      `016-terminal-output-and-renderer`, which fixes the window, the size cap
+      and the watermarks.
+    then:
+      - if: the message rate is far above one per flush window
+        goto: output-path-regressed
+      - if: the message rate matches the window
+        goto: not-the-application
+
+conclusions:
+  renderer-mismatch:
+    audience: whoever is fixing the terminal
+    response: >-
+      The terminal is drawing on a WebGL canvas that the webview cannot present
+      on the GPU, so the canvas is repainted for every character through
+      software. Nothing reports this: the addon loads and says it succeeded.
+      Make the terminal take the DOM renderer, as
+      `016-terminal-output-and-renderer` and `standards-linux-desktop` require,
+      and confirm with the owner that typing is smooth before closing it.
+  output-path-regressed:
+    audience: whoever is fixing the terminal
+    response: >-
+      Output is reaching the view as too many small messages. Restore the
+      batching and flow control in `016-terminal-output-and-renderer` — one
+      message per window, base64 under the direct-delivery threshold, and the
+      reader parked past the high-water mark — and re-measure the message rate.
+  input-delivery:
+    audience: whoever is fixing the terminal
+    response: >-
+      The key press is slow to reach the page, which puts the fault before any
+      application code runs: the compositor, GTK, an input method, or WebKit's
+      hop into the web process. Check whether an input method is configured and
+      running, and compare against a plain webview on the same machine.
+  outside-the-application:
+    audience: the owner
+    response: >-
+      The delay is not this application's. It reproduces in a terminal that
+      shares none of its code, so the shell, the machine or the desktop carries
+      it, and changing this application will not move it.
+  not-the-application:
+    audience: whoever is fixing the terminal
+    response: >-
+      The input path, the renderer and the message rate are all within budget.
+      Measure the shell itself — the same keystrokes under a different shell in
+      the same tab — before changing anything in the application.

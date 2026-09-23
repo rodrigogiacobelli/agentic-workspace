@@ -7,6 +7,7 @@ summary: Why the terminal is xterm.js in the webview over a portable-pty
   bounded output buffer is for.
 related:
   - 002-backend-owned-terminal-sessions
+  - 016-terminal-output-and-renderer
   - 008-tauri-v2-on-arch-kde
   - 010-react-frontend
   - standards-code
@@ -38,7 +39,8 @@ Key forces:
 ## Decision
 
 The frontend draws terminals with **xterm.js** (`@xterm/xterm`), one instance
-per terminal tab, with the fit, search and WebGL addons. The backend allocates
+per terminal tab, with the fit and search addons; which renderer draws the
+cells is `016-terminal-output-and-renderer`. The backend allocates
 and supervises pseudoterminals with **portable-pty**, spawning the user's login
 shell with a controlling terminal, and streams raw output bytes to the view
 over a Tauri channel.
@@ -97,8 +99,10 @@ re-attach. It is not the mechanism a workspace switch relies on.
 
 ## Constraints imposed
 
-- **Output crosses the boundary as bytes.** The channel carries raw output; the
-  view decodes it. No layer re-encodes terminal output as text.
+- **Output crosses the boundary as opaque bytes.** No layer interprets terminal
+  output on the way past, and the view decodes what the channel carries;
+  `016-terminal-output-and-renderer` settles how a message is framed and
+  encoded for that crossing.
 - **Attaching is atomic.** The backend hands over the buffered tail and
   installs the live channel under one lock, so no byte is delivered twice or
   dropped between the two.
