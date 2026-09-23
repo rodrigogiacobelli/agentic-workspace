@@ -22,6 +22,7 @@ Docs live under subdirectories that scope intent. The set below is what `lore in
 |-----------------|-------------------------------------------------------------------------------|
 | `decisions/`    | ADRs — why a choice was made and what alternatives were rejected              |
 | `standards/`    | how-to-comply rules for code, design, conventions                             |
+| `design/`       | the design law a surface obeys — what it may look like and how it may move    |
 | `technical/`    | how the system is built, stored, served (incl. `technical/<domain>/ref/`)     |
 | `conceptual/`   | what the system looks like from the outside — entities, relationships, flows  |
 | `vision/`       | product direction, long-arc goals                                             |
