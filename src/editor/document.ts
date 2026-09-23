@@ -121,6 +121,9 @@ export class Doc {
   private root: HTMLDivElement | null = null;
   private listeners = new Set<() => void>();
   private mergeComp = new Compartment();
+  /** The typing helpers read the file's name for its comment token, so they
+   *  are reconfigured rather than fixed when the file moves. */
+  private typingComp = new Compartment();
   private blameComp = new Compartment();
   blameOn = false;
   private autosaveTimer: number | null = null;
@@ -128,14 +131,18 @@ export class Doc {
   private existence = new Map<string, boolean>();
   private pendingExists = new Set<string>();
   private existsTimer: number | null = null;
-  private syncingScroll = false;
+  /** Where a split's last sync left the other pane, so its echo is known. */
+  private echoScroll: { view: EditorView; top: number } | null = null;
+  /** Views whose scroll already feeds `scheduleViewState`. */
+  private viewStateBound = new Set<EditorView>();
   private disposed = false;
 
   constructor(
     readonly id: string,
     readonly workspaceId: string,
     readonly workspacePath: string,
-    readonly path: string,
+    /** Relative to the workspace, and not fixed: a rename moves the open tab. */
+    public path: string,
     text: string,
     readonly language: LanguageId,
     mode: Mode,
@@ -169,7 +176,7 @@ export class Doc {
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
       bracketMatching(),
-      ...typingHelpers(this.language, this.path),
+      this.typingComp.of(typingHelpers(this.language, this.path)),
       highlightSelectionMatches(),
       EditorView.lineWrapping,
       languageExtension(this.language),
@@ -314,29 +321,89 @@ export class Doc {
       root.append(left, right);
       this.source.scrollDOM.onscroll = () => this.syncScroll(this.source, this.rich!);
       this.rich!.scrollDOM.onscroll = () => this.syncScroll(this.rich!, this.source);
+      // An image settles its height after the rest of the pane is laid out,
+      // which moves every line below it. `load` does not bubble, so the
+      // capture phase is what hears it (ED-06).
+      this.rich!.dom.addEventListener("load", this.onMediaLoad, true);
+      // Both panes have just been rebuilt; nothing has aligned them yet, and
+      // a split that opens on two different parts of the document reads as
+      // the sync being broken before a wheel is touched.
+      requestAnimationFrame(() => {
+        if (this.mode === "split" && this.rich) this.syncScroll(this.source, this.rich);
+      });
     }
     if (this.mode !== "split") {
       this.source.scrollDOM.onscroll = null;
-      if (this.rich) this.rich.scrollDOM.onscroll = null;
+      if (this.rich) {
+        this.rich.scrollDOM.onscroll = null;
+        this.rich.dom.removeEventListener("load", this.onMediaLoad, true);
+      }
     }
+    // The last layout's pane may be gone, and its landing position with it.
+    this.echoScroll = null;
+    // One listener for the life of each view: `layout` runs again on every
+    // mode change, and a fresh listener each time would pile up.
     const view = this.active();
-    view.scrollDOM.addEventListener("scroll", () => this.scheduleViewState());
+    if (!this.viewStateBound.has(view)) {
+      this.viewStateBound.add(view);
+      view.scrollDOM.addEventListener("scroll", () => this.scheduleViewState());
+    }
   }
 
+  private readonly onMediaLoad = (): void => {
+    if (this.mode === "split" && this.rich) this.syncScroll(this.source, this.rich);
+  };
+
+  /**
+   * Holds the two panes of a split on the same line. Both views show the same
+   * document, so a line is the anchor; what differs is how tall that line is
+   * on each side, and a rendered image makes the difference enormous.
+   *
+   * The pane being scrolled names the line at its top edge and how far through
+   * that line's block it has travelled, **as a fraction of the block**. The
+   * other pane puts the same fraction of the same line under its own top edge.
+   * Carrying the offset in pixels instead is what made a split with an image
+   * in it feel stuck: twenty pixels into a source line is the whole line, and
+   * the six hundred pixel image opposite it moved twenty pixels before jumping
+   * the rest.
+   */
   private syncScroll(from: EditorView, to: EditorView): void {
-    if (this.syncingScroll) return;
-    this.syncingScroll = true;
-    try {
-      const rect = from.scrollDOM.getBoundingClientRect();
-      const pos = from.posAtCoords({ x: rect.left + 4, y: rect.top + 2 }, false);
-      const block = to.lineBlockAt(to.state.doc.lineAt(pos).from);
-      const fromBlock = from.lineBlockAt(from.state.doc.lineAt(pos).from);
-      const offset = from.scrollDOM.scrollTop - fromBlock.top;
-      to.scrollDOM.scrollTop = block.top + Math.min(offset, block.height);
-    } catch {
-      // A view mid-layout can refuse coordinate queries; the next scroll retries.
+    // Writing `scrollTop` below fires the other pane's own scroll handler a
+    // frame later. Clearing a flag in requestAnimationFrame clears it before
+    // that event arrives — the echo then scrolls this pane back to where it
+    // was a frame ago, and the pane fights the pointer. The write's landing
+    // position is the reliable mark of its echo.
+    if (this.echoScroll?.view === from && Math.abs(from.scrollDOM.scrollTop - this.echoScroll.top) <= 1) {
+      this.echoScroll = null;
+      return;
     }
-    requestAnimationFrame(() => { this.syncingScroll = false; });
+    this.echoScroll = null;
+    try {
+      // A block's `top` is measured from the first line; `scrollTop` from the
+      // top of the padding above it, and the two panes pad differently —
+      // CodeMirror's own 4 px against the rendered pane's 16 px. The
+      // conversion is made on each side, or every sync lands 12 px out.
+      const height = Math.max(0, from.scrollDOM.scrollTop - from.documentPadding.top);
+      const fromBlock = from.lineBlockAtHeight(height);
+      const toBlock = to.lineBlockAt(fromBlock.from);
+      const through = fromBlock.height > 0
+        ? Math.min(1, Math.max(0, (height - fromBlock.top) / fromBlock.height))
+        : 0;
+      // `scrollPastEnd` gives each pane a screen of empty space after the last
+      // line. Mapping the fraction through the last block would put that
+      // empty space under the follower's top edge and show the reader
+      // nothing; the end of one pane is the end of the other.
+      const room = from.scrollDOM.scrollHeight - from.scrollDOM.clientHeight;
+      const before = to.scrollDOM.scrollTop;
+      to.scrollDOM.scrollTop = from.scrollDOM.scrollTop >= room - 1
+        ? to.scrollDOM.scrollHeight - to.scrollDOM.clientHeight
+        : to.documentPadding.top + toBlock.top + through * toBlock.height;
+      const after = to.scrollDOM.scrollTop;
+      // A write that changed nothing produces no echo to wait for.
+      if (after !== before) this.echoScroll = { view: to, top: after };
+    } catch {
+      // A view mid-layout can refuse height queries; the next scroll retries.
+    }
   }
 
   setMode(mode: Mode): void {
@@ -421,6 +488,24 @@ export class Doc {
     const changes = diff(current, text).map((c) => ({ from: c.fromA, to: c.toA, insert: text.slice(c.fromB, c.toB) }));
     this.saved = Text.of(text.split("\n"));
     this.source.dispatch({ changes, annotations: external.of(true) });
+  }
+
+  /**
+   * The file moved. The buffer, its unsaved changes and the cursor stay; what
+   * was keyed by the old path — the file it saves to, its assets, the links
+   * and citations resolved against its directory — follows it there.
+   */
+  relocate(path: string): void {
+    if (path === this.path) return;
+    this.path = path;
+    const helpers = this.typingComp.reconfigure(typingHelpers(this.language, path));
+    this.source.dispatch({ effects: helpers });
+    this.rich?.dispatch({ effects: helpers });
+    this.invalidateExistence();
+    this.rich?.dispatch({ effects: refreshPreview.of(null) });
+    // The watcher may have reported the old name's removal first.
+    void this.checkDisk();
+    this.emit();
   }
 
   /** The directory changed: compare the file on disk with what was last saved. */

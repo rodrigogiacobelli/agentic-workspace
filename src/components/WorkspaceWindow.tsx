@@ -77,6 +77,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
   useEffect(() => {
     editors.retain(editors.allTabIds(session.workspaces));
+    editors.follow(session.workspaces);
   }, [session]);
 
   // Links inside documents open files here; notices surface here.
@@ -303,7 +304,7 @@ function RegionView({ region, layout, update, unstaged, icons, render }: {
         })}
       </div>
       {tabMenu && (
-        <ContextMenu x={tabMenu.x} y={tabMenu.y} onClose={() => setTabMenu(null)}>
+        <ContextMenu x={tabMenu.x} y={tabMenu.y} anchor={tabMenu} onClose={() => setTabMenu(null)}>
           <button onClick={() => { update(hidePanel(layout, tabMenu.id)); setTabMenu(null); }}>Hide {PANELS.find((p) => p.id === tabMenu.id)?.label ?? tabMenu.id}</button>
         </ContextMenu>
       )}

@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use tauri::AppHandle;
 
 /// Files an unindexed walk stops at, so a huge tree cannot stall quick open.
 const WALK_MAX: usize = 50_000;
@@ -195,7 +196,7 @@ pub fn create_entry(state: tauri::State<AppState>, workspace_id: String, path: S
 }
 
 #[tauri::command]
-pub fn rename_entry(state: tauri::State<AppState>, workspace_id: String, from: String, to: String) -> Result<(), String> {
+pub fn rename_entry(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, from: String, to: String) -> Result<(), String> {
     let (_, src) = resolve(&state, &workspace_id, &from).map_err(|e| format!("{e:#}"))?;
     let (_, dst) = resolve(&state, &workspace_id, &to).map_err(|e| format!("{e:#}"))?;
     if dst.exists() {
@@ -203,7 +204,9 @@ pub fn rename_entry(state: tauri::State<AppState>, workspace_id: String, from: S
     }
     std::fs::rename(&src, &dst)
         .with_context(|| format!("renaming {} to {}", src.display(), dst.display()))
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("{e:#}"))?;
+    crate::session::relocate(&app, &workspace_id, &from, &to);
+    Ok(())
 }
 
 /// Copies `path` beside itself as `<stem> copy<ext>`, numbering collisions.
@@ -233,7 +236,12 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            // A copy that followed the link would duplicate what it points at,
+            // and a cross-filesystem move would then delete the original link.
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, target)?;
+        } else if kind.is_dir() {
             copy_dir(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), target)?;
@@ -259,27 +267,70 @@ fn free_copy_name(root: &Path, dir: &str, name: &str) -> Result<String> {
         .context("no free name for the copy")
 }
 
+/// Moves `src` to `dst` across filesystems, which `rename` cannot do: a
+/// clipboard cut may name a file on another mount.
+fn move_across(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match std::fs::rename(src, dst) {
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            let copied = if src.is_dir() { copy_dir(src, dst) } else { std::fs::copy(src, dst).map(|_| ()) };
+            if let Err(e) = copied {
+                // Half a directory under a name the user did not ask for is
+                // worse than the failure itself.
+                let _ = if dst.is_dir() { std::fs::remove_dir_all(dst) } else { std::fs::remove_file(dst) };
+                return Err(e);
+            }
+            if src.is_dir() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) }
+        }
+        other => other,
+    }
+}
+
 /// Pastes a copied or cut entry into a directory. A copy takes a free name;
 /// a cut is a move that refuses to overwrite.
+///
+/// `from` is absolute, because the clipboard it comes from is the desktop's:
+/// the source may be anywhere the user can read, and only the destination is
+/// confined to the workspace.
 #[tauri::command]
-pub fn paste_entry(state: tauri::State<AppState>, workspace_id: String, from: String, to_dir: String, cut: bool) -> Result<String, String> {
-    let (root, src) = resolve(&state, &workspace_id, &from).map_err(|e| format!("{e:#}"))?;
-    resolve(&state, &workspace_id, &to_dir).map_err(|e| format!("{e:#}"))?;
-    let (_, name) = parent_and_name(&from);
-    let to_dir = to_dir.trim_matches('/').to_string();
-    if src.is_dir() && (to_dir == from || to_dir.starts_with(&format!("{from}/"))) {
-        return Err(format!("{from} cannot be pasted into itself"));
+pub fn paste_entry(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, from: String, to_dir: String, cut: bool) -> Result<String, String> {
+    let (root, dst_dir) = resolve(&state, &workspace_id, &to_dir).map_err(|e| format!("{e:#}"))?;
+    if !Path::new(&from).is_absolute() {
+        return Err(format!("{from} is not an absolute path"));
     }
+    // Resolved, not taken as given: the clipboard's path may be a symlink or
+    // carry `..`, and both the containment check below and the
+    // is-it-in-this-workspace question have to be asked of the real location.
+    let src = std::fs::canonicalize(&from).map_err(|e| format!("{from} is no longer there: {e}"))?;
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| format!("{from} has no name"))?;
+    let to_dir = to_dir.trim_matches('/').to_string();
+    // Copying a directory into itself, or into anything under it, walks into
+    // what it is writing and does not stop. The destination may be under an
+    // external source just as easily as under one in the workspace, so this is
+    // asked of the absolute paths.
+    if src.is_dir() && dst_dir.starts_with(&src) {
+        return Err(format!("{} cannot be pasted into itself", src.display()));
+    }
+    // What the source is called inside this workspace, when it is inside it:
+    // the form the tree, the tabs and the views speak.
+    let inside = src.strip_prefix(&root).ok().map(|rel| rel.to_string_lossy().into_owned());
     if cut {
         let dest = join_rel(&to_dir, &name);
-        if dest == from {
+        if inside.as_deref() == Some(dest.as_str()) {
             return Ok(dest);
         }
         let dst = root.join(&dest);
         if dst.exists() {
             return Err(format!("{dest} already exists"));
         }
-        std::fs::rename(&src, &dst).with_context(|| format!("moving {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
+        move_across(&src, &dst).with_context(|| format!("moving {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
+        // A cut inside the workspace is a move: what was open under the old
+        // path follows it.
+        if let Some(rel) = inside {
+            crate::session::relocate(&app, &workspace_id, &rel, &dest);
+        }
         return Ok(dest);
     }
     let dest = free_copy_name(&root, &to_dir, &name).map_err(|e| format!("{e:#}"))?;

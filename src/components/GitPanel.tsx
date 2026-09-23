@@ -32,7 +32,7 @@ export function GitPanel({ ws, session, status, info, refresh, onDiff, onOpenFil
   const [height, setHeight] = useState(changesHeight);
   const panel = useRef<HTMLDivElement>(null);
 
-  if (!info) return <div className="tree-loading">Loading…</div>;
+  if (!info) return <div className="tree-loading loading">Loading…</div>;
   if (!info.isRepo) {
     return (
       <div className="git-empty">
@@ -254,14 +254,14 @@ function History({ ws, onDiff }: { ws: Workspace; onDiff: (path: string, diff: D
           return (
             <div key={c.hash} data-commit={c.hash}>
               <div className={`git-commit-row${isOpen ? " selected" : ""}`} onClick={() => toggle(c.hash)} title={`${c.author} · ${c.date}\n\n${c.message}`}>
-                <span className="git-chevron">{isOpen ? "▾" : "▸"}</span>
+                <span className={`git-chevron${isOpen ? " open" : ""}`}>▸</span>
                 <span className="git-subject">{c.subject}</span>
                 <span className="git-meta">{c.author} · {c.date}</span>
                 <button className="git-copy" title="Copy the commit hash" onClick={(e) => { e.stopPropagation(); void api.copyText(c.hash); }}><Icon name="copy" size={13} /></button>
               </div>
               {isOpen && (
                 <div className="git-commit-files">
-                  {!detail && <div className="tree-loading">Loading…</div>}
+                  {!detail && <div className="tree-loading loading">Loading…</div>}
                   {detail?.files.map((f) => {
                     const { name, dir } = split(f.path);
                     return (

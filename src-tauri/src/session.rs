@@ -80,6 +80,131 @@ pub fn notice(app: &AppHandle, message: String) {
     }
 }
 
+/// The new name of `path` after `from` became `to`, or `None` when the move
+/// did not touch it. A directory carries everything under it.
+fn moved(path: &str, from: &str, to: &str) -> Option<String> {
+    if path == from {
+        return Some(to.to_string());
+    }
+    path.strip_prefix(from)
+        .filter(|rest| rest.starts_with('/'))
+        .map(|rest| format!("{to}{rest}"))
+}
+
+/// A file or directory moved inside the workspace: every open tab, recent file
+/// and view entry naming it names where it went instead, and the unsaved draft
+/// of each moved tab goes with it.
+///
+/// The session is the only record of what is open, so doing this here reaches
+/// tabs in every group of every window, whether or not one is on screen. A tab
+/// left on the old path would show the file as deleted the moment the watcher
+/// reported the directory.
+pub fn relocate(app: &AppHandle, workspace_id: &str, from: &str, to: &str) {
+    if from == to {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let mut session = state.session.lock();
+    let Some(ws) = session.workspace_mut(workspace_id) else { return };
+    let root = ws.path.clone();
+    let mut changed = false;
+    for group in ws.groups.iter_mut() {
+        for tab in group.editors.iter_mut() {
+            let Some(next) = moved(&tab.path, from, to) else { continue };
+            crate::files::move_draft(&state, &root.join(&tab.path), &root.join(&next));
+            tab.path = next;
+            changed = true;
+        }
+    }
+    for path in ws.recent_files.iter_mut() {
+        if let Some(next) = moved(path, from, to) {
+            *path = next;
+            changed = true;
+        }
+    }
+    for view in ws.views.iter_mut() {
+        for entry in view.entries.iter_mut() {
+            if let Some(next) = moved(entry, from, to) {
+                *entry = next;
+                changed = true;
+            }
+        }
+    }
+    // A renamed directory keeps whatever the tree had open under it; left
+    // alone, the old name stays expanded forever and the new one arrives shut.
+    for dir in ws.expanded.iter_mut() {
+        if let Some(next) = moved(dir, from, to) {
+            *dir = next;
+            changed = true;
+        }
+    }
+    drop(session);
+    if changed {
+        // The moved tabs are in new directories, and those are what the
+        // watcher has to be looking at now.
+        watch::sync(app);
+        publish(app);
+    }
+}
+
+/// Drops workspaces the selector opened from a worktree whose directory has
+/// since gone. Nothing the user named by hand is touched, and the one on
+/// screen is never pulled out from under them: a worktree removed while its
+/// workspace is active keeps the "unavailable" mark instead.
+///
+/// This is the other half of detection. A worktree that appears is offered
+/// without being added; one that disappears takes its workspace with it.
+pub fn prune_worktrees(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let gone: Vec<(String, String)> = {
+        let session = state.session.lock();
+        session
+            .workspaces
+            .iter()
+            .filter(|w| w.from_worktree && !w.path.is_dir() && session.active.as_deref() != Some(&w.id))
+            .map(|w| (w.id.clone(), w.name.clone()))
+            .collect()
+    };
+    for (id, name) in gone {
+        notice(app, format!("Closed workspace \"{name}\": its worktree is gone."));
+        drop_workspace(app, &state, &id);
+    }
+}
+
+/// Takes a workspace out of the session and hangs up its shells, putting the
+/// most recent one in its place if it was the one on screen.
+fn drop_workspace(app: &AppHandle, state: &AppState, id: &str) {
+    let next = {
+        let mut session = state.session.lock();
+        let Some(pos) = session.workspaces.iter().position(|w| w.id == id) else { return };
+        let removed = session.workspaces.remove(pos);
+        session.recent.retain(|r| r != id);
+        let mut ptys = state.ptys.lock();
+        for tab in &removed.terminals {
+            if let Some(mut live) = ptys.remove(&tab.id) {
+                live.hangup();
+            }
+            crate::agent::forget(state, &tab.id);
+        }
+        drop(ptys);
+        state.git.lock().remove(id);
+        if session.active.as_deref() == Some(id) {
+            session.active = None;
+            session.recent.first().cloned()
+        } else {
+            None
+        }
+    };
+    match next {
+        Some(next) => {
+            if let Err(e) = activate(app, &next) {
+                notice(app, format!("Could not open the next workspace: {e:#}"));
+            }
+        }
+        None => watch::sync(app),
+    }
+}
+
 /// Reorders `items` to follow `ids`; items not named keep their relative order
 /// at the end, so a stale list from the view cannot drop anything.
 pub fn reorder<T>(items: &mut Vec<T>, ids: &[String], id_of: impl Fn(&T) -> &str) {
@@ -120,8 +245,11 @@ pub fn take_notices(state: tauri::State<AppState>) -> Vec<String> {
     std::mem::take(&mut *state.notices.lock())
 }
 
+/// Opens a folder as a workspace, or switches to the one already on it.
+/// `from_worktree` marks a workspace the selector derived from a repository's
+/// worktree list rather than one the user named.
 #[tauri::command]
-pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String, name: Option<String>) -> Result<String, String> {
+pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String, name: Option<String>, from_worktree: Option<bool>) -> Result<String, String> {
     let path = PathBuf::from(path);
     let path = std::fs::canonicalize(&path)
         .with_context(|| format!("resolving {}", path.display()))
@@ -160,6 +288,7 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
                     available: true,
                     attention: false,
                     git: None,
+                    from_worktree: from_worktree.unwrap_or(false),
                 });
                 id
             }
@@ -703,4 +832,22 @@ pub fn quit(app: AppHandle) {
     persist(&app);
     pty::shutdown(&app);
     app.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moved;
+
+    #[test]
+    fn a_move_takes_the_path_and_everything_under_it_and_nothing_beside_it() {
+        assert_eq!(moved("notes.md", "notes.md", "journal.md").as_deref(), Some("journal.md"));
+        assert_eq!(moved("docs/a.md", "docs", "guide").as_deref(), Some("guide/a.md"));
+        assert_eq!(moved("docs/deep/a.md", "docs", "guide").as_deref(), Some("guide/deep/a.md"));
+        // A name that merely starts with the old one is a different file.
+        assert_eq!(moved("docs-old/a.md", "docs", "guide"), None);
+        assert_eq!(moved("documents", "doc", "guide"), None);
+        assert_eq!(moved("other/a.md", "docs", "guide"), None);
+        // Into a subdirectory of itself is git's problem, not this function's.
+        assert_eq!(moved("docs/a.md", "docs", "docs/old").as_deref(), Some("docs/old/a.md"));
+    }
 }

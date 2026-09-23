@@ -119,12 +119,30 @@ pub fn refresh_summary(app: &tauri::AppHandle, workspace_id: &str) {
         }
     };
     let i = info(&root);
+    // What the selector offers under this workspace. Git is asked every time
+    // the summary is recomputed — which the watcher does whenever anything in
+    // the repository's git directory moves — so `worktree add` and
+    // `worktree remove` need no other announcement.
+    let siblings = if i.is_repo { worktrees(&root).unwrap_or_default() } else { Vec::new() };
     let summary = crate::state::GitSummary {
         is_repo: i.is_repo,
         branch: i.branch,
         detached: i.detached,
         state: i.state,
         is_worktree: i.is_worktree,
+        worktrees: siblings
+            .into_iter()
+            // A prunable entry is one whose directory has gone: git still
+            // lists it until someone prunes, and offering it would open a
+            // workspace on nothing.
+            .filter(|w| !w.bare && !w.prunable && Path::new(&w.path) != root)
+            .map(|w| crate::state::Worktree {
+                name: Path::new(&w.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| w.path.clone()),
+                path: w.path,
+                branch: w.branch,
+                is_main: w.is_main,
+            })
+            .collect(),
         git_dir: i.git_dir.map(PathBuf::from),
         common_dir: i.common_dir.map(PathBuf::from),
     };
@@ -620,7 +638,12 @@ pub struct WorktreeEntry {
 #[tauri::command(async)]
 pub fn git_worktrees(state: tauri::State<AppState>, workspace_id: String) -> Result<Vec<WorktreeEntry>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
-    let out = git(&root, &["worktree", "list", "--porcelain"]).map_err(err)?;
+    worktrees(&root).map_err(err)
+}
+
+/// Every worktree of the repository `root` belongs to, git's own answer.
+pub fn worktrees(root: &Path) -> Result<Vec<WorktreeEntry>> {
+    let out = git(root, &["worktree", "list", "--porcelain"])?;
     let mut list = Vec::new();
     for block in out.split("\n\n") {
         let mut entry: Option<WorktreeEntry> = None;

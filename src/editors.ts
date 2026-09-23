@@ -128,6 +128,34 @@ export function retain(ids: Set<string>): void {
   for (const id of [...registry.keys()]) if (!ids.has(id)) dispose(id);
 }
 
+function extensionOf(path: string): string {
+  const name = (path.split("/").pop() ?? path).toLowerCase();
+  return name.includes(".") ? name.slice(name.lastIndexOf(".")) : name;
+}
+
+/**
+ * A tab is the same tab after its file is renamed or moved: the backend
+ * rewrote the path it carries, and the open document follows it here. This
+ * reaches tabs that are not on screen, which is where the file would
+ * otherwise go on showing as deleted until the tab was closed and reopened.
+ */
+export function follow(workspaces: Workspace[]): void {
+  for (const ws of workspaces) {
+    for (const group of ws.groups) {
+      for (const tab of group.editors) {
+        const entry = registry.get(tab.id);
+        if (!entry || !("doc" in entry) || entry.doc.path === tab.path) continue;
+        // The extension decides the language, the mode and the comment token
+        // Ctrl+/ inserts, and all three are fixed when the document is built.
+        // A clean buffer is cheaper to rebuild than to patch; a dirty one
+        // keeps what it has rather than lose the changes in it.
+        if (!entry.doc.dirty && extensionOf(tab.path) !== extensionOf(entry.doc.path)) dispose(tab.id);
+        else entry.doc.relocate(tab.path);
+      }
+    }
+  }
+}
+
 export async function save(id: string): Promise<void> {
   await doc(id)?.save();
 }

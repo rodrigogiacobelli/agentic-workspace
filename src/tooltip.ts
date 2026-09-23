@@ -1,8 +1,12 @@
 // Tooltips drawn by the app. The platform's own take half a second to show
-// and cannot be tuned; these show after 200 ms, take their text from the
-// element's `title`, and follow the pointer at once while one is on screen.
+// and cannot be tuned; these take their text from the element's `title` and
+// follow the pointer at once while one is on screen.
 
-const DELAY = 200;
+import { duration } from "./motion";
+
+/** Hover intent: long enough that a cursor crossing an icon does not open one
+ *  (§7). Once one is up the next has none, which is the rest of that rule. */
+const delay = () => duration("--delay-hover-in") || 350;
 
 export function installTooltips(): void {
   const tip = document.createElement("div");
@@ -52,7 +56,7 @@ export function installTooltips(): void {
     if (!text) return;
     current = el;
     if (chain) show(el, text);
-    else timer = window.setTimeout(() => { timer = null; if (current === el) show(el, text); }, DELAY);
+    else timer = window.setTimeout(() => { timer = null; if (current === el) show(el, text); }, delay());
   });
   document.addEventListener("mouseout", (e) => {
     if (!current) return;

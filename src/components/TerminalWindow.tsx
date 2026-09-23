@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { actionFor } from "../hotkeys";
+import { useDismiss } from "../motion";
 import * as terminals from "../terminals";
 import type { Session, TerminalTab, Workspace } from "../types";
 import { ContextMenu } from "./Menu";
@@ -202,7 +203,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
       />
       <button className="tab-add" onClick={() => void api.terminalOpen(ws.id).catch(report)} title="New terminal (Ctrl+Shift+T)">＋</button>
       {menu && (
-        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+        <ContextMenu x={menu.x} y={menu.y} anchor={menu} onClose={() => setMenu(null)}>
           <button onClick={() => { onRename(menu.id); setMenu(null); }}>Rename…</button>
           <button onClick={() => { void api.terminalRename(menu.id, null); setMenu(null); }}>Use the program's title</button>
           <hr />
@@ -216,6 +217,8 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
 function SearchBar({ id, onClose }: { id: string; onClose: () => void }) {
   const [query, setQuery] = useState("");
   const search = terminals.get(id)?.search;
+  const [closing, dismiss] = useDismiss(onClose);
+  const close = () => { search?.clearDecorations(); dismiss(); };
   const find = (next: boolean) => {
     if (!search || !query) return;
     if (next) search.findNext(query, { incremental: false });
@@ -223,7 +226,7 @@ function SearchBar({ id, onClose }: { id: string; onClose: () => void }) {
   };
   useEffect(() => { search?.findNext(query, { incremental: true }); }, [query, search]);
   return (
-    <div className="searchbar">
+    <div className={`searchbar${closing ? " is-closing" : ""}`}>
       <input
         autoFocus
         placeholder="Search scrollback"
@@ -231,12 +234,12 @@ function SearchBar({ id, onClose }: { id: string; onClose: () => void }) {
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") find(!e.shiftKey);
-          if (e.key === "Escape") { search?.clearDecorations(); onClose(); }
+          if (e.key === "Escape") close();
         }}
       />
       <button onClick={() => find(false)}>▲</button>
       <button onClick={() => find(true)}>▼</button>
-      <button onClick={() => { search?.clearDecorations(); onClose(); }}>×</button>
+      <button onClick={close}>×</button>
     </div>
   );
 }

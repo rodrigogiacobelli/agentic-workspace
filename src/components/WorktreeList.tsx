@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import { useDismiss } from "../motion";
 import type { Session, Workspace, WorktreeEntry } from "../types";
 import { Prompt } from "./Prompt";
 import { report } from "./Switcher";
@@ -17,6 +18,7 @@ type Step = { kind: "list" } | { kind: "path" } | { kind: "branch"; path: string
 export function WorktreeList({ ws, session, onClose }: Props) {
   const [list, setList] = useState<WorktreeEntry[] | null>(null);
   const [step, setStep] = useState<Step>({ kind: "list" });
+  const [closing, dismiss] = useDismiss(onClose);
 
   const load = () => api.gitWorktrees(ws.id).then(setList).catch(report);
   useEffect(() => { void load(); }, [ws.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -81,9 +83,9 @@ export function WorktreeList({ ws, session, onClose }: Props) {
   }
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="palette" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
-        <div className="dialog-title"><span>Worktrees</span><button onClick={onClose}>×</button></div>
+    <div className={`overlay${closing ? " is-closing" : ""}`} onMouseDown={dismiss}>
+      <div className="palette" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") dismiss(); }}>
+        <div className="dialog-title"><span>Worktrees</span><button onClick={dismiss}>×</button></div>
         <div className="list-actions">
           <button onClick={() => setStep({ kind: "path" })}>＋ New worktree…</button>
           <button onClick={() => void prune()}>Prune</button>

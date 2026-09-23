@@ -79,6 +79,10 @@ pub struct Workspace {
     /// Branch and state of the repository, when the directory is one.
     #[serde(default, skip_deserializing)]
     pub git: Option<GitSummary>,
+    /// The application opened this one from a repository's worktree list
+    /// rather than the user naming the folder. It goes when the worktree does.
+    #[serde(default)]
+    pub from_worktree: bool,
 }
 
 /// A flat, ordered list of shortcuts into the workspace. Each entry sits at
@@ -100,10 +104,28 @@ pub struct GitSummary {
     pub detached: bool,
     pub state: Option<String>,
     pub is_worktree: bool,
+    /// Every other worktree of this repository, as git lists them. Refreshed
+    /// with the rest of the summary, so one added or removed outside the
+    /// application appears and disappears on its own.
+    #[serde(default)]
+    pub worktrees: Vec<Worktree>,
     #[serde(skip)]
     pub git_dir: Option<PathBuf>,
     #[serde(skip)]
     pub common_dir: Option<PathBuf>,
+}
+
+/// A sibling worktree of a workspace's repository: somewhere to switch to,
+/// whether or not a workspace has been opened on it yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    /// Absolute, as git reports it.
+    pub path: String,
+    /// The last component of the path: what the row is called.
+    pub name: String,
+    pub branch: Option<String>,
+    pub is_main: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

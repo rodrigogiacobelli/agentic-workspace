@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useDismiss } from "../motion";
 import { rank } from "../fuzzy";
 
 export interface PaletteItem {
@@ -20,19 +21,22 @@ export function Palette({ title, items, onPick, onClose }: Props) {
   const [index, setIndex] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const matches = useMemo(() => rank(query, items, (i) => i.label), [query, items]);
+  const [closing, dismiss] = useDismiss(onClose);
 
   useEffect(() => input.current?.focus(), []);
   useEffect(() => setIndex(0), [query]);
 
   const onKey = (e: React.KeyboardEvent) => {
+    // The exit is still on screen; the list must not still answer for it.
+    if (closing) return;
     if (e.key === "ArrowDown") { e.preventDefault(); setIndex((i) => Math.min(i + 1, matches.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setIndex((i) => Math.max(i - 1, 0)); }
     else if (e.key === "Enter") { e.preventDefault(); if (matches[index]) onPick(matches[index]); }
-    else if (e.key === "Escape") { e.preventDefault(); onClose(); }
+    else if (e.key === "Escape") { e.preventDefault(); dismiss(); }
   };
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
+    <div className={`overlay${closing ? " is-closing" : ""}`} onMouseDown={dismiss}>
       <div className="palette" onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKey}>
         <input
           ref={input}

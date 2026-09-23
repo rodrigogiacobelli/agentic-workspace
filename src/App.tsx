@@ -3,6 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "./api";
 import * as editors from "./editors";
 import * as settings from "./settings";
+import { useDismiss } from "./motion";
 import { Palette } from "./components/Palette";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Switcher, report } from "./components/Switcher";
@@ -15,11 +16,14 @@ export function App({ role }: { role: WindowRole }) {
   const [current, setCurrent] = useState<Settings | null>(null);
   const [switcher, setSwitcher] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [notices, setNotices] = useState<string[]>([]);
+  // Keyed, not indexed: a toast plays its own exit, and an index would hand
+  // that state to whichever message shifted up into its place.
+  const [notices, setNotices] = useState<{ id: number; text: string }[]>([]);
   const [, bump] = useState(0);
 
   useEffect(() => {
-    const push = (m: string) => setNotices((n) => [...n, m]);
+    let next = 0;
+    const push = (m: string) => setNotices((n) => [...n, { id: next++, text: m }]);
     settings.init().then(setCurrent).catch(report);
     api.getSession().then(setSession).catch(report);
     api.takeNotices().then((ns) => ns.forEach(push)).catch(() => {});
@@ -68,14 +72,26 @@ export function App({ role }: { role: WindowRole }) {
       {showSettings && <SettingsDialog current={current} workspace={active} onClose={() => setShowSettings(false)} />}
       {notices.length > 0 && (
         <div className="notices">
-          {notices.map((n, i) => (
-            <div key={i} className="notice">
-              <span>{n}</span>
-              <button onClick={() => setNotices((all) => all.filter((_, j) => j !== i))}>×</button>
-            </div>
+          {notices.map((n) => (
+            <Notice key={n.id} message={n.text} onClose={() => setNotices((all) => all.filter((o) => o.id !== n.id))} />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * One toast. Every notice here carries a failure, so none of them expires on
+ * a timer: the reader dismisses it, and the dismissal is what plays its exit
+ * (§9, WCAG 2.2.1).
+ */
+function Notice({ message, onClose }: { message: string; onClose: () => void }) {
+  const [closing, dismiss] = useDismiss(onClose);
+  return (
+    <div className={`notice${closing ? " is-closing" : ""}`}>
+      <span>{message}</span>
+      <button onClick={dismiss} title="Dismiss">×</button>
     </div>
   );
 }

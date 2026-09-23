@@ -5,7 +5,7 @@ import { api, events } from "../api";
 import { report } from "../notice";
 import type { Session, WindowRole, Workspace } from "../types";
 import { Icon } from "./icons";
-import { RowMenu } from "./Menu";
+import { RowMenu, type Row } from "./Menu";
 import { PanelsMenu } from "./PanelsMenu";
 import { Prompt } from "./Prompt";
 
@@ -61,6 +61,56 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
 
   const label = active ? `${active.name}${active.available ? "" : " (unavailable)"}` : "No workspace";
 
+  const row = (w: Workspace, children?: Row[]): Row => ({
+    id: w.id,
+    name: `${w.attention && w.id !== session.active ? "● " : ""}${w.name}${w.available ? "" : " (unavailable)"}`,
+    detail: w.path,
+    selected: w.id === session.active,
+    onPick: () => { if (w.id !== session.active) void api.switchWorkspace(w.id).catch(report); },
+    onRename: () => setRenaming(w),
+    onRemove: () => void remove(w),
+    children,
+  });
+
+  /**
+   * One row per workspace, with a repository's main worktree disclosing the
+   * others git lists beside it. The list is git's own and is refreshed with
+   * the branch, so a worktree added or removed outside the application
+   * appears and goes without being added or removed here.
+   *
+   * Only a repository's own root discloses — git's `is_worktree` says which
+   * one that is. Letting a linked worktree disclose too would have two of
+   * them nesting each other, and the whole list would disappear.
+   */
+  const workspaceOn = (path: string) => session.workspaces.find((w) => w.path === path);
+  const isMainWorktree = (w: Workspace) => w.git?.isRepo === true && !w.git.isWorktree;
+  const nested = new Set(
+    session.workspaces
+      .filter(isMainWorktree)
+      .flatMap((w) => (w.git?.worktrees ?? []).map((t) => workspaceOn(t.path)?.id))
+      .filter((id): id is string => !!id),
+  );
+  const rows: Row[] = session.workspaces
+    .filter((w) => !nested.has(w.id))
+    .map((w) => {
+      if (!isMainWorktree(w)) return row(w);
+      return row(
+        w,
+        (w.git?.worktrees ?? []).map((t) => {
+          const already = workspaceOn(t.path);
+          const branch = t.branch ? ` · ${t.branch}` : "";
+          return already
+            ? { ...row(already), id: `${w.id}:${t.path}`, name: `⑂ ${already.name}${branch}${already.available ? "" : " (unavailable)"}` }
+            : {
+                id: `${w.id}:${t.path}`,
+                name: `⑂ ${t.name}${branch}`,
+                detail: t.path,
+                onPick: () => void api.addWorkspace(t.path, undefined, true).catch(report),
+              };
+        }),
+      );
+    });
+
   return (
     <>
       <header
@@ -87,15 +137,8 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
             label={label}
             title={active?.path}
             minWidth={340}
-            rows={session.workspaces.map((w) => ({
-              id: w.id,
-              name: `${w.attention && w.id !== session.active ? "● " : ""}${w.name}${w.available ? "" : " (unavailable)"}`,
-              detail: w.path,
-              selected: w.id === session.active,
-              onPick: () => { if (w.id !== session.active) void api.switchWorkspace(w.id).catch(report); },
-              onRename: () => setRenaming(w),
-              onRemove: () => void remove(w),
-            }))}
+            align="center"
+            rows={rows}
             footer={{ label: "＋ Add folder…", onClick: () => void addFolder() }}
             empty="No workspaces yet"
           />

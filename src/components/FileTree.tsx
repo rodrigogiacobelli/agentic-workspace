@@ -6,6 +6,7 @@ import { fileIcon, Icon } from "./icons";
 import { ContextMenu, RowMenu, SubMenu } from "./Menu";
 import { Prompt } from "./Prompt";
 import { FILE_MIME } from "./SplitTree";
+import { duration } from "../motion";
 import { report } from "./Switcher";
 
 interface Props {
@@ -53,9 +54,6 @@ type Dialog =
 
 const ENTRY_MIME = "application/x-agentic-view-entry";
 
-/** What Ctrl+C or Ctrl+X took from the tree; pasted into the selected folder. */
-let clipboard: { paths: string[]; cut: boolean } | null = null;
-
 function dirOf(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? "" : path.slice(0, i);
@@ -83,6 +81,10 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
   /** Every row drawn in this render, in tree order. */
   const order = useRef<string[]>([]);
   const [dragOver, setDragOver] = useState<string | null>(null);
+  /** Whether the desktop clipboard holds files, so Paste is offered or not. */
+  const [hasFiles, setHasFiles] = useState(false);
+  /** Directories still drawn while their collapse plays out. */
+  const [collapsing, setCollapsing] = useState<Set<string>>(new Set());
   const inflight = useRef(new Set<string>());
   const view = ws.views.find((v) => v.id === ws.activeView) ?? null;
   const entriesKey = view?.entries.join("\n") ?? "";
@@ -109,6 +111,26 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
   }, [ws.expanded, load]);
 
   useEffect(() => { loadView(); }, [loadView]);
+
+  // A directory that leaves the expanded set keeps its children on screen for
+  // as long as the collapse takes; React would otherwise take them away before
+  // the first frame of it.
+  const expandedKey = ws.expanded.join("\n");
+  const wasExpanded = useRef(ws.expanded);
+  useEffect(() => {
+    const gone = wasExpanded.current.filter((d) => !ws.expanded.includes(d));
+    wasExpanded.current = ws.expanded;
+    if (!gone.length) return;
+    setCollapsing((all) => new Set([...all, ...gone]));
+    const timer = window.setTimeout(() => {
+      setCollapsing((all) => {
+        const next = new Set(all);
+        gone.forEach((d) => next.delete(d));
+        return next;
+      });
+    }, duration("--d-base"));
+    return () => window.clearTimeout(timer);
+  }, [expandedKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const unlisten = events.onDirChanged((change) => {
@@ -139,6 +161,21 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
     return view ? null : "";
   };
 
+  /**
+   * Asking the clipboard costs a round trip to whichever application owns it,
+   * so this is asked when the panel appears and again as a menu opens, rather
+   * than on every render. A stale answer costs at worst a Paste entry that
+   * finds nothing — the paste itself asks again.
+   */
+  const askClipboard = useCallback(() => {
+    api.clipboardFiles().then((c) => setHasFiles(c.paths.length > 0)).catch(() => setHasFiles(false));
+  }, []);
+  useEffect(askClipboard, [askClipboard]);
+  const openMenu = (m: Menu) => {
+    setMenu(m);
+    askClipboard();
+  };
+
   const contextTarget = (): Entry | null => menu?.entry ?? null;
   const targetDir = (): string => {
     const e = contextTarget();
@@ -157,15 +194,21 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
   /** The rows a keyboard action applies to: the multi-selection in tree order, else the selected row. */
   const targets = (): string[] => (multi.size > 0 ? order.current.filter((p) => multi.has(p)) : selected ? [selected] : []);
 
+  /**
+   * Copy and cut go to the desktop's clipboard, not a variable of this module.
+   * One clipboard is what makes the newest copy win whichever window made it,
+   * and it is the same clipboard a file manager pastes from (FIX-12).
+   */
   const copy = (cut: boolean) => {
     const paths = targets();
-    if (paths.length) clipboard = { paths, cut };
+    if (paths.length) void api.setClipboardFiles(paths.map((p) => `${ws.path}/${p}`), cut).then(() => setHasFiles(true)).catch(report);
   };
 
   const paste = async () => {
     const dir = creationDir();
-    if (dir === null || !clipboard) return;
-    const { paths, cut } = clipboard;
+    if (dir === null) return;
+    const { paths, cut } = await api.clipboardFiles().catch((e) => { report(e); return { paths: [], cut: false }; });
+    if (!paths.length) return;
     let last: string | null = null;
     for (const from of paths) {
       try {
@@ -174,7 +217,8 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
         report(e);
       }
     }
-    if (cut) clipboard = null;
+    // The files are no longer where the cut says they are.
+    if (cut) { await api.clearClipboardFiles().catch(() => {}); setHasFiles(false); }
     if (dir && !ws.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true).catch(() => {});
     // The folder was not watched while collapsed; its listing is read again.
     load(dir);
@@ -262,10 +306,10 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
         onDragOver={(ev) => { if (viewRoot && ev.dataTransfer.types.includes(ENTRY_MIME)) { ev.preventDefault(); ev.stopPropagation(); setDragOver(e.path); } }}
         onDragLeave={() => { if (dragOver === e.path) setDragOver(null); }}
         onDrop={(ev) => { const dragged = ev.dataTransfer.getData(ENTRY_MIME); setDragOver(null); if (viewRoot && dragged) { ev.preventDefault(); ev.stopPropagation(); reorderTo(dragged, e.path); } }}
-        onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); if (!multi.has(e.path)) { setMulti(new Set()); onSelect(e.path); } setMenu({ x: ev.clientX, y: ev.clientY, entry: e, viewRoot }); }}
+        onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); if (!multi.has(e.path)) { setMulti(new Set()); onSelect(e.path); } openMenu({ x: ev.clientX, y: ev.clientY, entry: e, viewRoot }); }}
         title={e.missing ? `Missing: ${e.path}` : e.path}
       >
-        <span className="tree-chevron">{e.isDir ? (expanded ? "▾" : "▸") : ""}</span>
+        <span className={`tree-chevron${expanded ? " open" : ""}`}>{e.isDir ? "▸" : ""}</span>
         <Icon name={icon.name} color={e.ignored || e.missing ? undefined : icon.color} />
         <span className="tree-name">{e.missing ? e.path : e.name}</span>
         {gitMap.has(e.path) && <span className="tree-git">{e.isDir ? "•" : gitMap.get(e.path)}</span>}
@@ -273,15 +317,21 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
     );
   };
 
+  /** A directory's children, revealed and hidden by their own height (§11.3). */
+  const branch = (path: string, open: boolean, children: React.ReactNode): React.ReactNode =>
+    open || collapsing.has(path) ? (
+      <div className={`tree-branch${open ? " open" : ""}`}><div>{children}</div></div>
+    ) : null;
+
   const render = (dir: string, depth: number): React.ReactNode => {
     const entries = listings.get(dir);
-    if (!entries) return depth === 0 ? <div className="tree-loading">Loading…</div> : null;
+    if (!entries) return depth === 0 ? <div className="tree-loading loading">Loading…</div> : null;
     return entries.map((e) => {
       const expanded = e.isDir && ws.expanded.includes(e.path);
       return (
         <div key={e.path}>
           {row(e, depth, expanded, () => { onSelect(e.path); if (e.isDir) toggle(e.path); else onOpen(e.path, true); })}
-          {expanded && render(e.path, depth + 1)}
+          {branch(e.path, expanded, render(e.path, depth + 1))}
         </div>
       );
     });
@@ -289,7 +339,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
 
   // A view's root: its entries in order, each expanding to real children.
   const renderView = (): React.ReactNode => {
-    if (!viewEntries) return <div className="tree-loading">Loading…</div>;
+    if (!viewEntries) return <div className="tree-loading loading">Loading…</div>;
     if (viewEntries.length === 0) return <div className="tree-loading">Nothing has been sent to this view yet. Right-click a file or folder in Files and choose “Send to view”.</div>;
     return viewEntries.map((e) => {
       const expanded = e.isDir && ws.expanded.includes(e.path);
@@ -297,7 +347,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
       return (
         <div key={e.path}>
           {row(e, 0, expanded, open, true)}
-          {expanded && (listings.has(e.path) ? render(e.path, 1) : (load(e.path), null))}
+          {branch(e.path, expanded, listings.has(e.path) ? render(e.path, 1) : (load(e.path), null))}
         </div>
       );
     });
@@ -344,7 +394,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
 
   // A filtered view keeps its entries at the root and filters beneath them.
   const renderFilteredView = (): React.ReactNode => {
-    if (!filtered || !viewEntries) return <div className="tree-loading">Loading…</div>;
+    if (!filtered || !viewEntries) return <div className="tree-loading loading">Loading…</div>;
     return viewEntries
       .filter((e) => e.isDir ? filtered.has(e.path) : e.path.toLowerCase().includes(filter.toLowerCase()))
       .map((e) => (
@@ -405,14 +455,14 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
         tabIndex={0}
         onKeyDown={onKey}
         onMouseDown={(e) => { if (e.target === e.currentTarget) onSelect(null); }}
-        onContextMenu={(ev) => { ev.preventDefault(); setMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
+        onContextMenu={(ev) => { ev.preventDefault(); openMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
       >
         {view
           ? (filter ? renderFilteredView() : renderView())
-          : (filter ? (filtered ? renderFiltered("", 0) : <div className="tree-loading">Loading…</div>) : render("", 0))}
+          : (filter ? (filtered ? renderFiltered("", 0) : <div className="tree-loading loading">Loading…</div>) : render("", 0))}
       </nav>
       {menu && (
-        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+        <ContextMenu x={menu.x} y={menu.y} anchor={menu} onClose={() => setMenu(null)}>
           {/* A view's root is a list of shortcuts, not a directory: nothing new is created there (VIEW-06). */}
           {(!view || menu.entry) && !menu.entry?.missing && (
             <>
@@ -420,7 +470,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
               <button onClick={() => { setDialog({ kind: "new-folder", dir: targetDir() }); setMenu(null); }}>New folder…</button>
             </>
           )}
-          {!menu.entry && clipboard && (!view || selected) && (
+          {!menu.entry && hasFiles && (!view || selected) && (
             <button onClick={() => { void paste(); setMenu(null); }}>Paste</button>
           )}
           {view && !menu.entry && (
@@ -455,7 +505,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
               <hr />
               <button onClick={() => { copy(false); setMenu(null); }}>Copy</button>
               <button onClick={() => { copy(true); setMenu(null); }}>Cut</button>
-              {clipboard && <button onClick={() => { void paste(); setMenu(null); }}>Paste into {menu.entry.isDir ? menu.entry.name : dirOf(menu.entry.path) || "the root"}</button>}
+              {hasFiles && <button onClick={() => { void paste(); setMenu(null); }}>Paste into {menu.entry.isDir ? menu.entry.name : dirOf(menu.entry.path) || "the root"}</button>}
               <hr />
               <button onClick={() => { setDialog({ kind: "rename", entry: menu.entry! }); setMenu(null); }}>Rename…</button>
               <button onClick={() => { void api.duplicateEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Duplicate</button>

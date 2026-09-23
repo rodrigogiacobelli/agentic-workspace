@@ -90,6 +90,14 @@ pub fn read_draft(state: tauri::State<AppState>, workspace_id: String, path: Str
     }
 }
 
+/// Carries a draft to the file's new name. A draft is filed under a hash of
+/// the absolute path, so one left behind would surface as the unsaved content
+/// of whatever is next created under the old name.
+pub fn move_draft(state: &AppState, from_abs: &Path, to_abs: &Path) {
+    let drafts = state.data_dir.join("drafts");
+    let _ = std::fs::rename(drafts.join(draft_name(from_abs)), drafts.join(draft_name(to_abs)));
+}
+
 #[tauri::command]
 pub fn delete_draft(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {
     let target = draft_path(&state, &workspace_id, &path)?;

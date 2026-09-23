@@ -135,9 +135,19 @@ fn emit(app: &AppHandle, dirs: HashSet<PathBuf>) {
             }
         }
     }
+    let touched_any = !git_touched.is_empty();
     for id in git_touched {
         crate::git::refresh_summary(app, &id);
         let _ = app.emit(EVENT_GIT_CHANGED, &id);
+    }
+    if touched_any {
+        // `git worktree add` and `git worktree remove` both write inside the
+        // repository's git directory, so this is where the selector's list of
+        // worktrees changes — and where one it had opened stops existing. The
+        // first add also creates the directory the watch needs, so the watched
+        // set is made to match before anything is published.
+        session::prune_worktrees(app);
+        sync(app);
         session::publish(app);
     }
     let mut per_workspace: HashMap<String, Vec<String>> = HashMap::new();
@@ -181,16 +191,22 @@ pub fn sync(app: &AppHandle) {
                 }
             }
         }
-        // HEAD, the index and the refs of the active repository, so the
-        // branch shown follows a checkout made in the terminal.
-        if let Some(active) = session.active.as_deref() {
-            if let Some(g) = state.git.lock().get(active) {
-                for dir in g.git_dir.iter().chain(g.common_dir.iter()) {
-                    wanted.insert(dir.clone());
-                    wanted.insert(dir.join("refs/heads"));
-                }
+        // HEAD, the index and the refs of every workspace's repository, so
+        // the branch shown follows a checkout made in the terminal — and
+        // `worktrees/`, whose entries are what the selector lists. Every
+        // workspace and not only the active one, because the selector offers
+        // the worktrees of all of them: a `git worktree add` in a background
+        // project has to reach it without being switched to.
+        let git = state.git.lock();
+        for ws in &session.workspaces {
+            let Some(g) = git.get(&ws.id) else { continue };
+            for dir in g.git_dir.iter().chain(g.common_dir.iter()) {
+                wanted.insert(dir.clone());
+                wanted.insert(dir.join("refs/heads"));
+                wanted.insert(dir.join("worktrees"));
             }
         }
+        drop(git);
         wanted.into_iter().filter(|p| p.is_dir()).collect()
     };
     state.watcher.lock().apply(wanted, app);

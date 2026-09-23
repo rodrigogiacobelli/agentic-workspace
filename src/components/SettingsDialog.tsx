@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
 import * as settings from "../settings";
 import { allThemes, isImported } from "../themes";
+import { useDismiss } from "../motion";
 import type { HotkeyStatus, Settings, Workspace } from "../types";
 import { defaultLayout, normalize, showPanel, PANELS } from "./dock";
 import { Dropdown } from "./Menu";
@@ -16,6 +17,7 @@ interface Props {
 
 export function SettingsDialog({ current, workspace, onClose }: Props) {
   const [hotkey, setHotkey] = useState<HotkeyStatus | null>(null);
+  const [closing, dismiss] = useDismiss(onClose);
   const [, bump] = useState(0);
   useEffect(() => {
     api.hotkeyStatus().then(setHotkey).catch(() => {});
@@ -76,9 +78,9 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
   );
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="dialog" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
-        <div className="dialog-title"><span>Settings</span><button onClick={onClose}>×</button></div>
+    <div className={`overlay${closing ? " is-closing" : ""}`} onMouseDown={dismiss}>
+      <div className="dialog" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") dismiss(); }}>
+        <div className="dialog-title"><span>Settings</span><button onClick={dismiss}>×</button></div>
         <h3>Appearance</h3>
         <label className="setting">
           <span>Theme</span>

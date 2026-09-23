@@ -21,6 +21,40 @@
   --z-notice: 300;
   --z-scrollbar: 350;
   --z-tooltip: 400;
+
+  /* Motion. One scale of durations, one of easings, chosen by interaction
+     rather than by taste; `working/motion-rules.md` is the rule set and the
+     Motion section at the foot of this file is where they are applied. */
+  --d-instant: 100ms;  /* hover, focus, colour change              */
+  --d-fast:    150ms;  /* toggle, checkbox, icon rotate            */
+  --d-quick:   200ms;  /* dropdown, popover, small expand          */
+  --d-base:    250ms;  /* accordion, tab switch, inline reveal     */
+  --d-enter:   300ms;  /* dialog in, sheet in, backdrop dim        */
+  --d-exit:    225ms;  /* dialog out, sheet out                    */
+  --d-large:   375ms;  /* drawer, route transition                 */
+  --d-loop:   1400ms;  /* skeleton shimmer, spinner revolution     */
+
+  --e-out:        cubic-bezier(0, 0, 0.2, 1);    /* entering — default */
+  --e-in:         cubic-bezier(0.4, 0, 1, 1);    /* exiting            */
+  --e-in-out:     cubic-bezier(0.4, 0, 0.2, 1);  /* A → B on screen    */
+  --e-emphasized: cubic-bezier(0.2, 0, 0, 1);    /* snappier, same ms  */
+
+  /* A different clock from duration: how long before anything starts. */
+  --delay-hover-in:  350ms;
+  --delay-hover-out: 150ms;
+  --delay-stagger:    35ms;
+
+  /* Every translate distance is written `calc(<n>px * var(--travel))`; this
+     is the switch that turns movement into a cross-fade. */
+  --travel: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --travel: 0;
+    --d-base: 100ms; --d-enter: 100ms; --d-exit: 100ms; --d-large: 100ms;
+    --delay-stagger: 0ms;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -73,18 +107,35 @@ input:focus { border-color: var(--accent); }
 .switcher-center { display: flex; align-items: center; gap: 4px; justify-self: center; }
 .switcher-right { display: flex; align-items: center; gap: 4px; justify-self: end; height: 100%; }
 .switcher-right > button { padding: 0 6px; height: 22px; line-height: 20px; }
-.switcher-select { font-weight: 600; min-width: 180px; max-width: 320px; }
+/* The control is the workspace's name and nothing else: it takes the width
+   that name needs, and the caret every other dropdown carries would sit in
+   space the name has a better use for. */
+.switcher-select { font-weight: 600; max-width: 320px; padding: 0 8px; }
+.switcher-select .dropdown-caret { display: none; }
 .switcher-path { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon { flex: none; vertical-align: -3px; }
 .row-menu { display: flex; flex-direction: column; max-width: 560px; }
-.row { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.row { position: relative; display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 26px; border-radius: 4px; cursor: pointer; }
 .row:hover { background: var(--bg-hover); }
 .row.selected .row-name { color: var(--accent); }
+/* The disclosure a repository's worktrees hang from. It sits in the row's
+   left margin rather than in the flow, so a repository that has worktrees and
+   one that has none start their names at the same place. */
+.row-disclose {
+  position: absolute; left: 6px; top: 0; bottom: 0; width: 14px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; border: none; background: transparent;
+  color: var(--fg-dim); font-size: 10px;
+}
+button.row-disclose:hover { color: var(--fg); background: transparent; }
+.row-disclose.open, .row-disclose.open:active { transform: rotate(90deg); }
+.row-nested { padding-left: 44px; }
+.row-nested .row-name { font-weight: 500; }
 .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-detail { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-actions { display: flex; gap: 2px; visibility: hidden; }
-.row:hover .row-actions { visibility: visible; }
+.row-actions { display: flex; gap: 2px; opacity: 0; pointer-events: none; }
+.row:hover .row-actions, .row-actions:focus-within { opacity: 1; pointer-events: auto; }
 .row-actions button { padding: 0 6px; height: 20px; line-height: 1; color: var(--fg-dim); }
 .row-actions button:hover { color: var(--fg); }
 .row-footer { text-align: left; }
@@ -157,8 +208,15 @@ main { flex: 1; display: flex; min-height: 0; }
   min-width: 0;
 }
 .tab.preview .tab-label { font-style: italic; }
-/* Tabs narrow to 120 px before the strip scrolls at all, so ten of them fit
-   where six did (TAB-01). Past that floor the overflow control takes over. */
+/* A tab is as wide as its name and no wider, up to 240 px. It used to have a
+   120 px floor so that crowding shrank tabs instead of scrolling the strip,
+   but that floor is also a width every short name had to fill, and the dead
+   space beside `a.md` was the cost. Expressing a floor that binds only when
+   the name is longer needs `min(120px, max-content)`, and WebKitGTK 2.52 does
+   not support intrinsic sizes inside `min()`. So tabs do not shrink at all:
+   crowding scrolls the strip, and the overflow control at its end reaches
+   whatever has gone (TAB-01, TAB-03). Short names now cost less room than
+   they did, long ones more. */
 .tab {
   display: flex;
   align-items: center;
@@ -168,17 +226,17 @@ main { flex: 1; display: flex; min-height: 0; }
   color: var(--fg-dim);
   cursor: pointer;
   white-space: nowrap;
-  flex: 0 1 auto;
-  min-width: 120px;
+  flex: 0 0 auto;
+  min-width: 0;
   max-width: 240px;
 }
 .tab:hover { background: var(--bg-hover); }
-.tab.active { color: var(--fg); background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent); }
+.tab.active { color: var(--fg); background: var(--bg); }
 .tab-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* The close button is room a narrowed tab needs for its name, so it is drawn
    only where it can be used. A dirty tab keeps a dot in its place (TAB-06). */
-.tab-close { padding: 0 4px; color: var(--fg-faint); line-height: 1; visibility: hidden; }
-.tab:hover .tab-close, .tab.active .tab-close { color: var(--fg-dim); visibility: visible; }
+.tab-close { margin-left: auto; padding: 0 4px; color: var(--fg-faint); line-height: 1; opacity: 0; pointer-events: none; }
+.tab:hover .tab-close, .tab.active .tab-close, .tab-close:focus-visible { color: var(--fg-dim); opacity: 1; pointer-events: auto; }
 .tab-close:hover { color: var(--fg); }
 .tabs-overflow { flex: none; padding: 0 8px; color: var(--fg-dim); border-left: 1px solid var(--border); }
 .tabs-overflow:hover { background: var(--bg-hover); color: var(--fg); }
@@ -225,7 +283,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .sidebar-tabs { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); background: var(--bg-raised); overflow: hidden; }
 .sidebar-tabs [role="tab"] { flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; color: var(--fg-dim); padding: 5px 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-tabs [role="tab"]:hover { background: var(--bg-hover); }
-.sidebar-tabs [role="tab"].active { color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+.sidebar-tabs [role="tab"].active { color: var(--fg); }
 .tab-count { font-size: 10px; color: var(--fg-dim); }
 .media-view { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; overflow: auto; background: var(--bg); }
 .media-view img, .media-view video { max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -257,7 +315,7 @@ main { flex: 1; display: flex; min-height: 0; }
 *::-webkit-scrollbar { width: 0; height: 0; }
 
 .sbars { position: fixed; inset: 0; pointer-events: none; z-index: var(--z-scrollbar); }
-.sbar-track, .sbar-thumb { position: fixed; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.sbar-track, .sbar-thumb { position: fixed; opacity: 0; pointer-events: none; transition: opacity var(--d-instant) var(--e-out); }
 .sbar-track.on, .sbar-thumb.on { opacity: 1; pointer-events: auto; }
 .sbar-thumb { background: var(--fg-faint); border-radius: 3px; }
 .sbar-thumb:hover, .sbar-thumb.dragging { background: var(--fg-dim); }
@@ -319,7 +377,7 @@ main { flex: 1; display: flex; min-height: 0; }
 
 .editor-area { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .editor-group { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.editor-group:not(.active) .tab.active { box-shadow: inset 0 -2px 0 var(--fg-faint); }
+
 .tabs-spacer { flex: 1; }
 .editor-host { flex: 1; min-height: 0; position: relative; }
 .editor { height: 100%; user-select: text; display: flex; }
@@ -505,7 +563,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-section { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
 .git-section-title { position: sticky; top: 0; z-index: 1; background: var(--bg); display: flex; justify-content: space-between; align-items: center; padding: 6px 8px 2px; font-weight: 600; }
 .git-section-title button { font-size: 11px; color: var(--fg-dim); }
-.git-row { display: flex; align-items: center; gap: 6px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
+.git-row { position: relative; display: flex; align-items: center; gap: 6px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
 .git-row:hover { background: var(--bg-hover); }
 .git-letter { width: 14px; text-align: center; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); flex: none; }
 .git-letter.s-M { color: #e0b35a; }
@@ -513,8 +571,11 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-letter.s-D { color: var(--danger); }
 .git-letter.s-\! { color: var(--danger); }
 .git-path { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.git-actions { display: none; gap: 2px; margin-left: auto; padding-left: 8px; }
-.git-row:hover .git-actions { display: flex; }
+/* Over the row rather than in it: reserving the space would narrow every
+   path permanently, and taking it on hover would move the row under the
+   pointer. */
+.git-actions { position: absolute; right: 4px; top: 0; bottom: 0; display: flex; align-items: center; gap: 2px; padding-left: 12px; background: var(--bg-hover); opacity: 0; pointer-events: none; }
+.git-row:hover .git-actions, .git-actions:focus-within { opacity: 1; pointer-events: auto; }
 .git-actions button { padding: 0 5px; }
 .git-commit { flex: none; padding: 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); }
 .git-commit textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; resize: vertical; }
@@ -527,8 +588,8 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-commit-row:hover { background: var(--bg-hover); }
 .git-commit-row.selected { background: var(--bg-hover); }
 .git-chevron { color: var(--fg-dim); font-size: 10px; padding-top: 2px; }
-.git-copy { grid-column: 3; grid-row: 1 / span 2; align-self: center; padding: 0 4px; color: var(--fg-dim); visibility: hidden; }
-.git-commit-row:hover .git-copy { visibility: visible; }
+.git-copy { grid-column: 3; grid-row: 1 / span 2; align-self: center; padding: 0 4px; color: var(--fg-dim); opacity: 0; pointer-events: none; }
+.git-commit-row:hover .git-copy, .git-copy:focus-visible { opacity: 1; pointer-events: auto; }
 .git-copy:hover { color: var(--fg); }
 .git-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-meta { grid-column: 2; color: var(--fg-dim); font-size: 11px; }
@@ -577,3 +638,295 @@ main { flex: 1; display: flex; min-height: 0; }
 .setting-row button { border: 1px solid var(--border); }
 .setting button { border: 1px solid var(--border); }
 .outline .tree-row { padding-top: 3px; padding-bottom: 3px; }
+
+/* ==========================================================================
+   Motion
+   Durations and easings come from the tokens at the top of this file; the
+   rule set they implement is `working/motion-rules.md`. Only `transform` and
+   `opacity` animate, with two sanctioned exceptions — `grid-template-rows`
+   for a height reveal, and colour for state. Every translate distance is
+   written `calc(<n>px * var(--travel))`, which is what makes the
+   reduced-motion switch at the top of the file replace movement with a
+   cross-fade rather than merely shorten it.
+   ========================================================================== */
+
+/* --- Hover, focus, press (§11.1) ----------------------------------------- */
+
+button,
+.dropdown,
+.tree-row,
+.git-row,
+.git-commit-row,
+.row,
+.search-hit,
+.palette-list li,
+.crumb,
+.cm-lp-chip,
+.sidebar-tabs [role="tab"],
+.hunk-action,
+.cm-blame-line {
+  transition:
+    background-color var(--d-instant) var(--e-out),
+    border-color     var(--d-instant) var(--e-out),
+    color            var(--d-instant) var(--e-out),
+    opacity          var(--d-instant) var(--e-out),
+    transform        var(--d-fast)    var(--e-out);
+}
+
+/* The press is the acknowledgement, and it is owed in 0 ms (§8). Only the
+   things that are pressed: a full-width row or a tab is dragged as often as
+   it is clicked, and one that shrank under the pointer would fight the drag. */
+button:active, .cm-lp-chip:active, .hunk-action:active, .crumb:active {
+  transform: scale(0.97);
+  transition-duration: 0ms;
+}
+
+/* Nothing in this application had a focus ring. This is what says where the
+   keyboard is, and it appears at once — a ring that fades in has already
+   missed the keystroke that asked for it. It is drawn inside the element
+   because the strips it sits in scroll, and an outside ring would be clipped.
+   Text fields, the tree and the editors say it their own way already. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+input:focus-visible,
+textarea:focus-visible,
+.tree:focus-visible,
+.cm-editor:focus-visible,
+.cm-content:focus-visible { outline: none; }
+
+input, textarea {
+  transition:
+    background-color var(--d-instant) var(--e-out),
+    border-color     var(--d-instant) var(--e-out);
+}
+
+/* Colour and geometry are two clocks: a divider lights up as fast as any
+   other hover, and the cursor over it says the rest. */
+.divider, .git-resize { transition: background-color var(--d-instant) var(--e-out); }
+
+/* --- Menus, dropdowns, popovers, tooltips (§11.2) ------------------------ */
+
+/* The menu grows from the control it hangs under; a submenu from its parent's
+   edge. `display` and `overlay` transition discretely so the exit has a frame
+   to play when the element is still in the DOM — which it is for every path
+   `ContextMenu` dismisses itself through. */
+.menu {
+  transform-origin: top center;
+  transition:
+    opacity   var(--d-quick) var(--e-out),
+    transform var(--d-quick) var(--e-out);
+}
+@starting-style {
+  .menu { opacity: 0; transform: translateY(calc(-4px * var(--travel))) scaleY(0.96); }
+}
+.menu.is-closing {
+  opacity: 0;
+  transform: translateY(calc(-4px * var(--travel))) scaleY(0.96);
+  transition-duration: var(--d-fast);
+  transition-timing-function: var(--e-in);
+  /* Dismissed means dismissed: the rows must not take another click. */
+  pointer-events: none;
+}
+.menu.submenu-list { transform-origin: top left; }
+@starting-style {
+  .menu.submenu-list { opacity: 0; transform: translateX(calc(-4px * var(--travel))); }
+}
+
+.dropdown-caret { transition: transform var(--d-fast) var(--e-out); }
+.dropdown.open .dropdown-caret { transform: rotate(180deg); }
+
+/* The tooltip's own delay is in `src/tooltip.ts`; this is only its arrival.
+   It is a `[hidden]` element, not a mounted one, so `display` carries the
+   state and has to be allowed to transition discretely. */
+.tooltip {
+  transition:
+    opacity   var(--d-instant) var(--e-out),
+    transform var(--d-instant) var(--e-out),
+    display   var(--d-instant) allow-discrete;
+}
+@starting-style {
+  .tooltip { opacity: 0; transform: translateY(calc(-3px * var(--travel))); }
+}
+.tooltip[hidden] {
+  opacity: 0;
+  transform: translateY(calc(-3px * var(--travel)));
+  transition-timing-function: var(--e-in);
+}
+
+/* --- Expand and collapse (§11.3) ----------------------------------------- */
+
+.tree-chevron, .git-chevron, .row-disclose { transition: transform var(--d-fast) var(--e-out); }
+.tree-chevron.open, .git-chevron.open { transform: rotate(90deg); }
+
+/* A directory's children grow and shrink by their own height — the one layout
+   property §5 sanctions animating. The inner element has to clip for `0fr` to
+   mean anything, but only downwards: the tree scrolls sideways for names
+   longer than the panel, and `overflow: hidden` would cut those off instead.
+   `overflow: visible clip` says exactly that, and a browser without it keeps
+   the `hidden` above. */
+.tree-branch {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--d-base) var(--e-out);
+}
+.tree-branch:not(.open) {
+  grid-template-rows: 0fr;
+  transition-duration: var(--d-fast);
+  transition-timing-function: var(--e-in);
+}
+.tree-branch > * { min-height: 0; overflow: hidden; overflow: visible clip; }
+@starting-style {
+  .tree-branch.open { grid-template-rows: 0fr; }
+}
+
+/* --- Dialogs and the overlays behind them (§11.4) ------------------------ */
+
+/* 300 in, 225 out, and the asymmetry is the point: an exit that matches its
+   entry reads as slow. */
+.overlay {
+  background: rgb(0 0 0 / 0.35);
+  transition: background-color var(--d-enter) var(--e-out);
+}
+@starting-style { .overlay { background: rgb(0 0 0 / 0); } }
+.overlay.is-closing {
+  background: rgb(0 0 0 / 0);
+  transition-duration: var(--d-exit);
+  transition-timing-function: var(--e-in);
+}
+
+.palette, .dialog {
+  transition:
+    opacity   var(--d-enter) var(--e-out),
+    transform var(--d-enter) var(--e-out);
+}
+@starting-style {
+  .palette, .dialog { opacity: 0; transform: scale(0.94) translateY(calc(-8px * var(--travel))); }
+}
+.overlay.is-closing .palette, .overlay.is-closing .dialog {
+  opacity: 0;
+  transform: scale(0.94);
+  transition-duration: var(--d-exit);
+  transition-timing-function: var(--e-in);
+}
+
+/* --- Sheets and panels (§11.5) ------------------------------------------- */
+
+/* The terminal's find bar comes down from the edge it is pinned to. */
+.searchbar {
+  transition:
+    opacity   var(--d-quick) var(--e-out),
+    transform var(--d-quick) var(--e-out);
+}
+@starting-style {
+  .searchbar { opacity: 0; transform: translateY(calc(-8px * var(--travel))); }
+}
+.searchbar.is-closing {
+  opacity: 0;
+  transform: translateY(calc(-8px * var(--travel)));
+  transition-duration: var(--d-fast);
+  transition-timing-function: var(--e-in);
+}
+
+/* The drag affordances of the layout tree: on and off, never in the way. */
+.drop-zone { transition: opacity var(--d-fast) var(--e-out); }
+@starting-style { .drop-zone { opacity: 0; } }
+
+/* --- Lists that appear (§11.6) ------------------------------------------- */
+
+/* Nothing here staggers, and that is the considered answer rather than an
+   omission. Every list in this application either arrives inside a surface
+   that is already animating — a popover, an overlay — or is filtered as you
+   type, and in both cases a per-row delay meters the results in behind the
+   keystroke that asked for them. The list's own arrival is the container's.
+   `--delay-stagger` stays defined for a list that one day appears alone. */
+
+/* --- Loading (§8) -------------------------------------------------------- */
+
+/* Under a second, show nothing: a read that lands quickly should never have
+   flashed a word about it. The delay is the whole mechanism — the element
+   unmounts when the answer arrives. */
+.tree-loading.loading {
+  animation: settle-in var(--d-base) var(--e-out) 1s backwards;
+}
+@keyframes settle-in {
+  from { opacity: 0; }
+}
+
+/* --- Toasts (§9, §11.10) ------------------------------------------------- */
+
+/* A notice carries an error, so nothing dismisses it but the reader (WCAG
+   2.2.1). It arrives from the corner it lives in. */
+.notice {
+  transition:
+    opacity   var(--d-enter) var(--e-out),
+    transform var(--d-enter) var(--e-out);
+}
+@starting-style {
+  .notice { opacity: 0; transform: translateX(calc(16px * var(--travel))); }
+}
+.notice.is-closing {
+  opacity: 0;
+  transform: translateX(calc(16px * var(--travel)));
+  transition-duration: var(--d-exit);
+  transition-timing-function: var(--e-in);
+}
+
+/* --- Tabs and their indicator -------------------------------------------- */
+
+/* The indicator starts and ends on screen, so it eases in and out (§3). §5
+   forbids animating `box-shadow`, so the underline is a pseudo-element of its
+   own and what moves is its opacity and its width — neither costs a layout,
+   and the shadow the tab already carried stays a still frame. */
+.tab, .sidebar-tabs [role="tab"], .statusbar button, .mode-switch button, .diff-header button {
+  position: relative;
+  transition:
+    background-color var(--d-instant) var(--e-out),
+    color            var(--d-instant) var(--e-out);
+}
+.tab::after, .sidebar-tabs [role="tab"]::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transform: scaleX(0.4);
+  transition:
+    opacity   var(--d-base) var(--e-in-out),
+    transform var(--d-base) var(--e-in-out);
+}
+.tab.active::after, .sidebar-tabs [role="tab"].active::after { opacity: 1; transform: none; }
+.editor-group:not(.active) .tab.active::after { background: var(--fg-faint); }
+/* Revealed by hover. `visibility` and `display: none` are discrete — the
+   first blinks off, the second moves the row's layout under the pointer —
+   so each of these is an opacity fade with the space already reserved. */
+.tab-close, .git-copy, .row-actions, .git-actions {
+  transition: opacity var(--d-instant) var(--e-out), color var(--d-instant) var(--e-out);
+}
+
+/* --- Reduced motion (§10) ------------------------------------------------ */
+
+/* Every distance above is written through `--travel`, which the token block
+   at the top of the file zeroes. Scale has no distance to zero, so it is
+   dropped here: the panel still opens, it simply does not grow into place. */
+@media (prefers-reduced-motion: reduce) {
+  .menu, .menu.is-closing,
+  .palette, .dialog,
+  .overlay.is-closing .palette, .overlay.is-closing .dialog,
+  button:active, .cm-lp-chip:active, .hunk-action:active, .crumb:active { transform: none; }
+  .tree-chevron, .git-chevron, .row-disclose, .dropdown-caret { transition: none; }
+  .tab::after, .sidebar-tabs [role="tab"]::after { transform: none; }
+  @starting-style {
+    .menu, .palette, .dialog { transform: none; }
+  }
+}
+
+/* --- Vendor ------------------------------------------------------------- */
+
+/* CodeMirror's caret blinks by animation, and xterm's cursor and overlays
+   fade; under reduce every one of them is movement the reader did not ask
+   for. A rule for any of these cannot live in an `EditorView.theme` — that
+   scopes every selector under the editor root. */
+@media (prefers-reduced-motion: reduce) {
+  .cm-cursor, .cm-dropCursor { animation: none !important; }
+  .xterm .xterm-cursor-blink, .xterm-decoration-overview-ruler { transition: none !important; animation: none !important; }
+}

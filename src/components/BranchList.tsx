@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { rank } from "../fuzzy";
+import { useDismiss } from "../motion";
 import type { Branches, RepoInfo, Session, Workspace } from "../types";
 import { Palette } from "./Palette";
 import { Prompt } from "./Prompt";
@@ -26,6 +27,7 @@ export function BranchList({ ws, session, info, onClose }: Props) {
   const [branches, setBranches] = useState<Branches | null>(null);
   const [query, setQuery] = useState("");
   const [step, setStep] = useState<Step>({ kind: "list" });
+  const [closing, dismiss] = useDismiss(onClose);
 
   const load = () => api.gitBranches(ws.id).then(setBranches).catch(report);
   useEffect(() => { void load(); }, [ws.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -127,8 +129,8 @@ export function BranchList({ ws, session, info, onClose }: Props) {
   const inWorkspace = (path: string) => session.workspaces.some((w) => w.path === path);
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="palette" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
+    <div className={`overlay${closing ? " is-closing" : ""}`} onMouseDown={dismiss}>
+      <div className="palette" onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") dismiss(); }}>
         <input autoFocus className="palette-input" placeholder="Branches — type to filter" value={query} onChange={(e) => setQuery(e.target.value)} />
         <div className="list-actions">
           <button onClick={() => setStep({ kind: "name" })}>＋ New branch…</button>

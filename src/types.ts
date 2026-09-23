@@ -31,6 +31,8 @@ export interface Workspace {
   /** A background terminal here printed since it was last viewed. */
   attention: boolean;
   git: GitSummary | null;
+  /** Opened from a repository's worktree list rather than named by the user. */
+  fromWorktree: boolean;
 }
 
 /** A split node, shared by the editor layout and the panel layout. */
@@ -70,6 +72,17 @@ export interface GitSummary {
   detached: boolean;
   state: string | null;
   isWorktree: boolean;
+  /** Every other worktree of this repository, as git lists them. */
+  worktrees: Worktree[];
+}
+
+/** A sibling worktree offered under its workspace in the selector. */
+export interface Worktree {
+  /** Absolute. */
+  path: string;
+  name: string;
+  branch: string | null;
+  isMain: boolean;
 }
 
 export interface TerminalTab {
@@ -230,6 +243,12 @@ export interface Branch {
 export interface Branches {
   local: Branch[];
   remote: string[];
+}
+
+/** What the desktop clipboard holds when it holds files, with absolute paths. */
+export interface ClipboardFiles {
+  paths: string[];
+  cut: boolean;
 }
 
 export interface WorktreeEntry {

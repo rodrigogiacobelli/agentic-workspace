@@ -5,8 +5,8 @@ import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
-  BlameLine, Branches, CommitDetail, DiffSpec, DirChanged, Entry, HotkeyStatus, ImportedTheme, LogEntry, RepoInfo, SearchHit,
-  Session, Settings, StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
+  BlameLine, Branches, ClipboardFiles, CommitDetail, DiffSpec, DirChanged, Entry, HotkeyStatus, ImportedTheme, LogEntry,
+  RepoInfo, SearchHit, Session, Settings, StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
 } from "./types";
 
 /** Terminal output arrives base64-encoded (see `pty::MAX_MESSAGE_BYTES`); the
@@ -26,7 +26,9 @@ export interface OpenAt {
 export const api = {
   getSession: () => invoke<Session>("get_session"),
   takeNotices: () => invoke<string[]>("take_notices"),
-  addWorkspace: (path: string, name?: string) => invoke<string>("add_workspace", { path, name: name ?? null }),
+  /** Opens a folder, or switches to the workspace already on it. */
+  addWorkspace: (path: string, name?: string, fromWorktree = false) =>
+    invoke<string>("add_workspace", { path, name: name ?? null, fromWorktree }),
   switchWorkspace: (id: string) => invoke<void>("switch_workspace", { id }),
   removeWorkspace: (id: string) => invoke<void>("remove_workspace", { id }),
   renameWorkspace: (id: string, name: string) => invoke<void>("rename_workspace", { id, name }),
@@ -132,9 +134,15 @@ export const api = {
     invoke<string>("duplicate_entry", { workspaceId, path }),
   trashEntry: (workspaceId: string, path: string) =>
     invoke<void>("trash_entry", { workspaceId, path }),
-  /** Copies, or moves when `cut`, an entry into a directory; returns the new path. */
+  /** Copies, or moves when `cut`, an absolute path into a workspace directory;
+   *  returns the new workspace-relative path. */
   pasteEntry: (workspaceId: string, from: string, toDir: string, cut: boolean) =>
     invoke<string>("paste_entry", { workspaceId, from, toDir, cut }),
+  /** The desktop clipboard's file list, empty when it holds anything else. */
+  clipboardFiles: () => invoke<ClipboardFiles>("clipboard_files"),
+  setClipboardFiles: (paths: string[], cut: boolean) =>
+    invoke<void>("set_clipboard_files", { paths, cut }),
+  clearClipboardFiles: () => invoke<void>("clear_clipboard_files"),
   revealEntry: (workspaceId: string, path: string) =>
     invoke<void>("reveal_entry", { workspaceId, path }),
   searchProject: (workspaceId: string, query: string, includeIgnored: boolean) =>

@@ -1,5 +1,6 @@
 mod agent;
 mod assets;
+mod clipboard;
 mod desktop;
 mod git;
 mod hotkey;
@@ -79,8 +80,24 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         if let Err(e) = pty::ensure_live(&handle, &id) {
             session::notice(&handle, format!("Could not restore the active workspace's terminals: {e:#}"));
         }
-        git::refresh_summary(&handle, &id);
     }
+    // Every workspace, not only the one on screen: the selector lists each
+    // one's branch and its worktrees, and a summary is what carries both. Off
+    // the main loop, because that is several `git` processes per workspace and
+    // the windows are already up (`standards-linux-desktop`).
+    let summaries = handle.clone();
+    std::thread::Builder::new()
+        .name("git-summaries".into())
+        .spawn(move || {
+            let all: Vec<String> = summaries.state::<AppState>().session.lock().workspaces.iter().map(|w| w.id.clone()).collect();
+            for id in all {
+                git::refresh_summary(&summaries, &id);
+            }
+            session::prune_worktrees(&summaries);
+            watch::sync(&summaries);
+            session::publish(&summaries);
+        })
+        .ok();
     watch::sync(&handle);
     session::persist(&handle);
 
@@ -295,6 +312,9 @@ pub fn run() {
             files::read_draft,
             files::delete_draft,
             files::write_file,
+            clipboard::clipboard_files,
+            clipboard::set_clipboard_files,
+            clipboard::clear_clipboard_files,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Agentic Workspace")
