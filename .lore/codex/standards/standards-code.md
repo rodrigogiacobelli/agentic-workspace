@@ -7,6 +7,7 @@ summary: The conventions binding this application's Rust backend and web
   cannot.
 related:
   - 008-tauri-v2-on-arch-kde
+  - standards-motion
   - 003-source-markdown-is-canonical
   - standards-testing
   - standards-linux-desktop

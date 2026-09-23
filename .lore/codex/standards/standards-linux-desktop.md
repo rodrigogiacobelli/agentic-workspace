@@ -2,13 +2,15 @@
 id: standards-linux-desktop
 title: Linux desktop standard
 summary: The Arch, KDE and Wayland rules this application complies with — the
-  four-way application identity chain, the WebKitGTK NVIDIA workaround, window
-  placement limits, global shortcut binding through the portal, overlay
+  four-way application identity chain, the WebKitGTK NVIDIA workaround, the CSS
+  a declaration is silently dropped for, window placement limits, the focus that
+  gates a clipboard read, global shortcut binding through the portal, overlay
   scrollbars over app-drawn menus, the main loop a synchronous command blocks,
   the scheduling class an auto-nice daemon hands down, the AppImage strip flag
   and the Cargo version floor. Each fails silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
+  - standards-motion
   - 001-two-os-windows
   - standards-code
   - operations-running-agentic-workspace
@@ -79,6 +81,23 @@ reads the variable back, and a terminal takes the DOM renderer whenever it is
 set. Read that before turning GPU drawing on anywhere: the measurement that
 finds this is keystroke-to-pixel, and every measurement of the round trip
 underneath it comes back at 6 ms whether the fault is present or not.
+## WebKitGTK drops a CSS declaration it cannot parse
+
+A declaration whose value the engine does not understand is discarded, and
+whatever preceded it in the same rule stands instead. Nothing is reported. A
+rule written for a feature this engine lacks therefore behaves as though it
+had never been written, and what the reader sees is the fallback.
+
+WebKitGTK 2.52 parses `@starting-style`, `transition-behavior: allow-discrete`,
+the two-value `overflow: visible clip`, and a transition over
+`grid-template-rows`. It does not parse an intrinsic size inside a maths
+function: `min-width: min(120px, max-content)` is dropped whole, and a
+`min-width: 0` written above it is what applies.
+
+`CSS.supports()` evaluated in the running webview answers for this engine. A
+browser support table answers for Safari, which is versioned separately from
+WebKitGTK and is not the same build.
+
 ## WebKitGTK paints overlay scrollbars above every layer
 
 WebKitGTK draws the overlay scrollbar of a scrolling element after everything
@@ -143,6 +162,25 @@ Where placement genuinely matters, KWin's scripting interface is the mechanism,
 and a loaded script stays resident until unloaded — an asynchronous operation.
 Reloading the same script path too soon returns `-1`, a failure whose only
 symptom is a window that never moves.
+
+## The clipboard reaches a window that has focus
+
+The compositor offers the selection to the surface holding keyboard focus. A
+client with no focused surface is offered nothing and reads an empty clipboard,
+whatever another application has copied, and reports no error for it. A paste
+the user drives is always served, because the keystroke that asked for it is
+the focus; a read on a timer, from a hidden window, or from a second process
+beside the application is not.
+
+Nor can a client revoke a selection it does not own — `gtk_clipboard_clear`
+releases one this process holds and does nothing to one another application
+holds. Retiring a cut that came from a file manager means taking the selection,
+not clearing it.
+
+Together these put an end-to-end check of the file clipboard beyond a script:
+a helper that copies a file has no focused window when it does so, and one that
+reads is offered nothing. `src-tauri/src/clipboard.rs` is exercised by copying
+in a file manager and pasting in the tree.
 
 ## Global shortcuts bind through the XDG portal
 
