@@ -6,6 +6,7 @@ use crate::store;
 use crate::tree;
 use crate::watch;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -18,12 +19,23 @@ const RECENT_FILES_MAX: usize = 50;
 /// the file. Returns the snapshot it wrote.
 pub fn persist(app: &AppHandle) -> Session {
     let state = app.state::<AppState>();
+    // A readlink per shell is the slow half of this function, and `ptys` is
+    // the lock a keystroke needs. Take the pids under it and let it go, then
+    // read `/proc` with nothing held (PERF-05).
+    let pids: Vec<(String, u32)> = {
+        let ptys = state.ptys.lock();
+        ptys.iter().filter_map(|(id, live)| live.pid.map(|pid| (id.clone(), pid))).collect()
+    };
+    let cwds: HashMap<String, PathBuf> = pids
+        .into_iter()
+        .filter_map(|(id, pid)| std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|cwd| (id, cwd)))
+        .collect();
     let snapshot = {
         let mut session = state.session.lock();
-        let ptys = state.ptys.lock();
         let mut attention = state.attention.lock();
         let git = state.git.lock();
         let active = session.active.clone();
+        let mut foreground = None;
         for ws in session.workspaces.iter_mut() {
             ws.ensure_groups();
             ws.available = ws.path.is_dir();
@@ -32,17 +44,19 @@ pub fn persist(app: &AppHandle) -> Session {
             if active.as_deref() == Some(&ws.id) {
                 if let Some(t) = ws.active_terminal.as_deref() {
                     attention.remove(t);
+                    foreground = Some(t.to_string());
                 }
             }
             ws.attention = false;
             for tab in ws.terminals.iter_mut() {
-                if let Some(cwd) = ptys.get(&tab.id).and_then(|live| live.cwd()) {
-                    tab.cwd = cwd;
+                if let Some(cwd) = cwds.get(&tab.id) {
+                    tab.cwd = cwd.clone();
                 }
                 tab.attention = attention.contains(&tab.id);
                 ws.attention |= tab.attention;
             }
         }
+        *state.foreground.lock() = foreground;
         session.clone()
     };
     if let Err(e) = store::save(&state.data_dir, &snapshot) {

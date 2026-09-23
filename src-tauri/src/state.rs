@@ -358,6 +358,11 @@ pub struct AppState {
     pub settings: Mutex<crate::settings::Settings>,
     /// Terminal ids that printed while out of view.
     pub attention: Mutex<std::collections::HashSet<String>>,
+    /// The terminal tab on screen: the active workspace's active terminal,
+    /// refreshed by `session::persist`. A chunk of output reads this instead
+    /// of the session, whose lock is held across the whole of `persist`
+    /// (PERF-04).
+    pub foreground: Mutex<Option<String>>,
     pub activities: crate::agent::Activities,
     /// Repository summaries keyed by workspace id, refreshed on git changes.
     pub git: Mutex<HashMap<String, GitSummary>>,

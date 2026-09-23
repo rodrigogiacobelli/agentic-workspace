@@ -92,6 +92,20 @@ fn entry_contents(exec: &str) -> String {
     )
 }
 
+/// Whether the webview composites through the GPU.
+///
+/// `apply_webkit_workaround` turns WebKit's DMA-BUF renderer off on Wayland,
+/// because leaving it on is a protocol error on the NVIDIA driver
+/// (`standards-linux-desktop`). With it off, a WebGL canvas is presented
+/// through software, and xterm's WebGL renderer — which repaints the canvas
+/// for every character — becomes far slower than drawing the same cells into
+/// the DOM. Slow enough to stall typing for about a second. The terminal asks
+/// this before choosing a renderer.
+#[tauri::command]
+pub fn gpu_accelerated() -> bool {
+    std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

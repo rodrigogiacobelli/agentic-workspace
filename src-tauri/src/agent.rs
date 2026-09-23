@@ -25,37 +25,32 @@ pub struct Activity {
 
 pub type Activities = Mutex<HashMap<String, Activity>>;
 
-/// Called from the output thread of every terminal, after each chunk.
+/// Called from the output thread of every terminal, after each chunk. This is
+/// the hot path: a full-screen program redraws on every keystroke, so it runs
+/// as often as the user types. It takes no lock that `session::persist` holds,
+/// and it reaches the session at all only on the first chunk a background
+/// terminal prints after being noticed (PERF-04).
 pub fn on_output(app: &AppHandle, terminal_id: &str) {
     let state = app.state::<AppState>();
-    let (background, ws_id) = {
-        let session = state.session.lock();
-        match session.workspace_of_terminal_mut_ref(terminal_id) {
-            Some(ws) => {
-                let ws_active = session.active.as_deref() == Some(&ws.id);
-                let tab_active = ws.active_terminal.as_deref() == Some(terminal_id);
-                (!(ws_active && tab_active), ws.id.clone())
-            }
-            None => return,
-        }
-    };
-    let _ = ws_id;
-    let mut activities = state.activities.lock();
-    let activity = activities.entry(terminal_id.to_string()).or_default();
-    activity.last_output = Some(Instant::now());
-    if background {
-        let newly = state.attention.lock().insert(terminal_id.to_string());
-        let ws_background = {
-            let session = state.session.lock();
-            session.workspace_of_terminal_mut_ref(terminal_id).map(|ws| session.active.as_deref() != Some(&ws.id)).unwrap_or(false)
-        };
-        if ws_background {
+    let foreground = state.foreground.lock().as_deref() == Some(terminal_id);
+    {
+        let mut activities = state.activities.lock();
+        let activity = activities.entry(terminal_id.to_string()).or_default();
+        activity.last_output = Some(Instant::now());
+        // `quiet_loop` is what decides whether a notification is due, and it
+        // already drops every terminal in the workspace on screen (AGT-05),
+        // so arming this needs no reading of the session here.
+        if !foreground {
             activity.busy = true;
         }
-        drop(activities);
-        if newly {
-            session::publish(app);
-        }
+    }
+    if foreground {
+        return;
+    }
+    // The badge goes up once per quiet period. This is the only branch that
+    // reaches the session, and output alone never takes it there.
+    if state.attention.lock().insert(terminal_id.to_string()) {
+        session::publish(app);
     }
 }
 

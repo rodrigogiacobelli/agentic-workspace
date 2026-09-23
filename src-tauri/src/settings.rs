@@ -40,6 +40,13 @@ pub struct Settings {
     pub panel_tabs: String,
     /// The mode a markdown file opens in: `source`, `split` or `rich`.
     pub markdown_mode: String,
+    /// The program a terminal tab runs. Empty means `$SHELL`, which is what
+    /// the desktop's own terminal would start.
+    pub terminal_shell: String,
+    /// Which renderer a terminal draws with: `auto`, `webgl` or `dom`. `auto`
+    /// takes WebGL only where the webview composites on the GPU — see
+    /// `desktop::gpu_accelerated`.
+    pub terminal_gpu: String,
     /// Where the Files, Search, Git and Outline panels sit, as the frontend
     /// lays them out; the application's, not a workspace's (DOCK-08). Null
     /// until a panel is first moved.
@@ -79,6 +86,8 @@ impl Default for Settings {
             languages: HashMap::new(),
             panel_tabs: "text".into(),
             markdown_mode: "source".into(),
+            terminal_shell: String::new(),
+            terminal_gpu: "auto".into(),
             panel_layout: serde_json::Value::Null,
             workspaces: HashMap::new(),
         }

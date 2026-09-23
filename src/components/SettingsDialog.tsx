@@ -104,6 +104,15 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
         {text("Font family", current.terminalFontFamily, (v) => set({ terminalFontFamily: v }), "system monospace")}
         {number("Font size", current.terminalFontSize, (v) => set({ terminalFontSize: v }), 8, 32)}
         {number("Line height", current.terminalLineHeight, (v) => set({ terminalLineHeight: v }), 1, 2, 0.05)}
+        {text("Shell", current.terminalShell, (v) => set({ terminalShell: v }), "$SHELL — applies to the next terminal")}
+        <label className="setting">
+          <span>Renderer — GPU drawing is slower where the webview cannot reach the GPU</span>
+          <Dropdown
+            value={current.terminalGpu}
+            options={[{ id: "auto", label: "Auto" }, { id: "webgl", label: "GPU (WebGL)" }, { id: "dom", label: "DOM" }]}
+            onChange={(id) => set({ terminalGpu: id as "auto" | "webgl" | "dom" })}
+          />
+        </label>
         <h3>Editor</h3>
         {text("Monospace font", current.editorFontFamily, (v) => set({ editorFontFamily: v }), "system monospace")}
         {number("Monospace size", current.editorFontSize, (v) => set({ editorFontSize: v }), 8, 32)}

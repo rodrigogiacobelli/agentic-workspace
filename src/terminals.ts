@@ -102,11 +102,14 @@ settings.subscribe((s) => {
 export async function mount(id: string, container: HTMLElement): Promise<Instance> {
   let inst = registry.get(id);
   if (!inst) {
+    // Settled before the terminal is opened, so it never draws a frame with
+    // one renderer and the rest with another.
+    const accelerated = await gpuAccelerated();
     inst = create(id);
     registry.set(id, inst);
     container.replaceChildren(inst.el);
     inst.term.open(inst.el);
-    loadWebgl(inst.term);
+    if (useWebgl(settings.get()?.terminalGpu, accelerated)) loadWebgl(inst.term);
     inst.fit.fit();
     inst.term.focus();
     await attach(id, inst);
@@ -176,19 +179,68 @@ function create(id: string): Instance {
   return inst;
 }
 
+/** Whether the webview composites on the GPU. Asked once; every terminal that
+ * follows waits on the same answer. */
+let gpu: Promise<boolean> | null = null;
+function gpuAccelerated(): Promise<boolean> {
+  if (!gpu) gpu = api.gpuAccelerated().catch(() => false);
+  return gpu;
+}
+
+/** Set when WebGL has failed once. xterm cannot be asked twice in one process
+ * without the same failure, so every later terminal draws into the DOM. */
+let webglBroken = false;
+
+/** Which renderer this terminal draws with.
+ *
+ * WebGL is the faster of the two only where the webview reaches the GPU. Where
+ * it does not — the NVIDIA workaround turns WebKit's DMA-BUF renderer off, and
+ * this application does that on every Wayland session — the canvas is
+ * presented through software, and repainting it for each character costs far
+ * more than writing the same cells into the DOM: enough to hold a keystroke
+ * for about a second. `auto` is what decides; the setting overrides it. */
+function useWebgl(setting: string | undefined, accelerated: boolean): boolean {
+  if (webglBroken) return false;
+  if (setting === "webgl") return true;
+  if (setting === "dom") return false;
+  return accelerated;
+}
+
 function loadWebgl(term: Terminal): void {
   try {
     const webgl = new WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
+    webgl.onContextLoss(() => {
+      webglBroken = true;
+      webgl.dispose();
+    });
     term.loadAddon(webgl);
   } catch {
-    // The DOM renderer is the fallback and needs nothing.
+    webglBroken = true;
   }
 }
 
+/** Characters parsed before the backend is told, matching the size it resumes
+ * at. One call per this many characters rather than one per message, so a
+ * flooding terminal costs a handful of calls a second. */
+const ACK_SIZE = 5_000;
+
 async function attach(id: string, inst: Instance): Promise<void> {
   const channel = new Channel<OutputChunk>();
-  channel.onmessage = (chunk) => inst.term.write(toBytes(chunk));
+  // The acknowledgement is sent from `write`'s callback, which runs once
+  // xterm has actually parsed the bytes — so this reports what the terminal
+  // has caught up on, not merely what arrived, and the backend stops reading
+  // the pseudoterminal when it gets too far ahead.
+  let parsed = 0;
+  channel.onmessage = (chunk) => {
+    const bytes = toBytes(chunk);
+    inst.term.write(bytes, () => {
+      parsed += bytes.length;
+      while (parsed > ACK_SIZE) {
+        parsed -= ACK_SIZE;
+        void api.terminalAck(id, ACK_SIZE).catch(() => {});
+      }
+    });
+  };
   const tail = await api.terminalAttach(id, inst.term.cols, inst.term.rows, channel);
   if (tail.byteLength > 0) inst.term.write(new Uint8Array(tail));
 }

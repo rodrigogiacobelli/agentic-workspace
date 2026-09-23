@@ -3,8 +3,10 @@ id: standards-linux-desktop
 title: Linux desktop standard
 summary: The Arch, KDE and Wayland rules this application complies with — the
   four-way application identity chain, the WebKitGTK NVIDIA workaround, window
-  placement limits, global shortcut binding through the portal, the AppImage
-  strip flag and the Cargo version floor. Each fails silently when broken.
+  placement limits, global shortcut binding through the portal, overlay
+  scrollbars over app-drawn menus, the main loop a synchronous command blocks,
+  the scheduling class an auto-nice daemon hands down, the AppImage strip flag
+  and the Cargo version floor. Each fails silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
   - 001-two-os-windows
@@ -67,6 +69,69 @@ WebKitGTK's DMA-BUF renderer trips a Wayland explicit-sync protocol error on
 the NVIDIA proprietary driver and kills the process before any window appears.
 The application sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` under Wayland unless
 the variable is already set.
+
+That variable decides how the terminal draws. With the DMA-BUF renderer off
+the webview has no GPU path, and a WebGL canvas is presented through software:
+xterm's WebGL renderer repaints its canvas for every character, and a keystroke
+then waits about a second to appear on screen. Nothing reports it — the addon
+loads, reports success, and draws correct output slowly. `desktop::gpu_accelerated`
+reads the variable back, and a terminal takes the DOM renderer whenever it is
+set. Read that before turning GPU drawing on anywhere: the measurement that
+finds this is keystroke-to-pixel, and every measurement of the round trip
+underneath it comes back at 6 ms whether the fault is present or not.
+## WebKitGTK paints overlay scrollbars above every layer
+
+WebKitGTK draws the overlay scrollbar of a scrolling element after everything
+else on the page, whatever the stacking order says: a `position: fixed` menu
+with a `z-index`, even on its own compositing layer, still shows the scrollbar
+of the panel beneath it running across its rows. `scrollbar-color` recolours
+the bar and `::-webkit-scrollbar` rules are ignored; neither moves it down.
+The application therefore draws every scrollbar itself. `src/scrollbars.ts`
+turns the native bars off across the document with `scrollbar-width: none` and
+draws a thumb over the trailing edge of whichever surface is being scrolled or
+hovered, one at a time; while a menu or a dialog is open, only a scroller
+inside one gets a bar. An app-drawn bar takes no layout space either, so
+nothing shifts when it appears.
+
+Layering is one scale of custom properties at the top of the stylesheet, from
+`--z-drop` to `--z-tooltip`, and every floating layer sits above the window's
+own resize band: the band is invisible but takes clicks, so a menu opened
+against the edge of the screen would otherwise have five unclickable pixels.
+
+## An auto-nice daemon demotes the whole application
+
+`ananicy` and the daemons like it match a process by the name the kernel
+truncates into `/proc/<pid>/comm` and apply a class from their rule set. The
+stock rules put `node` in `BG_CPUIO`: nice 16, the idle I/O class, and the
+idle scheduling class, whose weight is 3 against a normal task's 1024.
+`pnpm tauri dev` is node. A child inherits all three through fork and exec, so
+the application, both of its web processes and every shell started in one of
+its terminals run there too.
+
+Nothing reports this, and on an idle machine nothing is felt. As soon as
+anything else wants the processor, typing in a terminal stalls — for seconds
+when the machine is genuinely busy, because every hop of the echo (the GTK
+main loop, the web process, the shell) is in the starved class. `restore_scheduling`
+in `lib.rs` leaves the idle class before the web processes are forked, so the
+repair is inherited; it acts only when the policy is already `SCHED_IDLE` and
+lets every call fail quietly, since a system whose `RLIMIT_NICE` forbids the
+change keeps what it was given. A release build launched from its desktop
+entry is not a child of node and returns at the first line.
+
+`chrt -p <pid>` and `ionice -p <pid>` are the check. Do this before believing
+any latency measurement taken on this machine.
+
+## A synchronous Tauri command blocks the window
+
+`#[tauri::command]` on a plain `fn` runs the body inline in the IPC handler,
+which on GTK is the main loop. Every other message waits behind it: a `git`
+or ripgrep call there is felt as input delay in the terminal, because the
+keystroke's `terminal_write` and the shell's echo both cross that same loop
+(the echo reaches the webview through `eval`). Commands that read the
+filesystem or start a process carry `#[tauri::command(async)]`, which runs
+them on the async runtime instead. Commands whose order matters — a write to
+a file, a keystroke to a pseudoterminal, a mutation of the session — stay
+synchronous, because two spawned tasks can finish in either order.
 
 ## Window position belongs to the compositor
 

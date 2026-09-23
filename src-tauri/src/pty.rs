@@ -4,11 +4,14 @@
 use crate::session;
 use crate::state::{AppState, TerminalTab};
 use anyhow::{Context, Result};
-use parking_lot::Mutex;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use parking_lot::{Condvar, Mutex};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::{AppHandle, Manager};
 
@@ -16,6 +19,47 @@ use tauri::{AppHandle, Manager};
 /// reloaded webview. Roughly ten thousand lines of ordinary output.
 const BUFFER_MAX: usize = 2 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
+
+/// How long output accumulates before it is handed to the view as one message.
+///
+/// A read of a pseudoterminal returns the moment a single byte is there, so a
+/// program that draws a screen out of short escape sequences produces hundreds
+/// of reads a second — measured here, a 30 fps full-screen redraw carrying
+/// 21 KB/s arrives as 981 reads a second averaging 22 bytes. One message per
+/// read puts every one of those on the GTK main thread, which is also the
+/// thread that delivers key presses, and typing stalls for seconds. Batching
+/// on a window turns that same second of output into 29 messages.
+///
+/// The window is armed by the first byte to arrive and is never re-armed, so
+/// output is delayed by at most this, however hard the program writes. This is
+/// VSCode's `TerminalDataBufferer`, whose `throttleBy` is the same 5 ms
+/// (`src/vs/platform/terminal/common/terminalDataBuffering.ts`).
+const FLUSH_WINDOW: Duration = Duration::from_millis(5);
+
+/// Flow control, from VSCode's `FlowControlConstants`
+/// (`src/vs/platform/terminal/common/terminal.ts`). The view acknowledges what
+/// it has parsed; past the high mark the reader stops taking bytes from the
+/// pseudoterminal, so the kernel buffer fills and the program writing into it
+/// blocks, rather than the backlog growing in this process without bound.
+const HIGH_WATERMARK_CHARS: usize = 100_000;
+/// Resuming only at zero would stutter, so the reader restarts here instead.
+/// Must not be below the view's acknowledgement size or it would never resume.
+const LOW_WATERMARK_CHARS: usize = 5_000;
+
+/// The most bytes one message carries.
+///
+/// Tauri delivers a channel message in one of two ways: by evaluating a script
+/// on the webview, or — past a size — by parking the body and having the page
+/// fetch it back over a second round trip. Raw bytes take the fetch path at
+/// 1 KB, a JSON payload only at 8 KB (`MAX_RAW_DIRECT_EXECUTE_THRESHOLD` and
+/// `MAX_JSON_DIRECT_EXECUTE_THRESHOLD` in tauri's `ipc/channel.rs`). Batching
+/// pushes every message over 1 KB, so raw bytes would put all of this on the
+/// slower path — and because the view refuses to hand a message to the
+/// terminal until every earlier one has arrived, one message on the fetch path
+/// holds up every message behind it. Base64 under the JSON threshold keeps all
+/// of them on the one fast path, in order. Base64 grows by four thirds and the
+/// quotes add two, so 6000 bytes encodes to 8002 — inside the 8192 limit.
+const MAX_MESSAGE_BYTES: usize = 6_000;
 
 /// Set when the launcher exported `WEBKIT_DISABLE_DMABUF_RENDERER` itself, so
 /// shells do not inherit a variable the user never set.
@@ -26,7 +70,18 @@ pub struct Live {
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pub pid: Option<u32>,
-    shared: Arc<Mutex<Output>>,
+    stream: Arc<Stream>,
+}
+
+/// The bytes leaving one pseudoterminal, and the two conditions the reader and
+/// the flusher wait on.
+struct Stream {
+    out: Mutex<Output>,
+    /// Raised when the first byte of a window arrives: it starts the flusher's
+    /// clock. Nothing re-arms it until that window has been flushed.
+    armed: Condvar,
+    /// Raised when the view has caught up enough for the reader to go on.
+    drained: Condvar,
 }
 
 /// The buffered tail and the attached view, under one lock so that attaching
@@ -34,14 +89,15 @@ pub struct Live {
 struct Output {
     buffer: Vec<u8>,
     sink: Option<Channel<InvokeResponseBody>>,
+    /// Read from the pseudoterminal, not yet handed to the view.
+    pending: Vec<u8>,
+    /// Sent to the view and not yet reported parsed.
+    unacked: usize,
+    /// The pseudoterminal has hung up; both threads are to stop.
+    closed: bool,
 }
 
 impl Live {
-    pub fn cwd(&self) -> Option<PathBuf> {
-        let pid = self.pid?;
-        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
-    }
-
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         self.master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -54,6 +110,14 @@ impl Live {
 
     /// Delivers `SIGHUP`; dropping the master afterwards hangs up the line.
     pub fn hangup(&mut self) {
+        // A reader held at the high-water mark is waiting on the view, not on
+        // the shell, and would never notice the hangup on its own.
+        {
+            let mut out = self.stream.out.lock();
+            out.closed = true;
+        }
+        self.stream.drained.notify_one();
+        self.stream.armed.notify_one();
         let _ = self.killer.kill();
     }
 }
@@ -64,7 +128,15 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .context("allocating a pseudoterminal")?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    // The setting names the program; empty means the one the desktop would
+    // have started. A tab takes it when it is opened, so changing it applies
+    // to the next terminal rather than disturbing a running one.
+    let chosen = app.state::<AppState>().settings.lock().terminal_shell.trim().to_string();
+    let shell = if chosen.is_empty() {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    } else {
+        chosen
+    };
     let mut cmd = CommandBuilder::new(&shell);
     cmd.arg("-l");
     cmd.cwd(cwd);
@@ -84,9 +156,14 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
     let killer = child.clone_killer();
     let mut reader = pair.master.try_clone_reader().context("opening the output reader")?;
     let writer = pair.master.take_writer().context("opening the input writer")?;
-    let shared = Arc::new(Mutex::new(Output { buffer: Vec::new(), sink: None }));
+    let stream = Arc::new(Stream {
+        out: Mutex::new(Output { buffer: Vec::new(), sink: None, pending: Vec::new(), unacked: 0, closed: false }),
+        armed: Condvar::new(),
+        drained: Condvar::new(),
+    });
 
-    let pump = Arc::clone(&shared);
+    let app_for_flush = app.clone();
+    let pump = Arc::clone(&stream);
     let exited_id = id.clone();
     std::thread::Builder::new()
         .name(format!("pty-{id}"))
@@ -98,26 +175,84 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
                     Ok(n) => n,
                 };
                 let chunk = &buf[..n];
-                {
-                    let mut out = pump.lock();
-                    out.buffer.extend_from_slice(chunk);
-                    trim(&mut out.buffer);
-                    let delivered = match &out.sink {
-                        Some(sink) => sink.send(InvokeResponseBody::Raw(chunk.to_vec())).is_ok(),
-                        None => true,
-                    };
-                    if !delivered {
-                        out.sink = None;
-                    }
+                let mut out = pump.out.lock();
+                out.buffer.extend_from_slice(chunk);
+                trim(&mut out.buffer);
+                // The first byte of a window starts the flusher's clock.
+                let first = out.pending.is_empty();
+                out.pending.extend_from_slice(chunk);
+                if first {
+                    pump.armed.notify_one();
                 }
-                crate::agent::on_output(&app, &exited_id);
+                // Past the high mark, stop reading until the view catches up.
+                // The kernel's buffer fills and the program writing blocks.
+                while out.unacked >= HIGH_WATERMARK_CHARS && !out.closed {
+                    pump.drained.wait(&mut out);
+                }
+            }
+            {
+                let mut out = pump.out.lock();
+                out.closed = true;
+                pump.armed.notify_one();
             }
             let _ = child.wait();
             on_exit(&app, &exited_id);
         })
         .context("starting the output thread")?;
 
-    Ok(Live { master: pair.master, writer, killer, pid, shared })
+    let drain = Arc::clone(&stream);
+    let flush_app = app_for_flush;
+    let flush_id = id.clone();
+    std::thread::Builder::new()
+        .name(format!("pty-flush-{id}"))
+        .spawn(move || loop {
+            {
+                let mut out = drain.out.lock();
+                while out.pending.is_empty() && !out.closed {
+                    drain.armed.wait(&mut out);
+                }
+                if out.closed && out.pending.is_empty() {
+                    return;
+                }
+            }
+            // The window. Everything the program writes inside it leaves as
+            // one message; the lock is not held while it runs.
+            std::thread::sleep(FLUSH_WINDOW);
+            {
+                let mut out = drain.out.lock();
+                let payload = std::mem::take(&mut out.pending);
+                // Only what a view actually received is owed an
+                // acknowledgement; with no view attached there is no backlog.
+                if !payload.is_empty() && out.sink.is_some() {
+                    let mut sent = 0usize;
+                    let mut gone = false;
+                    for piece in payload.chunks(MAX_MESSAGE_BYTES) {
+                        // Base64's alphabet holds nothing JSON escapes, so the
+                        // quoted string is the encoding, with no second pass.
+                        let message = format!("\"{}\"", BASE64.encode(piece));
+                        match &out.sink {
+                            Some(sink) if sink.send(InvokeResponseBody::Json(message)).is_ok() => sent += piece.len(),
+                            _ => {
+                                gone = true;
+                                break;
+                            }
+                        }
+                    }
+                    if gone {
+                        out.sink = None;
+                        out.unacked = 0;
+                        drain.drained.notify_one();
+                    } else {
+                        out.unacked += sent;
+                    }
+                }
+            }
+            // Once per window rather than once per read.
+            crate::agent::on_output(&flush_app, &flush_id);
+        })
+        .context("starting the flush thread")?;
+
+    Ok(Live { master: pair.master, writer, killer, pid, stream })
 }
 
 /// Drops the oldest bytes past the cap, cutting at a line start so a replay
@@ -241,8 +376,13 @@ pub fn terminal_attach(
 ) -> Result<Response, String> {
     with_live(&state, &id, |live| {
         let tail = {
-            let mut out = live.shared.lock();
+            let mut out = live.stream.out.lock();
             out.sink = Some(on_output);
+            // The tail carries whatever was waiting for a window, and the new
+            // view owes nothing for what the old one was sent.
+            out.pending.clear();
+            out.unacked = 0;
+            live.stream.drained.notify_one();
             out.buffer.clone()
         };
         live.resize(cols, rows)?;
@@ -253,7 +393,24 @@ pub fn terminal_attach(
 #[tauri::command]
 pub fn terminal_detach(state: tauri::State<AppState>, id: String) {
     if let Some(live) = state.ptys.lock().get(&id) {
-        live.shared.lock().sink = None;
+        let mut out = live.stream.out.lock();
+        out.sink = None;
+        // Nothing is going to acknowledge what the departing view held.
+        out.unacked = 0;
+        live.stream.drained.notify_one();
+    }
+}
+
+/// The view reports what it has parsed. Sent once per `ACK_SIZE` characters
+/// rather than per message, so a flood costs a handful of calls a second.
+#[tauri::command]
+pub fn terminal_ack(state: tauri::State<AppState>, id: String, chars: usize) {
+    if let Some(live) = state.ptys.lock().get(&id) {
+        let mut out = live.stream.out.lock();
+        out.unacked = out.unacked.saturating_sub(chars);
+        if out.unacked < LOW_WATERMARK_CHARS {
+            live.stream.drained.notify_one();
+        }
     }
 }
 

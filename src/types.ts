@@ -156,6 +156,10 @@ export interface Settings {
   panelTabs: "text" | "icons";
   /** The mode a markdown file opens in. */
   markdownMode: "source" | "split" | "rich";
+  /** The program a terminal tab runs; empty means `$SHELL`. */
+  terminalShell: string;
+  /** Which renderer a terminal draws with. */
+  terminalGpu: "auto" | "webgl" | "dom";
   panelLayout: PanelLayout | null;
   workspaces: Record<string, WorkspaceSettings>;
 }
@@ -189,11 +193,12 @@ export interface StatusEntry {
 
 export interface LogEntry {
   hash: string;
-  short: string;
   subject: string;
   author: string;
   date: string;
   timestamp: number;
+  /** Subject and body together, shown in the history's hover popup. */
+  message: string;
 }
 
 export interface CommitDetail {

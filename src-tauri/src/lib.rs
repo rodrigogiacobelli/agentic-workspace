@@ -57,6 +57,7 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         session: Mutex::new(session),
         settings: Mutex::new(settings::load(&data_dir)),
         attention: Mutex::new(std::collections::HashSet::new()),
+        foreground: Mutex::new(None),
         activities: Mutex::new(HashMap::new()),
         git: Mutex::new(HashMap::new()),
         hotkey: Mutex::new(hotkey::Hotkey::default()),
@@ -131,6 +132,35 @@ fn apply_webkit_workaround() {
     }
 }
 
+/// Auto-nice daemons match `node` by name and put it in the idle scheduling
+/// class: `ananicy`'s stock rules ship exactly that, `pnpm tauri dev` is node,
+/// and a child inherits the policy, the nice value and the I/O class through
+/// both fork and exec. The application, its two web processes and every shell
+/// started in a terminal then run at SCHED_IDLE, whose weight is 3 against a
+/// normal task's 1024. Nothing reports it. On an idle machine nothing is felt
+/// either; the moment anything else wants the processor, typing in a terminal
+/// stalls, for seconds under real load. The demotion is undone here, before
+/// the web processes are forked, so that they inherit the repair. A release
+/// build launched from its desktop entry is not a child of node, finds itself
+/// in the normal class, and returns at the first line.
+fn restore_scheduling() {
+    // SAFETY: each call names this process and is allowed to fail — a system
+    // whose RLIMIT_NICE forbids the change keeps the policy it was given.
+    unsafe {
+        if libc::sched_getscheduler(0) != libc::SCHED_IDLE {
+            return;
+        }
+        let normal = libc::sched_param { sched_priority: 0 };
+        libc::sched_setscheduler(0, libc::SCHED_OTHER, &normal);
+        libc::setpriority(libc::PRIO_PROCESS, 0, 0);
+        // The same demotion covers disk access, where the idle class is
+        // starved outright while anything else reads. `ioprio_set` has no
+        // wrapper: best-effort is class 2, shifted 13, with the default
+        // priority 4.
+        libc::syscall(libc::SYS_ioprio_set, 1, 0, (2 << 13) | 4);
+    }
+}
+
 /// GTK3 takes a Wayland toplevel's `app_id` from `g_get_prgname()`, which
 /// defaults to the executable name; the task bar resolves a window to a desktop
 /// entry by that id. Naming the process after the identifier keeps the chain
@@ -141,6 +171,7 @@ fn set_application_id() {
 }
 
 pub fn run() {
+    restore_scheduling();
     set_application_id();
     apply_webkit_workaround();
 
@@ -197,6 +228,7 @@ pub fn run() {
             session::view_remove,
             session::view_reorder,
             session::set_active_view,
+            desktop::gpu_accelerated,
             settings::get_settings,
             settings::update_settings,
             themes::import_themes,
@@ -241,6 +273,7 @@ pub fn run() {
             pty::terminal_close,
             pty::terminal_attach,
             pty::terminal_detach,
+            pty::terminal_ack,
             pty::terminal_write,
             pty::terminal_resize,
             pty::terminal_rename,

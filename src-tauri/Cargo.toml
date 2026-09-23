@@ -36,6 +36,11 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts"] }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 futures-util = "0.3"
+# Only for the scheduling repair at startup; already in the tree through Tauri.
+libc = "0.2"
+# Terminal output rides tauri's channel as base64: see pty::MAX_MESSAGE_BYTES.
+# Already in the tree through Tauri.
+base64 = "0.22"
 
 [profile.release]
 opt-level = 3

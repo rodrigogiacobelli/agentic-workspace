@@ -9,7 +9,9 @@ import type {
   Session, Settings, StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
 } from "./types";
 
-export type OutputChunk = ArrayBuffer | Uint8Array | number[];
+/** Terminal output arrives base64-encoded (see `pty::MAX_MESSAGE_BYTES`); the
+ * other shapes are what tauri's channel hands back for a raw body. */
+export type OutputChunk = string | ArrayBuffer | Uint8Array | number[];
 
 /** An edge or corner of the window, as the window API names them. */
 export type ResizeDirection = "North" | "South" | "East" | "West" | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
@@ -98,6 +100,8 @@ export const api = {
   terminalAttach: (id: string, cols: number, rows: number, onOutput: Channel<OutputChunk>) =>
     invoke<ArrayBuffer>("terminal_attach", { id, cols, rows, onOutput }),
   terminalDetach: (id: string) => invoke<void>("terminal_detach", { id }),
+  gpuAccelerated: () => invoke<boolean>("gpu_accelerated"),
+  terminalAck: (id: string, chars: number) => invoke<void>("terminal_ack", { id, chars }),
   terminalWrite: (id: string, data: string) => invoke<void>("terminal_write", { id, data }),
   terminalResize: (id: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { id, cols, rows }),
@@ -213,6 +217,12 @@ export const events = {
 };
 
 export function toBytes(chunk: OutputChunk): Uint8Array {
+  if (typeof chunk === "string") {
+    const binary = atob(chunk);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
   if (chunk instanceof Uint8Array) return chunk;
   if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
   return Uint8Array.from(chunk);
