@@ -3,6 +3,7 @@
 // file-tree event; a menu drawn by the app stays open until it is dismissed.
 
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useDismiss } from "../motion";
 import { Icon } from "./icons";
 
@@ -40,10 +41,14 @@ export function ContextMenu({ x, y, align = "start", anchor, onClose, children }
     if (r.right > window.innerWidth) el.style.left = `${Math.max(0, window.innerWidth - r.width - 4)}px`;
     if (r.bottom > window.innerHeight) el.style.top = `${Math.max(0, window.innerHeight - r.height - 4)}px`;
   }, [x, y, align]);
-  return (
+  // On the body: a panel's region is a size container, and a size container is
+  // the box a fixed element is placed in, so a menu inside one would open
+  // offset by the region's corner and clipped to it.
+  return createPortal(
     <div ref={ref} className={`menu${closing ? " is-closing" : ""}`} style={{ left: x, top: y }} data-tauri-drag-region="false">
       {children}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

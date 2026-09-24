@@ -60,9 +60,8 @@ A CSS transition needs the element in the document, and a conditionally
 rendered surface leaves it the moment its condition turns false. `useDismiss`
 in `src/motion.ts` keeps it for the length of its exit and then calls the
 parent's close, reading the duration from the token so reduced motion shortens
-that too. `ContextMenu`, `Palette`, `Prompt`, `SettingsDialog`, `BranchList`,
-`WorktreeList`, the terminal's search bar and each toast take their dismissal
-from it.
+that too. `ContextMenu`, `Palette`, `Prompt`, `SettingsDialog`, the
+terminal's search bar and each toast take their dismissal from it.
 
 Three things the hook settles that a timer alone does not. A surface shown
 again while its exit is still playing has been reused, so its pending close is

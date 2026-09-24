@@ -10,15 +10,29 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn git(root: &Path, args: &[&str]) -> Result<String> {
+    run(root, args, false)
+}
+
+/// Runs git and returns its stdout — or, with `whole`, stdout and stderr
+/// together, since a fetch or a push writes its entire report to stderr. A
+/// failure always carries both.
+fn run(root: &Path, args: &[&str], whole: bool) -> Result<String> {
+    // No optional locks: a `git status` would otherwise create and delete
+    // `index.lock` in the watched git directory — a change, not a read, so the
+    // watcher reports it — and the refresh that report starts would run
+    // `git status` again, five times a second, for every repository.
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .with_context(|| format!("running git {}", args.join(" ")))?;
-    if output.status.success() {
+    if output.status.success() && !whole {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else if output.status.success() {
+        Ok(format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -130,6 +144,9 @@ pub fn refresh_summary(app: &tauri::AppHandle, workspace_id: &str) {
         detached: i.detached,
         state: i.state,
         is_worktree: i.is_worktree,
+        upstream: i.upstream,
+        ahead: i.ahead,
+        behind: i.behind,
         worktrees: siblings
             .into_iter()
             // A prunable entry is one whose directory has gone: git still
@@ -245,6 +262,7 @@ pub fn git_diff(state: tauri::State<AppState>, workspace_id: String, path: Strin
     if untracked {
         let output = Command::new("git")
             .arg("-C").arg(&root)
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .args(["diff", "--no-index", "--", "/dev/null", &path])
             .output()
             .map_err(|e| e.to_string())?;
@@ -269,9 +287,7 @@ pub fn git_show_file(state: tauri::State<AppState>, workspace_id: String, rev: S
 #[tauri::command(async)]
 pub fn git_commit_file_diff(state: tauri::State<AppState>, workspace_id: String, hash: String, path: String) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
-    git(&root, &["show", "--format=", "--", &path].iter().map(|s| *s).collect::<Vec<_>>().as_slice()).map_err(err).and_then(|_| {
-        git(&root, &["diff-tree", "--no-commit-id", "-p", "--root", &hash, "--", &path]).map_err(err)
-    })
+    git(&root, &["diff-tree", "--no-commit-id", "-p", "--root", &hash, "--", &path]).map_err(err)
 }
 
 // --- Staging ----------------------------------------------------------------
@@ -353,7 +369,9 @@ pub fn git_discard(state: tauri::State<AppState>, workspace_id: String, path: St
 
 // --- Commits ----------------------------------------------------------------
 
-#[tauri::command]
+/// Off the main thread, since a commit runs the repository's hooks and a
+/// pre-commit hook may lint the whole tree.
+#[tauri::command(async)]
 pub fn git_commit(state: tauri::State<AppState>, workspace_id: String, message: String, amend: bool) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let mut args = vec!["commit", "-m", message.as_str()];
@@ -373,6 +391,10 @@ pub fn git_last_message(state: tauri::State<AppState>, workspace_id: String) -> 
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     pub hash: String,
+    pub short: String,
+    /// First parent first; none for a root commit, several for a merge.
+    pub parents: Vec<String>,
+    pub refs: Vec<RefName>,
     pub subject: String,
     pub author: String,
     pub date: String,
@@ -381,14 +403,72 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// A ref decorating a commit.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefName {
+    pub name: String,
+    /// `head` for the branch HEAD is on, or for HEAD itself when detached;
+    /// otherwise `local`, `remote` or `tag`.
+    pub kind: String,
+}
+
+/// The refs a `%D` decoration names under `--decorate=full`, which spells
+/// every ref out so a branch and a tag of the same name stay apart. A
+/// remote's symbolic `HEAD` only repeats the branch it points at, and refs
+/// outside branches and tags are not shown.
+fn decorations(d: &str) -> Vec<RefName> {
+    d.split(", ")
+        .filter_map(|r| {
+            let (name, kind) = if let Some(b) = r.strip_prefix("HEAD -> refs/heads/") {
+                (b, "head")
+            } else if r == "HEAD" {
+                (r, "head")
+            } else if let Some(t) = r.strip_prefix("tag: refs/tags/") {
+                (t, "tag")
+            } else if let Some(b) = r.strip_prefix("refs/heads/") {
+                (b, "local")
+            } else {
+                (r.strip_prefix("refs/remotes/").filter(|b| !b.ends_with("/HEAD"))?, "remote")
+            };
+            Some(RefName { name: name.into(), kind: kind.into() })
+        })
+        .collect()
+}
+
+/// A page of history in date order, so a commit always comes before its
+/// parents: the graph is drawn from that order. `all` walks every ref rather
+/// than HEAD alone. `--parents` matters under a path filter: it rewrites each
+/// commit's parents to the nearest ancestor that touched the path, which
+/// keeps the graph connected; `%P` alone reports the real parents, most of
+/// them never listed.
 #[tauri::command(async)]
-pub fn git_log(state: tauri::State<AppState>, workspace_id: String, skip: u32, limit: u32, path: Option<String>) -> Result<Vec<LogEntry>, String> {
+pub fn git_log(state: tauri::State<AppState>, workspace_id: String, skip: u32, limit: u32, path: Option<String>, all: Option<bool>) -> Result<Vec<LogEntry>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let skip = format!("--skip={skip}");
     let limit = format!("--max-count={limit}");
-    let mut args = vec!["log", "--format=%H%x1f%s%x1f%an%x1f%ar%x1f%at%x1f%B%x1e", skip.as_str(), limit.as_str()];
+    let mut args = vec![
+        "log",
+        "--date-order",
+        "--parents",
+        "--decorate=full",
+        "--format=%H%x1f%h%x1f%P%x1f%D%x1f%s%x1f%an%x1f%ar%x1f%at%x1f%B%x1e",
+        skip.as_str(),
+        limit.as_str(),
+    ];
+    if all == Some(true) {
+        // Every ref a decoration can name — branches, remotes, tags and a
+        // detached HEAD — and nothing else: `--all` would also walk the stash,
+        // notes and prefetched tips and draw them as unlabelled branches.
+        args.extend(["--branches", "--remotes", "--tags"]);
+        if git(&root, &["rev-parse", "-q", "--verify", "HEAD"]).is_ok() {
+            args.push("HEAD");
+        }
+    }
+    // Always the separator, so a file named `HEAD` in the workspace cannot be
+    // mistaken for the revision.
+    args.push("--");
     if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
-        args.push("--");
         args.push(p);
     }
     let out = match git(&root, &args) {
@@ -401,16 +481,19 @@ pub fn git_log(state: tauri::State<AppState>, workspace_id: String, skip: u32, l
         .filter_map(|rec| {
             let rec = rec.trim_start_matches('\n');
             let f: Vec<&str> = rec.split('\x1f').collect();
-            if f.len() < 6 {
+            if f.len() < 9 {
                 return None;
             }
             Some(LogEntry {
                 hash: f[0].into(),
-                subject: f[1].into(),
-                author: f[2].into(),
-                date: f[3].into(),
-                timestamp: f[4].trim().parse().unwrap_or(0),
-                message: f[5].trim().into(),
+                short: f[1].into(),
+                parents: f[2].split_whitespace().map(str::to_string).collect(),
+                refs: decorations(f[3]),
+                subject: f[4].into(),
+                author: f[5].into(),
+                date: f[6].into(),
+                timestamp: f[7].trim().parse().unwrap_or(0),
+                message: f[8].trim().into(),
             })
         })
         .collect())
@@ -449,7 +532,7 @@ pub fn git_show(state: tauri::State<AppState>, workspace_id: String, hash: Strin
         .filter_map(|l| {
             let mut parts = l.split('\t');
             let status = parts.next()?.chars().next()?.to_string();
-            let path = parts.last()?.to_string();
+            let path = parts.next_back()?.to_string();
             Some(CommitFile { status, path })
         })
         .collect();
@@ -551,7 +634,7 @@ pub fn git_branches(state: tauri::State<AppState>, workspace_id: String) -> Resu
             let track = f[2];
             let num = |key: &str| -> u32 {
                 track
-                    .split(|c| c == '[' || c == ']' || c == ',')
+                    .split(['[', ']', ','])
                     .map(str::trim)
                     .find_map(|p| p.strip_prefix(key))
                     .and_then(|n| n.trim().parse().ok())
@@ -584,12 +667,21 @@ pub fn git_create_branch(state: tauri::State<AppState>, workspace_id: String, na
 }
 
 /// Checks out a branch. Git's own refusal — a dirty tree that would be
-/// overwritten — comes back verbatim as the error.
-#[tauri::command]
+/// overwritten — comes back verbatim as the error. Off the main thread: a
+/// checkout rewrites the tree and runs hooks.
+#[tauri::command(async)]
 pub fn git_checkout(state: tauri::State<AppState>, workspace_id: String, name: String, stash: bool) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     if stash {
+        // Only a stash this push made is popped afterwards: with nothing to
+        // stash, `stash push` makes none, and a pop would apply and drop
+        // whatever stash the user already had.
+        let top = || git(&root, &["rev-parse", "-q", "--verify", "refs/stash"]).unwrap_or_default();
+        let before = top();
         git(&root, &["stash", "push", "-u", "-m", &format!("agentic-workspace: switching to {name}")]).map_err(err)?;
+        if top() == before {
+            return git(&root, &["checkout", &name]).map_err(err);
+        }
         let result = git(&root, &["checkout", &name]).map_err(err);
         let popped = git(&root, &["stash", "pop"]);
         return match (result, popped) {
@@ -611,14 +703,150 @@ pub fn git_delete_branch(state: tauri::State<AppState>, workspace_id: String, na
 #[tauri::command(async)]
 pub fn git_unmerged_commits(state: tauri::State<AppState>, workspace_id: String, name: String) -> Result<Vec<String>, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
-    let spec = format!("{name}");
-    let out = git(&root, &["log", "--format=%h %s", "--max-count=20", &spec, "--not", "--all", "--"]).unwrap_or_default();
+    let out = git(&root, &["log", "--format=%h %s", "--max-count=20", &name, "--not", "--all", "--"]).unwrap_or_default();
     let out = if out.trim().is_empty() {
         git(&root, &["log", "--format=%h %s", "--max-count=20", &format!("HEAD..{name}")]).unwrap_or_default()
     } else {
         out
     };
     Ok(out.lines().map(str::to_string).collect())
+}
+
+// --- Stashes ----------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stash {
+    /// N in `stash@{N}`. It shifts whenever a stash above it goes, so apply
+    /// and drop name a stash by its commit instead.
+    pub index: u32,
+    /// The stash's commit, which stays the same while its position moves.
+    pub hash: String,
+    /// The subject git recorded: "On master: dock drag preview".
+    pub message: String,
+    pub date: String,
+    pub timestamp: i64,
+}
+
+#[tauri::command(async)]
+pub fn git_stashes(state: tauri::State<AppState>, workspace_id: String) -> Result<Vec<Stash>, String> {
+    let root = root_of(&state, &workspace_id).map_err(err)?;
+    let out = git(&root, &["stash", "list", "--format=%gd%x1f%gs%x1f%cr%x1f%ct%x1f%H"]).map_err(err)?;
+    Ok(out
+        .lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let f: Vec<&str> = l.split('\x1f').collect();
+            if f.len() < 5 {
+                return None;
+            }
+            // The list runs from `stash@{0}` down, so the position stands in
+            // should the selector ever read other than `stash@{N}`.
+            let index = f[0].strip_prefix("stash@{").and_then(|n| n.strip_suffix('}')).and_then(|n| n.parse().ok()).unwrap_or(i as u32);
+            Some(Stash { index, message: f[1].into(), date: f[2].into(), timestamp: f[3].trim().parse().unwrap_or(0), hash: f[4].trim().into() })
+        })
+        .collect())
+}
+
+/// Stashes every change, untracked files included, under `message` when one
+/// is given (GIT-18). Git's report comes back, and says so when there was
+/// nothing to stash.
+#[tauri::command(async)]
+pub fn git_stash_push(state: tauri::State<AppState>, workspace_id: String, message: Option<String>) -> Result<String, String> {
+    let root = root_of(&state, &workspace_id).map_err(err)?;
+    let mut args = vec!["stash", "push", "--include-untracked"];
+    if let Some(m) = message.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        args.extend(["-m", m]);
+    }
+    git(&root, &args).map_err(err)
+}
+
+/// Where the stash with commit `hash` sits now, as `stash@{N}`. The list the
+/// panel showed may be older than the repository — a stash dropped or pushed
+/// from a terminal renumbers every one below it — so a stash is found by its
+/// commit, and one that is gone is refused rather than mistaken for another.
+fn stash_spec(root: &Path, hash: &str) -> Result<String, String> {
+    let list = git(root, &["stash", "list", "--format=%H"]).map_err(err)?;
+    list.lines()
+        .position(|h| h.trim() == hash)
+        .map(|n| format!("stash@{{{n}}}"))
+        .ok_or_else(|| "That stash is no longer there; the list has been read again.".to_string())
+}
+
+/// Applies a stash, and with `pop` drops it once it applied cleanly. A stash
+/// that conflicts is kept either way, and git's report of the conflict is the
+/// error.
+#[tauri::command(async)]
+pub fn git_stash_apply(state: tauri::State<AppState>, workspace_id: String, hash: String, pop: bool) -> Result<String, String> {
+    let root = root_of(&state, &workspace_id).map_err(err)?;
+    let spec = stash_spec(&root, &hash)?;
+    git(&root, &["stash", if pop { "pop" } else { "apply" }, &spec]).map_err(err)
+}
+
+#[tauri::command]
+pub fn git_stash_drop(state: tauri::State<AppState>, workspace_id: String, hash: String) -> Result<String, String> {
+    let root = root_of(&state, &workspace_id).map_err(err)?;
+    let spec = stash_spec(&root, &hash)?;
+    git(&root, &["stash", "drop", &spec]).map_err(err)
+}
+
+// --- Tags -------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub name: String,
+    /// The short hash of the commit, reached through an annotated tag.
+    pub hash: String,
+    /// An annotated tag's own subject; a lightweight tag has none, so its
+    /// commit's.
+    pub subject: String,
+    pub date: String,
+    pub annotated: bool,
+}
+
+/// Every tag, newest first.
+#[tauri::command(async)]
+pub fn git_tags(state: tauri::State<AppState>, workspace_id: String) -> Result<Vec<Tag>, String> {
+    let root = root_of(&state, &workspace_id).map_err(err)?;
+    // `contents:subject` reads whatever object the ref names: an annotated
+    // tag's message, a lightweight tag's commit. `*objectname` is the commit
+    // behind an annotated tag and empty for a lightweight one.
+    let format = "--format=%(refname:lstrip=2)%1f%(objecttype)%1f%(if)%(*objectname)%(then)%(*objectname:short)%(else)%(objectname:short)%(end)%1f%(contents:subject)%1f%(creatordate:relative)";
+    let out = git(&root, &["for-each-ref", "--sort=-creatordate", format, "refs/tags"]).map_err(err)?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\x1f').collect();
+            if f.len() < 5 {
+                return None;
+            }
+            Some(Tag { name: f[0].into(), annotated: f[1] == "tag", hash: f[2].into(), subject: f[3].into(), date: f[4].into() })
+        })
+        .collect())
+}
+
+/// Tags `target`, or HEAD: annotated when there is a message, lightweight
+/// otherwise. The `--` keeps a name typed with a leading dash from being read
+/// as an option: a tag named `-d` would turn the command into a delete.
+#[tauri::command]
+pub fn git_create_tag(state: tauri::State<AppState>, workspace_id: String, name: String, message: Option<String>, target: Option<String>) -> Result<(), String> {
+    let root = root_of(&state, &workspace_id).map_err(err)?;
+    let mut args = vec!["tag"];
+    if let Some(m) = message.as_deref().filter(|m| !m.trim().is_empty()) {
+        args.extend(["-a", "-m", m]);
+    }
+    args.extend(["--", name.as_str()]);
+    if let Some(t) = target.as_deref().filter(|t| !t.is_empty()) {
+        args.push(t);
+    }
+    git(&root, &args).map(|_| ()).map_err(err)
+}
+
+#[tauri::command]
+pub fn git_delete_tag(state: tauri::State<AppState>, workspace_id: String, name: String) -> Result<String, String> {
+    let root = root_of(&state, &workspace_id).map_err(err)?;
+    git(&root, &["tag", "-d", "--", &name]).map_err(err)
 }
 
 // --- Worktrees --------------------------------------------------------------
@@ -673,14 +901,15 @@ pub fn worktrees(root: &Path) -> Result<Vec<WorktreeEntry>> {
     Ok(list)
 }
 
-#[tauri::command]
+/// Off the main thread, since it checks out a whole tree.
+#[tauri::command(async)]
 pub fn git_add_worktree(state: tauri::State<AppState>, workspace_id: String, path: String, branch: String, create: bool) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let args: Vec<&str> = if create { vec!["worktree", "add", "-b", &branch, &path] } else { vec!["worktree", "add", &path, &branch] };
     git(&root, &args).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_remove_worktree(state: tauri::State<AppState>, workspace_id: String, path: String, force: bool) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let args: Vec<&str> = if force { vec!["worktree", "remove", "--force", &path] } else { vec!["worktree", "remove", &path] };
@@ -708,8 +937,11 @@ pub fn git_prune_worktrees(state: tauri::State<AppState>, workspace_id: String, 
 
 // --- Remotes ----------------------------------------------------------------
 
-#[tauri::command]
-pub fn git_remote(state: tauri::State<AppState>, workspace_id: String, action: String, set_upstream: bool) -> Result<String, String> {
+/// Fetches, pulls or pushes. Off the main thread, because a remote can take
+/// seconds to answer and the window has to stay usable meanwhile; git's whole
+/// output comes back either way, not a line of it (GIT-17).
+#[tauri::command(async)]
+pub fn git_remote(app: tauri::AppHandle, state: tauri::State<AppState>, workspace_id: String, action: String, set_upstream: bool) -> Result<String, String> {
     let root = root_of(&state, &workspace_id).map_err(err)?;
     let args: Vec<&str> = match action.as_str() {
         "fetch" => vec!["fetch", "--all", "--prune"],
@@ -718,5 +950,37 @@ pub fn git_remote(state: tauri::State<AppState>, workspace_id: String, action: S
         "push" => vec!["push"],
         _ => return Err(format!("unknown remote action {action}")),
     };
-    git(&root, &args).map_err(err)
+    // Git's whole report, success or not: the panel shows it in full (GIT-17).
+    let result = run(&root, &args, true).map_err(err);
+    // A fetch or a push moves only `refs/remotes/…`, which the watcher does
+    // not see, so the ahead and behind counts and the history are told here.
+    refresh_summary(&app, &workspace_id);
+    use tauri::Emitter;
+    let _ = app.emit(crate::watch::EVENT_GIT_CHANGED, &workspace_id);
+    crate::session::publish(&app);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decorations, RefName};
+
+    fn r(name: &str, kind: &str) -> RefName {
+        RefName { name: name.into(), kind: kind.into() }
+    }
+
+    #[test]
+    fn a_decoration_names_each_branch_and_tag_once_with_its_kind() {
+        // As `git log --decorate=full --format=%D` prints them.
+        assert_eq!(
+            decorations("HEAD -> refs/heads/main, tag: refs/tags/v2, refs/remotes/origin/main, refs/remotes/origin/HEAD"),
+            [r("main", "head"), r("v2", "tag"), r("origin/main", "remote")]
+        );
+        assert_eq!(decorations("HEAD, tag: refs/tags/release/v1"), [r("HEAD", "head"), r("release/v1", "tag")]);
+        assert_eq!(decorations("refs/remotes/origin/fix/nvidia, refs/heads/fix/nvidia"), [r("origin/fix/nvidia", "remote"), r("fix/nvidia", "local")]);
+        // A branch and a tag may share a name; the full spelling keeps them apart.
+        assert_eq!(decorations("refs/heads/v1, tag: refs/tags/v1"), [r("v1", "local"), r("v1", "tag")]);
+        assert_eq!(decorations("refs/stash"), []);
+        assert_eq!(decorations(""), []);
+    }
 }

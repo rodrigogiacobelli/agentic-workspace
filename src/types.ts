@@ -14,18 +14,22 @@ export interface Workspace {
   name: string;
   terminals: TerminalTab[];
   activeTerminal: string | null;
-  /** Every editor group; `layout` arranges them. Never empty. */
+  /** The Editor's working area: every group; `layout` arranges them. Never empty. */
   groups: EditorGroup[];
   activeGroup: string | null;
   /** A tree of rows and columns whose leaves name the groups. */
   layout: Layout;
+  /** Source Control's working area: groups of diff tabs, arranged the same way. */
+  review: WorkArea;
+  /** The mode the Workspace window shows for this workspace. */
+  mode: DockedMode;
   /** Expanded tree directories, relative to `path`. */
   expanded: string[];
   /** Recently opened files, relative to `path`, most recent first. */
   recentFiles: string[];
   /** Custom views: named lists of workspace-relative paths. */
   views: View[];
-  /** The view the Files panel shows; null is the tree itself. */
+  /** The view the Custom panel shows; null is the first there is. */
   activeView: string | null;
   available: boolean;
   /** A background terminal here printed since it was last viewed. */
@@ -46,19 +50,41 @@ export interface Split<L> {
 export interface LayoutGroup { kind: "group"; id: string }
 export type Layout = LayoutGroup | Split<LayoutGroup>;
 
-export type PanelId = "files" | "search" | "git" | "outline";
+/** Groups of tabs and the tree arranging them: a mode's working area. */
+export interface WorkArea {
+  groups: EditorGroup[];
+  activeGroup: string | null;
+  layout: Layout;
+}
+
+/** Which working area a tab lives in: the Editor's files or Source Control's diffs. */
+export type AreaId = "editor" | "review";
+
+/**
+ * What the reader is doing. A mode owns its panels, its working area and its
+ * dock tree; Terminal is a mode that lives in a window of its own.
+ */
+export type ModeId = "editor" | "scm" | "terminal";
+/** The modes the Workspace window shows. */
+export type DockedMode = "editor" | "scm";
+
+export type EditorPanelId = "explorer" | "custom" | "search" | "outline";
+export type ScmPanelId = "commit" | "history" | "worktrees" | "branches" | "tags";
+export type PanelId = EditorPanelId | ScmPanelId;
 export interface Region { kind: "region"; id: string; panels: PanelId[]; active: PanelId }
-export interface EditorLeaf { kind: "editor" }
-export type DockLeaf = Region | EditorLeaf;
+/** The working area as a dock leaf. A panel dropped on its centre becomes one of its tabs. */
+export interface WorkLeaf { kind: "work"; panels: PanelId[]; active: PanelId | null }
+export type DockLeaf = Region | WorkLeaf;
 export type DockNode = DockLeaf | Split<DockLeaf>;
 
-/** Where the panels sit around the editor; the application's, not a workspace's. */
+/** Where one mode's panels sit around its working area; the application's, not a workspace's. */
 export interface PanelLayout {
   root: DockNode;
   hidden: PanelId[];
   /** The region each hidden panel left, so it returns there. */
   lastRegion: Partial<Record<PanelId, string>>;
 }
+export type PanelLayouts = Record<DockedMode, PanelLayout>;
 
 export interface View {
   id: string;
@@ -72,6 +98,9 @@ export interface GitSummary {
   detached: boolean;
   state: string | null;
   isWorktree: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
   /** Every other worktree of this repository, as git lists them. */
   worktrees: Worktree[];
 }
@@ -105,7 +134,7 @@ export interface EditorTab {
   mode: string;
   /** First visible line, restored on reopen. */
   line: number;
-  /** Set when the tab shows a diff of `path` rather than the file. */
+  /** Which diff of `path` the tab shows. Set on every tab of the review area, never on an editor's. */
   diff: DiffSpec | null;
   /** A preview tab: one per group, replaced by the next single click. */
   preview: boolean;
@@ -165,15 +194,16 @@ export interface Settings {
   assetLinks: "markdown" | "citation";
   globalHotkey: string;
   languages: Record<string, string>;
-  /** How a panel's tab reads. */
-  panelTabs: "text" | "icons";
+  /** How the mode selector and every panel tab read: a word or a glyph, never both. */
+  tabDisplay: "labels" | "icons";
   /** The mode a markdown file opens in. */
   markdownMode: "source" | "split" | "rich";
   /** The program a terminal tab runs; empty means `$SHELL`. */
   terminalShell: string;
   /** Which renderer a terminal draws with. */
   terminalGpu: "auto" | "webgl" | "dom";
-  panelLayout: PanelLayout | null;
+  /** One dock tree per docked mode; null, or a mode left out, is that mode's default. */
+  panelLayout: Partial<PanelLayouts> | null;
   workspaces: Record<string, WorkspaceSettings>;
 }
 
@@ -206,12 +236,47 @@ export interface StatusEntry {
 
 export interface LogEntry {
   hash: string;
+  short: string;
+  /** Parent hashes, first parent first; more than one is a merge. */
+  parents: string[];
+  /** The refs pointing at this commit. */
+  refs: RefName[];
   subject: string;
   author: string;
+  /** Relative, as git words it: "4 hours ago". */
   date: string;
   timestamp: number;
   /** Subject and body together, shown in the history's hover popup. */
   message: string;
+}
+
+/** A ref decorating a commit. `head` is the branch HEAD is on, or `HEAD` itself when detached. */
+export interface RefName {
+  name: string;
+  kind: "head" | "local" | "remote" | "tag";
+}
+
+export interface Stash {
+  /** N in `stash@{N}`; it shifts when a stash above goes. */
+  index: number;
+  /** The stash's commit, which apply and drop name it by. */
+  hash: string;
+  /** The stash's subject as git records it: "On master: dock drag preview". */
+  message: string;
+  /** Relative, as git words it. */
+  date: string;
+  timestamp: number;
+}
+
+export interface Tag {
+  name: string;
+  /** The short hash of the commit the tag points at. */
+  hash: string;
+  /** The tag's message when annotated, else the commit's subject. */
+  subject: string;
+  /** Relative, as git words it. */
+  date: string;
+  annotated: boolean;
 }
 
 export interface CommitDetail {

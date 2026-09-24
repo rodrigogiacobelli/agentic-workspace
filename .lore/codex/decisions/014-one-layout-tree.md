@@ -7,6 +7,7 @@ summary: Why one recursive tree of rows and columns arranges both the editor gro
 related:
 - 010-react-frontend
 - 004-central-settings-store
+- 017-modes
 - standards-code
 binds:
 - src-tauri/src/state.rs
@@ -48,26 +49,30 @@ One recursive tree serves both: a leaf, or a split naming a `direction` —
 their `sizes`, which sum to one.
 
 **Editor groups.** `Layout` in `src-tauri/src/state.rs` holds the tree, per
-workspace in the session (ED-40). `Layout::split_leaf` puts a new group beside
+workspace in the session (ED-40). An `Area` holds a working area's groups, its
+active group and its layout: a workspace has the Editor's at its top level and
+Source Control's under `review` (`017-modes`), and every rule below holds in
+each. `Layout::split_leaf` puts a new group beside
 a leaf; when the enclosing split already runs in the requested direction the
 group joins it as a sibling, so a third column is a third child of one row
 rather than a row nested in a row. `Layout::remove_leaf` gives a removed leaf's
 space to its sibling and collapses a split left with one child.
-`Workspace::ensure_groups` rebuilds a tree that disagrees with the group list,
-and `prune_groups` drops a group left empty unless it is the last (ED-38).
-`session::drop_editor` turns an edge into a direction and a side;
+`Area::ensure_groups` rebuilds a tree that disagrees with the group list,
+and `Area::prune_groups` drops a group left empty unless it is the last
+(ED-38). `session::drop_editor` turns an edge into a direction and a side;
 `set_layout_sizes` records one split's sizes after a divider is dragged
-(ED-39).
+(ED-39), and it and `split_editor` name the area they act on.
 
 **Panels.** `PanelLayout` in `src/types.ts` carries the same tree plus the
-panels hidden from it and the region each hidden panel left, so a hotkey
-returns one where it was (DOCK-09, DOCK-10). `settings.rs` stores it as
-`panel_layout`, a `serde_json::Value` the backend writes and reads back
-without interpreting, keyed to the application rather than a workspace
-(DOCK-08). `src/components/dock.ts` owns every rule over it: `normalize`
-repairs a tree read from the store, `dropPanel` moves a panel, `hidePanel` and
-`showPanel` take one out and put it back, and a null value resets the layout to
-`defaultLayout` (DOCK-11).
+panels hidden from it and the leaf each hidden panel left, so a hotkey returns
+one where it was (DOCK-09, DOCK-10). Each docked mode has its own
+(`017-modes`): `settings.rs` stores `panel_layout` as `{ editor, scm }`, a
+`serde_json::Value` the backend writes and reads back without interpreting,
+keyed to the application rather than a workspace (DOCK-08).
+`src/components/dock.ts` owns every rule over it: `normalizeAll` and
+`normalize` repair the trees read from the store, `dropPanel` moves a panel,
+`hidePanel` and `showPanel` take one out and put it back, and a null value, or
+a mode left out, resets that tree to `defaultLayout(mode)` (DOCK-11).
 
 **One renderer, one drop mechanism.** `SplitTree` in
 `src/components/SplitTree.tsx` renders either tree, with a divider between
@@ -75,18 +80,20 @@ adjacent children that resizes them against each other and reports the new
 sizes on release (ED-39, DOCK-07). `useDropZone` turns an element into a target
 with five zones: four edges in a quarter-width band and a centre. An edge drop
 splits (ED-36, DOCK-02, DOCK-04, DOCK-05); a centre drop moves the tab into the
-group or tabs the panel into the region (ED-37, DOCK-03). The editor area is a
-leaf of the panel tree that `normalize` guarantees: emptied regions collapse
-around it (DOCK-06), and it is never removed and never becomes a tab in a
-region.
+group or tabs the panel into the region (ED-37, DOCK-03). The working area is
+the work leaf of the panel tree, which `normalize` guarantees: emptied regions
+collapse around it (DOCK-06), and it is never removed and never becomes a tab
+in a region. A panel dropped on its centre, or on its tab strip, becomes one of
+its tabs (`017-modes`).
 
 **Preview tabs.** `EditorTab.preview` marks a tab opened by a single click.
 `place_tab` puts a preview tab in the group's existing preview slot rather than
 appending, so a group holds one (ED-29, ED-30, ED-34). `pin_editor` clears the
 mark when the file is edited, double-clicked or dragged (ED-31, ED-32, ED-33),
 and the mark is a field of the tab, so it survives a restart (ED-35). A preview
-tab's label is italic. A diff opened from a git status list is a preview tab; a
-diff opened from a commit is permanent.
+tab's label is italic. In Source Control's working area a diff opened from the
+Commit panel's status list is a preview tab; a diff opened from a commit is
+permanent.
 
 ## Rationale
 
@@ -128,17 +135,18 @@ diff opened from a commit is permanent.
   longer exists, a panel listed twice — so both sides repair before rendering.
 - The backend cannot validate `panel_layout`: a malformed tree is caught by
   `normalize` in the frontend or not at all.
-- The editor leaf is a special case in the panel tree, exempt from the
-  removal, tabbing and hiding every region is subject to.
+- The work leaf is a special case in the panel tree, exempt from the removal,
+  tabbing and hiding every region is subject to.
 
 ## Constraints imposed
 
 - **Sizes are fractions of their parent and sum to one.** Every edit ends in a
   renormalisation.
-- **The editor leaf survives every edit.** `normalize` reinstates it if a
-  stored layout arrives without one.
-- **A group appears exactly once in the layout and once in the group list.**
-  `ensure_groups` rebuilds the layout as a single row when the two disagree.
+- **The work leaf survives every edit.** `normalize` reinstates it if a stored
+  layout arrives without one.
+- **A group appears exactly once in its area's layout and once in its area's
+  group list.** `Area::ensure_groups` rebuilds the layout as a single row when
+  the two disagree.
 - **A tab keeps its id when it moves**, so its editor state and undo history
   travel with it between groups.
 - **A group holds at most one preview tab**, and a tab that moves between

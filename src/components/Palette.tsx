@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useDismiss } from "../motion";
 import { rank } from "../fuzzy";
 
@@ -35,7 +36,9 @@ export function Palette({ title, items, onPick, onClose }: Props) {
     else if (e.key === "Escape") { e.preventDefault(); dismiss(); }
   };
 
-  return (
+  // On the body: a panel's region is a size container, and that would make it
+  // the box a fixed overlay is placed in.
+  return createPortal(
     <div className={`overlay${closing ? " is-closing" : ""}`} onMouseDown={dismiss}>
       <div className="palette" onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKey}>
         <input
@@ -60,6 +63,7 @@ export function Palette({ title, items, onPick, onClose }: Props) {
           {matches.length === 0 && <li className="palette-empty">No matches</li>}
         </ul>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

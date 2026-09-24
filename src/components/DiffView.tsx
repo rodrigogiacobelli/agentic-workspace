@@ -5,17 +5,20 @@ import { StreamLanguage, syntaxHighlighting, HighlightStyle } from "@codemirror/
 import { diff as diffMode } from "@codemirror/legacy-modes/mode/diff";
 import { Chunk, MergeView } from "@codemirror/merge";
 import { tags as t } from "@lezer/highlight";
-import { api, events } from "../api";
+import { api } from "../api";
+import { useChanged } from "../live";
 import { languageExtension, languageFor } from "../editor/languages";
+import { report } from "../notice";
+import * as repo from "../repo";
 import type { EditorTab, Workspace } from "../types";
-import { report } from "./Switcher";
 
 interface Props {
   ws: Workspace;
   /** A tab whose `diff` is set. */
   tab: EditorTab;
   onClose: () => void;
-  onChanged: () => void;
+  /** Opens the file itself in the Editor. */
+  onOpenInEditor: () => void;
 }
 
 const diffHighlight = HighlightStyle.define([
@@ -122,7 +125,7 @@ function hunkPatches(text: string): { line: number; patch: string }[] {
 
 /** One diff of one path, as a tab. It follows the repository: a commit that
  * empties it says so and offers to close (FIX-09). */
-export function DiffView({ ws, tab, onClose, onChanged }: Props) {
+export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<"inline" | "side">(lastMode);
   const [loaded, setLoaded] = useState<{ text: string; old: string; now: string } | null>(null);
@@ -137,17 +140,16 @@ export function DiffView({ ws, tab, onClose, onChanged }: Props) {
   const target = tab.diff!;
   const path = tab.path;
 
-  useEffect(() => {
-    let timer: number | null = null;
-    const schedule = (id: string) => {
-      if (id !== ws.id) return;
-      if (timer) window.clearTimeout(timer);
-      timer = window.setTimeout(() => setTick((n) => n + 1), 300);
-    };
-    const a = events.onGitChanged(schedule);
-    const b = events.onDirChanged((c) => schedule(c.workspaceId));
-    return () => { void a.then((u) => u()); void b.then((u) => u()); if (timer) window.clearTimeout(timer); };
-  }, [ws.id]);
+  // A diff out of sight — another mode, another workspace — reads again once
+  // it is back, rather than on every write an agent makes meanwhile.
+  const timer = useRef<number | null>(null);
+  // A read already waiting takes later changes too; pushing it back would
+  // starve it while an agent keeps writing.
+  useChanged(ws.id, () => {
+    if (timer.current) return;
+    timer.current = window.setTimeout(() => { timer.current = null; setTick((n) => n + 1); }, 300);
+  }, true);
+  useEffect(() => () => { if (timer.current) window.clearTimeout(timer.current); }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -244,7 +246,7 @@ export function DiffView({ ws, tab, onClose, onChanged }: Props) {
             Decoration.set(
               hunks.map((h) => {
                 const widget = new HunkWidget(unstage ? "Unstage hunk" : "Stage hunk", () => {
-                  api.gitApplyHunk(ws.id, h.patch, unstage).then(onChanged).catch(report);
+                  api.gitApplyHunk(ws.id, h.patch, unstage).then(() => repo.refresh(ws.id)).catch(report);
                 });
                 const pos = v.state.doc.line(Math.min(h.line, v.state.doc.lines)).from;
                 return Decoration.widget({ widget, side: -1 }).range(pos);
@@ -258,7 +260,7 @@ export function DiffView({ ws, tab, onClose, onChanged }: Props) {
     paint(view, spans);
     restore();
     return () => { el.removeEventListener("scroll", remember, true); view.destroy(); };
-  }, [loaded, empty, mode, path, target.kind, ws.id, onChanged]);
+  }, [loaded, empty, mode, path, target.kind, ws.id]);
 
   const title =
     target.kind === "commit" ? `${target.hash?.slice(0, 7) ?? "commit"} — ${path}` : `${path} ${target.kind === "staged" ? "(staged)" : target.untracked ? "(untracked)" : "(changes)"}`;
@@ -269,6 +271,7 @@ export function DiffView({ ws, tab, onClose, onChanged }: Props) {
         <span className="diff-title" title={title}>{title}</span>
         <button className={mode === "inline" ? "active" : ""} onClick={() => { lastMode = "inline"; setMode("inline"); }}>Inline</button>
         <button className={mode === "side" ? "active" : ""} onClick={() => { lastMode = "side"; setMode("side"); }}>Side by side</button>
+        <button onClick={onOpenInEditor} title="Open the file in the Editor">Open in Editor ↗</button>
         <button onClick={onClose} title="Close">×</button>
       </div>
       {empty ? (

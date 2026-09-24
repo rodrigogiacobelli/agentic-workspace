@@ -88,6 +88,8 @@ interface ZoneOptions {
   edgesOnly?: boolean;
   /** A drop here is handled by a child instead; no zone is shown over it. */
   ignore?: (target: Element) => boolean;
+  /** Over these the drop is the centre wherever it lands: a tab strip joins, it never splits. */
+  centerOver?: (target: Element) => boolean;
 }
 
 /**
@@ -100,6 +102,7 @@ export function useDropZone(accepts: (types: readonly string[]) => boolean, onDr
   const depth = useRef(0);
 
   const compute = (e: React.DragEvent): Zone => {
+    if (options.centerOver?.(e.target as Element)) return "center";
     const r = ref.current!.getBoundingClientRect();
     const x = (e.clientX - r.left) / Math.max(1, r.width);
     const y = (e.clientY - r.top) / Math.max(1, r.height);

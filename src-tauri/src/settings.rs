@@ -36,8 +36,11 @@ pub struct Settings {
     pub global_hotkey: String,
     /// Language overrides keyed by absolute file path.
     pub languages: HashMap<String, String>,
-    /// How a panel's tab reads: `text` or `icons`.
-    pub panel_tabs: String,
+    /// How the mode selector and every panel tab read: `labels` or `icons`,
+    /// never both. Settings files from before modes call it `panelTabs`, and
+    /// the `text` they may hold is read as `labels`.
+    #[serde(alias = "panelTabs")]
+    pub tab_display: String,
     /// The mode a markdown file opens in: `source`, `split` or `rich`.
     pub markdown_mode: String,
     /// The program a terminal tab runs. Empty means `$SHELL`, which is what
@@ -47,9 +50,11 @@ pub struct Settings {
     /// takes WebGL only where the webview composites on the GPU — see
     /// `desktop::gpu_accelerated`.
     pub terminal_gpu: String,
-    /// Where the Files, Search, Git and Outline panels sit, as the frontend
-    /// lays them out; the application's, not a workspace's (DOCK-08). Null
-    /// until a panel is first moved.
+    /// Where each docked mode's panels sit around its working area: one dock
+    /// tree per mode, `{ editor, scm }`, as the frontend lays them out and
+    /// opaque to the backend. The application's, not a workspace's (DOCK-08).
+    /// Null until a panel is first moved; a single tree stored before modes
+    /// is migrated by the frontend.
     pub panel_layout: serde_json::Value,
     /// Per-workspace settings keyed by absolute directory path.
     pub workspaces: HashMap<String, WorkspaceSettings>,
@@ -87,7 +92,7 @@ impl Default for Settings {
             // rather than the one an installed build already holds.
             global_hotkey: if cfg!(debug_assertions) { "CTRL+ALT+d" } else { "CTRL+ALT+a" }.into(),
             languages: HashMap::new(),
-            panel_tabs: "text".into(),
+            tab_display: "labels".into(),
             markdown_mode: "source".into(),
             terminal_shell: String::new(),
             terminal_gpu: "auto".into(),
@@ -109,13 +114,17 @@ impl Settings {
 
 pub fn load(data_dir: &Path) -> Settings {
     let path = data_dir.join(FILE);
-    match std::fs::read_to_string(&path) {
+    let mut settings: Settings = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
             eprintln!("agentic-workspace: settings unreadable ({e}); using defaults");
             Settings::default()
         }),
         Err(_) => Settings::default(),
+    };
+    if settings.tab_display == "text" {
+        settings.tab_display = "labels".into();
     }
+    settings
 }
 
 fn save(data_dir: &Path, settings: &Settings) -> Result<()> {

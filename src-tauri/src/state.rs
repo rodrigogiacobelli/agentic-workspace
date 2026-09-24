@@ -40,15 +40,17 @@ pub struct Workspace {
     pub terminals: Vec<TerminalTab>,
     #[serde(default)]
     pub active_terminal: Option<String>,
-    /// Every editor group, in no particular order; `layout` arranges them.
+    /// The Editor's working area. Flattened, so its `groups`, `activeGroup`
+    /// and `layout` sit at the top of the workspace, where they were before
+    /// there were modes.
+    #[serde(flatten)]
+    pub editor: Area,
+    /// Source Control's working area, holding the diff tabs.
     #[serde(default)]
-    pub groups: Vec<EditorGroup>,
-    #[serde(default)]
-    pub active_group: Option<String>,
-    /// How the groups are arranged: a tree of rows and columns whose leaves
-    /// are the groups, every group appearing exactly once.
-    #[serde(default)]
-    pub layout: Option<Layout>,
+    pub review: Area,
+    /// The mode the Workspace window shows here: `editor` or `scm`.
+    #[serde(default = "default_docked_mode")]
+    pub mode: String,
     /// Session files from before the layout tree held the width of the first
     /// of two groups here.
     #[serde(default = "default_ratio", skip_serializing)]
@@ -67,7 +69,7 @@ pub struct Workspace {
     /// Custom views: named lists of workspace-relative paths (VIEW-01).
     #[serde(default)]
     pub views: Vec<View>,
-    /// The view the Files panel last showed; `None` is the file tree.
+    /// The view the Custom panel last showed; `None` is the first there is.
     #[serde(default)]
     pub active_view: Option<String>,
     /// Whether `path` is a directory right now. Computed when published.
@@ -104,6 +106,11 @@ pub struct GitSummary {
     pub detached: bool,
     pub state: Option<String>,
     pub is_worktree: bool,
+    /// The branch's upstream and how far the two have diverged, for the
+    /// status bar.
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
     /// Every other worktree of this repository, as git lists them. Refreshed
     /// with the rest of the summary, so one added or removed outside the
     /// application appears and disappears on its own.
@@ -142,6 +149,27 @@ pub struct TerminalTab {
 
 fn default_ratio() -> f32 {
     0.5
+}
+
+fn default_docked_mode() -> String {
+    "editor".into()
+}
+
+/// A mode's working area: groups of tabs and the tree arranging them. The
+/// Editor's holds files and Source Control's holds diffs; each splits the same
+/// way.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Area {
+    /// Every group, in no particular order; `layout` arranges them.
+    #[serde(default)]
+    pub groups: Vec<EditorGroup>,
+    #[serde(default)]
+    pub active_group: Option<String>,
+    /// How the groups are arranged: a tree of rows and columns whose leaves
+    /// are the groups, every group appearing exactly once.
+    #[serde(default)]
+    pub layout: Option<Layout>,
 }
 
 /// The arrangement of editor groups: a leaf names a group, a split lays its
@@ -285,16 +313,16 @@ fn default_mode() -> String {
     "rich".into()
 }
 
-impl Workspace {
-    /// Every workspace has at least one group and a layout naming each group
-    /// exactly once; older session files and new workspaces get theirs here.
+impl Area {
+    /// Every area has at least one group and a layout naming each group
+    /// exactly once; new areas and older session files get theirs here.
     pub fn ensure_groups(&mut self) {
         if self.groups.is_empty() {
             let id = new_id();
-            self.groups.push(EditorGroup { id: id.clone(), editors: std::mem::take(&mut self.editors), active_editor: self.active_editor.take() });
+            self.groups.push(EditorGroup { id: id.clone(), editors: Vec::new(), active_editor: None });
             self.active_group = Some(id);
         }
-        if self.active_group.as_deref().map(|g| !self.groups.iter().any(|x| x.id == g)).unwrap_or(true) {
+        if self.active_group.as_deref().map(|g| !self.holds_group(g)).unwrap_or(true) {
             self.active_group = self.groups.first().map(|g| g.id.clone());
         }
         let mut leaves = Vec::new();
@@ -306,13 +334,12 @@ impl Workspace {
         let mut named: Vec<&str> = leaves.iter().map(String::as_str).collect();
         named.sort_unstable();
         if known != named {
-            // A layout that disagrees with the groups is rebuilt as one row;
-            // a two-group session from before the tree keeps its ratio.
-            let ids: Vec<Layout> = self.groups.iter().map(|g| Layout::Group { id: g.id.clone() }).collect();
+            // A layout that disagrees with the groups is rebuilt as one row.
+            let mut ids: Vec<Layout> = self.groups.iter().map(|g| Layout::Group { id: g.id.clone() }).collect();
             self.layout = Some(if ids.len() == 1 {
-                ids.into_iter().next().expect("one group")
+                ids.remove(0)
             } else {
-                let sizes = if ids.len() == 2 { vec![self.split_ratio, 1.0 - self.split_ratio] } else { vec![1.0 / ids.len() as f32; ids.len()] };
+                let sizes = vec![1.0 / ids.len() as f32; ids.len()];
                 Layout::Split { direction: "row".into(), children: ids, sizes }
             });
         }
@@ -337,6 +364,10 @@ impl Workspace {
         self.ensure_groups();
     }
 
+    pub fn holds_group(&self, id: &str) -> bool {
+        self.groups.iter().any(|g| g.id == id)
+    }
+
     pub fn group_mut(&mut self, id: &str) -> Option<&mut EditorGroup> {
         self.groups.iter_mut().find(|g| g.id == id)
     }
@@ -352,8 +383,65 @@ impl Workspace {
         self.groups.iter_mut().find(|g| g.editors.iter().any(|e| e.id == editor_id))
     }
 
-    pub fn all_editors(&self) -> impl Iterator<Item = &EditorTab> {
+    pub fn editors(&self) -> impl Iterator<Item = &EditorTab> {
         self.groups.iter().flat_map(|g| g.editors.iter())
+    }
+}
+
+impl Workspace {
+    /// Both working areas have at least one group and a layout naming each
+    /// group exactly once; older session files and new workspaces get theirs
+    /// here.
+    pub fn ensure_groups(&mut self) {
+        if self.editor.groups.is_empty() {
+            let id = new_id();
+            self.editor.groups.push(EditorGroup { id: id.clone(), editors: std::mem::take(&mut self.editors), active_editor: self.active_editor.take() });
+            self.editor.active_group = Some(id);
+        }
+        if self.editor.layout.is_none() && self.editor.groups.len() == 2 {
+            // A two-group session from before the tree keeps its ratio.
+            let children = self.editor.groups.iter().map(|g| Layout::Group { id: g.id.clone() }).collect();
+            self.editor.layout = Some(Layout::Split { direction: "row".into(), children, sizes: vec![self.split_ratio, 1.0 - self.split_ratio] });
+        }
+        self.editor.ensure_groups();
+        self.review.ensure_groups();
+        // Session files from before modes keep diff tabs among the files.
+        // Each moves to Source Control's active group, arriving permanent as
+        // any tab that changes group does. After this the Editor's area never
+        // holds a diff tab and Source Control's never holds anything else:
+        // `open_file` and `open_diff` each open into their own, and no tab is
+        // moved or dropped across.
+        let mut diffs: Vec<EditorTab> = Vec::new();
+        for group in self.editor.groups.iter_mut() {
+            diffs.extend(group.editors.extract_if(.., |e| e.diff.is_some()));
+            if !group.editors.iter().any(|e| group.active_editor.as_deref() == Some(e.id.as_str())) {
+                group.active_editor = group.editors.first().map(|e| e.id.clone());
+            }
+        }
+        if !diffs.is_empty() {
+            let group = self.review.active_group_mut();
+            if group.active_editor.is_none() {
+                group.active_editor = diffs.first().map(|e| e.id.clone());
+            }
+            group.editors.extend(diffs.into_iter().map(|tab| EditorTab { preview: false, ..tab }));
+            self.editor.prune_groups();
+        }
+    }
+
+    /// The area holding a tab. Tab ids are unique across both areas, so a
+    /// command that names a tab finds its area from the id alone.
+    pub fn area_of_editor_mut(&mut self, editor_id: &str) -> Option<&mut Area> {
+        [&mut self.editor, &mut self.review].into_iter().find(|a| a.editors().any(|e| e.id == editor_id))
+    }
+
+    /// The area holding a group; group ids are unique across both areas too.
+    pub fn area_of_group_mut(&mut self, group_id: &str) -> Option<&mut Area> {
+        [&mut self.editor, &mut self.review].into_iter().find(|a| a.holds_group(group_id))
+    }
+
+    /// Every tab in both areas.
+    pub fn all_editors(&self) -> impl Iterator<Item = &EditorTab> {
+        self.editor.editors().chain(self.review.editors())
     }
 }
 

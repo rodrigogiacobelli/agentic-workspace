@@ -4,7 +4,8 @@
 
 use crate::session;
 use crate::state::AppState;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -34,6 +35,14 @@ impl Watcher {
         let (tx, rx) = mpsc::channel::<PathBuf>();
         let inner = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if let Ok(event) = event {
+                // A file opened or read is not a change. Every refresh this
+                // application runs opens files in what it watches — git reads
+                // `HEAD` and the refs, a tab re-reads its file, the tree lists
+                // a directory — so forwarding reads would have each refresh
+                // start the next, forever. A write that finished still counts.
+                if matches!(event.kind, EventKind::Access(kind) if kind != AccessKind::Close(AccessMode::Write)) {
+                    return;
+                }
                 for path in event.paths {
                     let _ = tx.send(path);
                 }
@@ -169,8 +178,9 @@ fn emit(app: &AppHandle, dirs: HashSet<PathBuf>) {
 }
 
 /// Makes the watched set match what is on screen: the active workspace's root
-/// and expansions, plus the directory of every open file in every workspace,
-/// since an agent may rewrite a file whose tab is in the background.
+/// and expansions, plus the directory of every tab in every workspace — a
+/// diff's as well as a file's, in both working areas — since an agent may
+/// rewrite a file whose tab is in the background.
 pub fn sync(app: &AppHandle) {
     let state = app.state::<AppState>();
     let wanted: HashSet<PathBuf> = {
@@ -192,17 +202,22 @@ pub fn sync(app: &AppHandle) {
             }
         }
         // HEAD, the index and the refs of every workspace's repository, so
-        // the branch shown follows a checkout made in the terminal — and
-        // `worktrees/`, whose entries are what the selector lists. Every
-        // workspace and not only the active one, because the selector offers
-        // the worktrees of all of them: a `git worktree add` in a background
-        // project has to reach it without being switched to.
+        // the branch shown follows a checkout made in the terminal and the
+        // tags follow a `git tag` — and `worktrees/`, whose entries are what
+        // the selector lists. Every workspace and not only the active one,
+        // because the selector offers the worktrees of all of them: a `git
+        // worktree add` in a background project has to reach it without being
+        // switched to.
         let git = state.git.lock();
         for ws in &session.workspaces {
             let Some(g) = git.get(&ws.id) else { continue };
             for dir in g.git_dir.iter().chain(g.common_dir.iter()) {
                 wanted.insert(dir.clone());
                 wanted.insert(dir.join("refs/heads"));
+                // `refs/stash` sits directly under `refs/`, so a stash pushed
+                // or dropped from a terminal reaches the Commit panel.
+                wanted.insert(dir.join("refs"));
+                wanted.insert(dir.join("refs/tags"));
                 wanted.insert(dir.join("worktrees"));
             }
         }
@@ -210,4 +225,21 @@ pub fn sync(app: &AppHandle) {
         wanted.into_iter().filter(|p| p.is_dir()).collect()
     };
     state.watcher.lock().apply(wanted, app);
+}
+
+/// Tells the frontend that everything it shows of a workspace may have
+/// changed: its root and every expanded directory, and its repository. The
+/// frontend keeps a workspace's views alive while another is on screen, but
+/// the tree is only watched for the active workspace, so a background one
+/// hears nothing of files changing — nor of the git status, which follows the
+/// files. One coming back to the screen gets this nudge to re-read both.
+pub fn catch_up(app: &AppHandle, workspace_id: &str) {
+    let dirs: Vec<String> = {
+        let state = app.state::<AppState>();
+        let session = state.session.lock();
+        let Some(ws) = session.workspace(workspace_id) else { return };
+        std::iter::once(String::new()).chain(ws.expanded.iter().cloned()).collect()
+    };
+    let _ = app.emit(EVENT_DIR_CHANGED, DirChanged { workspace_id: workspace_id.to_string(), dirs });
+    let _ = app.emit(EVENT_GIT_CHANGED, workspace_id);
 }

@@ -1,17 +1,28 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { LANGUAGES, languageFor } from "../editor/languages";
-import * as settings from "../settings";
-import type { EditorGroup, EditorTab, LayoutGroup, Workspace } from "../types";
+import { Live, useLive } from "../live";
+import { report } from "../notice";
+import type { AreaId, EditorGroup, EditorTab, LayoutGroup, PanelId, WorkArea, Workspace } from "../types";
 import { DiffView } from "./DiffView";
-import { Dropdown } from "./Menu";
-import { FILE_MIME, SplitTree, TAB_MIME, useDropZone } from "./SplitTree";
-import { report } from "./Switcher";
+import { panelInfo } from "./dock";
+import { Icon } from "./icons";
+import { ContextMenu } from "./Menu";
+import { FILE_MIME, PANEL_MIME, SplitTree, TAB_MIME, useDropZone } from "./SplitTree";
 import { TabOverflow, useTabStrip } from "./tabs";
+
+/** A working area's groups: the Editor's sit on the workspace itself, Source Control's under `review`. */
+export function areaOf(ws: Workspace, area: AreaId): WorkArea {
+  return area === "review" ? ws.review : ws;
+}
+
+export function activeGroupOf(ws: Workspace, area: AreaId): EditorGroup | undefined {
+  const a = areaOf(ws, area);
+  return a.groups.find((g) => g.id === a.activeGroup) ?? a.groups[0];
+}
 
 export async function closeTab(ws: Workspace, id: string): Promise<void> {
   if (editors.isDirty(id)) {
@@ -28,55 +39,107 @@ export async function closeTab(ws: Workspace, id: string): Promise<void> {
 export function tabLabel(tab: EditorTab): string {
   const name = tab.path.split("/").pop() ?? tab.path;
   if (!tab.diff) return name;
-  return tab.diff.kind === "commit" ? `${name} (${tab.diff.hash?.slice(0, 7) ?? "commit"})` : `${name} (diff)`;
+  if (tab.diff.kind === "commit") return `${name} (${tab.diff.hash?.slice(0, 7) ?? "commit"})`;
+  return `${name} (${tab.diff.kind === "staged" ? "staged" : tab.diff.untracked ? "untracked" : "changes"})`;
 }
 
 /** Group ids in reading order: left to right, top to bottom. */
-export function groupOrder(ws: Workspace): string[] {
+export function groupOrder(area: WorkArea): string[] {
   const out: string[] = [];
-  const walk = (node: typeof ws.layout) => {
+  const walk = (node: WorkArea["layout"]) => {
     if (node.kind === "group") out.push(node.id);
     else node.children.forEach(walk);
   };
-  walk(ws.layout);
+  walk(area.layout);
   return out;
+}
+
+/**
+ * Panels dropped on the working area's centre. They are tabs of the area's
+ * first group, in front of its files or diffs, and one of them shown takes
+ * that group's body until a file or diff tab is picked again.
+ */
+export interface WorkPanels {
+  ids: PanelId[];
+  active: PanelId | null;
+  onPick: (id: PanelId | null) => void;
+  onHide: (id: PanelId) => void;
+  /** The Commit tab's count of unstaged files (FIX-06). */
+  unstaged: number;
+  render: (id: PanelId) => ReactNode;
 }
 
 interface AreaProps {
   ws: Workspace;
-  onGitChanged: () => void;
+  area: AreaId;
+  panels: WorkPanels;
+  /** Opens the file a diff is of, in the Editor. */
+  onOpenInEditor: (path: string) => void;
 }
 
-/** The editor groups, arranged by the workspace's layout tree (ED-40). */
-export function EditorArea({ ws, onGitChanged }: AreaProps) {
+/** A mode's groups of tabs, arranged by the area's layout tree (ED-40). */
+export function EditorArea({ ws, area, panels, onOpenInEditor }: AreaProps) {
+  const state = areaOf(ws, area);
+  const host = groupOrder(state)[0];
   return (
     <section className="editor-area">
       <SplitTree<LayoutGroup>
-        node={ws.layout}
+        node={state.layout}
         path={[]}
         keyOf={(leaf) => leaf.id}
         renderLeaf={(leaf) => {
-          const group = ws.groups.find((g) => g.id === leaf.id);
-          return group ? <GroupView ws={ws} group={group} active={group.id === ws.activeGroup || ws.groups.length === 1} onGitChanged={onGitChanged} /> : null;
+          const group = state.groups.find((g) => g.id === leaf.id);
+          return group ? (
+            <GroupView
+              ws={ws}
+              area={area}
+              group={group}
+              active={group.id === state.activeGroup || state.groups.length === 1}
+              panels={group.id === host ? panels : null}
+              onOpenInEditor={onOpenInEditor}
+            />
+          ) : null;
         }}
-        onResize={(path, sizes) => void api.setLayoutSizes(ws.id, path, sizes)}
+        onResize={(path, sizes) => void api.setLayoutSizes(ws.id, area, path, sizes)}
       />
     </section>
   );
 }
 
-function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: EditorGroup; active: boolean; onGitChanged: () => void }) {
+function GroupView({ ws, area, group, active, panels, onOpenInEditor }: {
+  ws: Workspace;
+  area: AreaId;
+  group: EditorGroup;
+  active: boolean;
+  panels: WorkPanels | null;
+  onOpenInEditor: (path: string) => void;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const shownRef = useRef<string | null>(null);
   const [, bump] = useState(0);
+  const [panelMenu, setPanelMenu] = useState<{ x: number; y: number; id: PanelId } | null>(null);
   const activeId = group.activeEditor;
   const tab = group.editors.find((t) => t.id === activeId);
-  const strip = useTabStrip(activeId, group.editors.length);
+  const shownPanel = panels?.active ?? null;
+  const live = useLive();
+  // A panel shown once stays mounted behind the files, as a region's tabs do.
+  const [seen, setSeen] = useState<PanelId[]>([]);
+  useEffect(() => { if (shownPanel) setSeen((s) => (s.includes(shownPanel) ? s : [...s, shownPanel])); }, [shownPanel]);
+  // A tab that becomes active by any path — opened, cycled to, left in front
+  // by a close — comes out from behind a panel shown over the group.
+  const lastActive = useRef(activeId);
+  useEffect(() => {
+    if (lastActive.current !== activeId && activeId && shownPanel) panels?.onPick(null);
+    lastActive.current = activeId;
+  }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const strip = useTabStrip(shownPanel ?? activeId, group.editors.length + (panels?.ids.length ?? 0));
+  // Files open in the Editor only; Source Control's area takes tabs, not files.
+  const accepts = (types: readonly string[]) => types.includes(TAB_MIME) || (area === "editor" && types.includes(FILE_MIME));
 
   // A tab or a file dropped on the group: the centre joins it, an edge
   // splits it (ED-36, ED-37, ED-41). The tab strip handles its own drops.
   const zone = useDropZone(
-    (types) => types.includes(TAB_MIME) || types.includes(FILE_MIME),
+    accepts,
     (z, e) => {
       const editor = e.dataTransfer.getData(TAB_MIME);
       const path = e.dataTransfer.getData(FILE_MIME);
@@ -86,7 +149,9 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
     { ignore: (target) => !!target.closest(".tab-bar") },
   );
 
-  useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
+  // Dirty marks and banners follow the documents only while the group is on
+  // screen; coming back re-renders it anyway.
+  useEffect(() => (live ? editors.subscribe(() => bump((n) => n + 1)) : undefined), [live]);
 
   // Mounts when the active tab changes or its document was dropped from the
   // registry — never on every session update, which would refocus the editor
@@ -103,7 +168,7 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
 
   const dropOnTab = (e: React.DragEvent, index: number | null) => {
     const id = e.dataTransfer.getData(TAB_MIME);
-    const path = e.dataTransfer.getData(FILE_MIME);
+    const path = area === "editor" ? e.dataTransfer.getData(FILE_MIME) : "";
     if (!id && !path) return;
     e.preventDefault();
     e.stopPropagation();
@@ -120,7 +185,11 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
       void api.moveEditor(ws.id, id, group.id, index).catch(report);
     }
   };
-  const acceptsTab = (e: React.DragEvent) => { if (e.dataTransfer.types.includes(TAB_MIME) || e.dataTransfer.types.includes(FILE_MIME)) e.preventDefault(); };
+  const acceptsTab = (e: React.DragEvent) => { if (accepts(e.dataTransfer.types)) e.preventDefault(); };
+  const pickTab = (id: string) => {
+    if (shownPanel) panels?.onPick(null);
+    void api.setActiveEditor(ws.id, id);
+  };
 
   const entry = tab && !tab.diff ? editors.get(tab.id) : undefined;
   const doc = entry && "doc" in entry ? entry.doc : undefined;
@@ -131,20 +200,40 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
       ref={zone.ref}
       {...zone.handlers}
       className={`editor-group${active ? " active" : ""}`}
-      onMouseDownCapture={() => { if (ws.activeGroup !== group.id) void api.setActiveGroup(ws.id, group.id); }}
+      onMouseDownCapture={() => { if (areaOf(ws, area).activeGroup !== group.id) void api.setActiveGroup(ws.id, group.id); }}
     >
       <div className="tab-bar">
         <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={acceptsTab} onDrop={(e) => dropOnTab(e, null)}>
+          {panels?.ids.map((id) => {
+            const info = panelInfo(id);
+            return (
+              <div
+                key={id}
+                data-tab={id}
+                className={`tab panel-tab${id === shownPanel ? " active" : ""}`}
+                draggable
+                onDragStart={(e) => { e.dataTransfer.setData(PANEL_MIME, id); e.dataTransfer.effectAllowed = "move"; }}
+                onClick={() => panels.onPick(id)}
+                onContextMenu={(e) => { e.preventDefault(); setPanelMenu({ x: e.clientX, y: e.clientY, id }); }}
+                title={info?.label ?? id}
+              >
+                <span className="tab-glyph">{info && <Icon name={info.icon} size={14} />}</span>
+                <span className="tab-label tab-word">{info?.label ?? id}</span>
+                {id === "commit" && panels.unstaged > 0 && <span className="tab-count">{panels.unstaged}</span>}
+                <button className="tab-close" onClick={(e) => { e.stopPropagation(); panels.onHide(id); }} title={`Hide ${info?.label ?? id}`}>×</button>
+              </div>
+            );
+          })}
           {group.editors.map((t, i) => (
             <div
               key={t.id}
               data-tab={t.id}
-              className={`tab${t.id === activeId ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
+              className={`tab${t.id === activeId && !shownPanel ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
               draggable
               onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
               onDragOver={acceptsTab}
               onDrop={(e) => dropOnTab(e, i)}
-              onClick={() => void api.setActiveEditor(ws.id, t.id)}
+              onClick={() => pickTab(t.id)}
               onDoubleClick={() => { if (t.preview) void api.pinEditor(ws.id, t.id); }}
               title={t.preview ? `${t.path} (preview — double-click to keep)` : t.path}
             >
@@ -156,30 +245,49 @@ function GroupView({ ws, group, active, onGitChanged }: { ws: Workspace; group: 
         </div>
         <TabOverflow
           strip={strip}
-          entries={group.editors.map((t) => ({ id: t.id, label: tabLabel(t), active: t.id === activeId }))}
-          onPick={(id) => void api.setActiveEditor(ws.id, id)}
+          entries={[
+            ...(panels?.ids ?? []).map((id) => ({ id, label: panelInfo(id)?.label ?? id, active: id === shownPanel })),
+            ...group.editors.map((t) => ({ id: t.id, label: tabLabel(t), active: t.id === activeId && !shownPanel })),
+          ]}
+          onPick={(id) => { if (panels?.ids.includes(id as PanelId)) panels.onPick(id as PanelId); else pickTab(id); }}
         />
-        <button className="tab-add" onClick={() => void api.splitEditor(ws.id).catch(report)} title="Split the editor (Ctrl+\)">⫿</button>
+        <button className="tab-add" onClick={() => void api.splitEditor(ws.id, area).catch(report)} title="Split (Ctrl+\)">⫿</button>
       </div>
-      {tab?.diff ? (
-        <DiffView key={tab.id} ws={ws} tab={tab} onClose={() => void closeTab(ws, tab.id)} onChanged={onGitChanged} />
-      ) : (
-        <>
-          {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
-          {doc && <Banner doc={doc} />}
-          <div className="editor-host" ref={host} hidden={!!media}>
-            {group.editors.length === 0 && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
-          </div>
-          {media && tab && <MediaView ws={ws} path={tab.path} kind={media} />}
-          {entry && "binary" in entry && tab && (
-            <div className="binary-notice">
-              <p>{tab.path} is not a text file.</p>
-              <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
-            </div>
-          )}
-          {tab && <StatusBar ws={ws} tabId={tab.id} path={tab.path} doc={doc} />}
-        </>
+      {panelMenu && panels && (
+        <ContextMenu x={panelMenu.x} y={panelMenu.y} anchor={panelMenu} onClose={() => setPanelMenu(null)}>
+          <button onClick={() => { panels.onHide(panelMenu.id); setPanelMenu(null); }}>Hide {panelInfo(panelMenu.id)?.label ?? panelMenu.id}</button>
+        </ContextMenu>
       )}
+      {panels?.ids.filter((id) => id === shownPanel || seen.includes(id)).map((id) => (
+        <div key={id} className="work-panel" hidden={id !== shownPanel}>
+          {/* The tab says the panel's name only in words; drawn as a glyph, the panel carries it. */}
+          <div className="panel-title">{panelInfo(id)?.label}</div>
+          <Live.Provider value={live && id === shownPanel}>{panels.render(id)}</Live.Provider>
+        </div>
+      ))}
+      <div className="group-body" hidden={!!shownPanel}>
+        {tab?.diff ? (
+          <DiffView key={tab.id} ws={ws} tab={tab} onClose={() => void closeTab(ws, tab.id)} onOpenInEditor={() => onOpenInEditor(tab.path)} />
+        ) : (
+          <>
+            {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
+            {doc && <Banner doc={doc} />}
+            <div className="editor-host" ref={host} hidden={!!media || area === "review"}>
+              {group.editors.length === 0 && area === "editor" && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
+            </div>
+            {group.editors.length === 0 && area === "review" && (
+              <div className="empty">Pick a change in Commit, or a file of a commit in History, to see its diff here.</div>
+            )}
+            {media && tab && <MediaView ws={ws} path={tab.path} kind={media} />}
+            {entry && "binary" in entry && tab && (
+              <div className="binary-notice">
+                <p>{tab.path} is not a text file.</p>
+                <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
       {zone.overlay}
     </div>
   );
@@ -249,44 +357,4 @@ function Banner({ doc }: { doc: import("../editor/document").Doc }) {
     return <div className="banner info"><span>Reloaded from disk.</span></div>;
   }
   return null;
-}
-
-function StatusBar({ ws, tabId, path, doc }: { ws: Workspace; tabId: string; path: string; doc?: import("../editor/document").Doc }) {
-  const cursor = doc?.cursor();
-  const s = settings.get();
-  const abs = `${ws.path}/${path}`;
-  const language = languageFor(path, s?.languages[abs]);
-  const setLanguage = async (id: string) => {
-    if (!s) return;
-    const languages = { ...s.languages };
-    if (id === languageFor(path)) delete languages[abs];
-    else languages[abs] = id;
-    await settings.update({ languages });
-    if (doc?.dirty) {
-      report("Save the file before changing its language; the buffer is re-opened with the new grammar.");
-      return;
-    }
-    editors.reopen(tabId);
-    void api.setActiveEditor(ws.id, tabId);
-  };
-  const toggleBlame = async () => {
-    if (!doc) return;
-    if (doc.blameOn) { doc.setBlame(null); return; }
-    try {
-      doc.setBlame(await api.gitBlame(ws.id, path));
-    } catch (e) {
-      report(e);
-    }
-  };
-  return (
-    <div className="statusbar">
-      {ws.git?.isRepo && <span title={ws.git.state ? `${ws.git.state} in progress` : "branch"}>{ws.git.detached ? "detached" : ""} {ws.git.branch ?? ""}{ws.git.state ? ` · ${ws.git.state}` : ""}</span>}
-      {cursor && <span>Ln {cursor.line}, Col {cursor.col}</span>}
-      {doc?.isMarkdown && <span>{doc.mode}</span>}
-      {doc && ws.git?.isRepo && <button className={doc.blameOn ? "active" : ""} onClick={() => void toggleBlame()} title="Blame">blame</button>}
-      <span>UTF-8</span>
-      <span>LF</span>
-      <Dropdown className="statusbar-language" value={language} options={LANGUAGES.map((l) => ({ id: l.id, label: l.name }))} onChange={(id) => void setLanguage(id)} title="Language for this file" />
-    </div>
-  );
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { actionFor } from "../hotkeys";
+import { pick } from "../modes";
 import { useDismiss } from "../motion";
 import * as terminals from "../terminals";
 import type { Session, TerminalTab, Workspace } from "../types";
@@ -91,6 +92,8 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
       switch (action) {
         case "switch-workspace": openSwitcher(); break;
         case "focus-other-window": void api.focusWindow("workspace"); break;
+        case "mode-editor": void pick(ws, "editor", "terminal").catch(report); break;
+        case "mode-scm": void pick(ws, "scm", "terminal").catch(report); break;
         case "new-terminal": if (ws) void api.terminalOpen(ws.id).catch(report); break;
         case "close-terminal": if (activeId) void api.terminalClose(activeId); break;
         case "next-tab": cycle(1); break;

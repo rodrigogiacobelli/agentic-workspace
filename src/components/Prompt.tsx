@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useDismiss } from "../motion";
 
 interface Props {
@@ -29,7 +30,9 @@ export function Prompt({ title, initial = "", selectEnd, onSubmit, onClose }: Pr
     // Answering does not: what the answer opened is owed the keyboard.
     return () => { if (!submitted.current) from.current?.focus?.(); };
   }, [initial, selectEnd]);
-  return (
+  // On the body: a panel's region is a size container, and that would make it
+  // the box a fixed overlay is placed in.
+  return createPortal(
     <div className={`overlay${closing ? " is-closing" : ""}`} onMouseDown={dismiss}>
       <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
         <input
@@ -47,6 +50,7 @@ export function Prompt({ title, initial = "", selectEnd, onSubmit, onClose }: Pr
           }}
         />
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

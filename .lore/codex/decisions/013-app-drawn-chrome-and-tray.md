@@ -6,6 +6,7 @@ summary: Why both windows run undecorated behind one 30 px row the application d
   and what libappindicator's menu-only event model costs.
 related:
 - 001-two-os-windows
+- 017-modes
 - standards-linux-desktop
 - operations-running-agentic-workspace
 binds:
@@ -46,10 +47,13 @@ Key forces:
 
 Both windows declare `decorations: false` in `src-tauri/tauri.conf.json` and
 draw one 30 px **title row** in place of the title bar (CHR-01, CHR-08).
-`src/components/Switcher.tsx` renders it: the workspace selector, the attention
-badge, the branch and repository state, the add, remove and rename buttons, the
-workspace path, the settings button, the button that raises the other window,
-and minimise, maximise and close right-aligned in that order (CHR-03).
+`src/components/Switcher.tsx` renders it: on the left the logo, the workspace
+selector with its add, remove and rename actions, the attention badge and the
+path of a missing workspace; the mode selector at the middle of the window,
+whose Terminal and Editor buttons raise the other window (`017-modes`); and on
+the right the View menu, the settings button, and minimise, maximise and close
+in that order (CHR-03). The branch and repository state sit in the
+application's status bar.
 
 The title row carries `data-tauri-drag-region="deep"`, so Tauri's injected drag
 script starts a compositor-side move from a press anywhere inside it other than
@@ -89,7 +93,7 @@ position is requested and left to KWin (PLT-11), and
 ## Rationale
 
 - One bar of chrome above a document instead of two, and the bar that remains
-  is the title row, carrying the workspace, the branch and the path.
+  is the title row, carrying the workspace and the mode.
 - A hidden window rebuilds nothing when it returns: the webview, the editor
   state and the terminal attachment are all intact, so reopening is immediate
   and no agent loses its terminal.

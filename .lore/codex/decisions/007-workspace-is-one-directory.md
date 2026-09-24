@@ -76,5 +76,5 @@ like any other.
   legible.
 - **Deleting a worktree that holds an open workspace is refused until
   confirmed**, naming the running processes and any uncommitted work in it.
-- **A non-repository workspace is a supported state.** The git panel says so
-  and offers to initialise; nothing else changes behaviour.
+- **A non-repository workspace is a supported state.** Source Control's panels
+  say so and Commit offers to initialise; nothing else changes behaviour.

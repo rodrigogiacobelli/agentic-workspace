@@ -2,6 +2,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, events } from "../api";
+import * as editors from "../editors";
+import { MODES, modeOf, pick } from "../modes";
 import { report } from "../notice";
 import type { Session, WindowRole, Workspace } from "../types";
 import { Icon } from "./icons";
@@ -14,19 +16,17 @@ export { report };
 interface Props {
   session: Session;
   role: WindowRole;
-  unsaved: number;
   onSettings: () => void;
 }
 
 /**
  * The one row both windows carry in place of the compositor's title bar: the
- * path on the left, the workspace selector in the middle, and the View menu,
- * settings, the other window and the window controls on the right. Empty
- * parts of it drag the window and double-click maximises it.
+ * logo and the workspace selector on the left, the mode selector centred on
+ * the window, and the View menu, settings and the window controls on the
+ * right. Empty parts of it drag the window and double-click maximises it.
  */
-export function Switcher({ session, role, unsaved, onSettings }: Props) {
+export function Switcher({ session, role, onSettings }: Props) {
   const active = session.workspaces.find((w) => w.id === session.active);
-  const other: WindowRole = role === "terminal" ? "workspace" : "terminal";
   /** The one text prompt this row opens, whatever asked for it. */
   const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (name: string) => void } | null>(null);
   const [maximized, setMaximized] = useState(false);
@@ -48,6 +48,7 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
 
   const remove = async (w: Workspace) => {
     const parts = [];
+    const unsaved = editors.dirtyCount();
     if (w.terminals.length) parts.push(`${w.terminals.length} terminal tab${w.terminals.length === 1 ? "" : "s"} will be closed and their processes terminated`);
     if (w.id === session.active && unsaved) parts.push(`${unsaved} unsaved editor buffer${unsaved === 1 ? "" : "s"} will be lost`);
     const detail = parts.length ? `\n\n${parts.join(".\n")}.` : "";
@@ -108,7 +109,7 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
             ? {
                 // Naming labels the workspace, which is this row's to do.
                 // Removing is not: under its repository a worktree is git's,
-                // and the git panel's worktree list is where it is deleted —
+                // and Source Control's Worktrees panel is where it is deleted —
                 // with the warning about running processes that BR-10 wants.
                 ...row(already),
                 onRemove: undefined,
@@ -149,20 +150,12 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
         }}
       >
         <div className="switcher-left">
-          {active?.available === false && <span className="switcher-path" title={active.path}>Missing: {active.path}</span>}
-          {active?.git?.isRepo && (
-            <span className="switcher-branch" title={active.git.state ? `${active.git.state} in progress` : "Current branch"}>
-              ⑂ {active.git.detached ? "detached @ " : ""}{active.git.branch ?? ""}{active.git.state ? ` · ${active.git.state}` : ""}
-            </span>
-          )}
-        </div>
-        <div className="switcher-center">
+          <span className="switcher-logo" title="Agentic Workspace"><Icon name="logo" /></span>
           <RowMenu
             className="switcher-select"
             label={label}
             title={active?.path}
             minWidth={340}
-            align="center"
             rows={rows}
             footer={{ label: "＋ Add folder…", onClick: () => void addFolder() }}
             empty="No workspaces yet"
@@ -170,13 +163,12 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
           {session.workspaces.some((w) => w.attention && w.id !== session.active) && (
             <span className="attention-badge" title="A background workspace has new terminal output">●</span>
           )}
+          {active?.available === false && <span className="switcher-path" title={active.path}>Missing: {active.path}</span>}
         </div>
+        <ModeSelector ws={active} role={role} />
         <div className="switcher-right">
-          {role === "workspace" && <PanelsMenu />}
+          {role === "workspace" && active && <PanelsMenu mode={active.mode} />}
           <button onClick={onSettings} title="Settings (Ctrl+,)">⚙</button>
-          <button onClick={() => void api.focusWindow(other).catch(report)} title={`${other === "terminal" ? "Terminal window" : "Workspace window"} (Ctrl+Shift+Space)`}>
-            <Icon name={other === "terminal" ? "terminal" : "workspace"} />
-          </button>
           <span className="win-controls">
             <button onClick={() => void api.windowMinimize()} title="Minimise">−</button>
             <button onClick={() => void api.windowToggleMaximize()} title={maximized ? "Restore" : "Maximise"}>{maximized ? "❐" : "□"}</button>
@@ -194,6 +186,39 @@ export function Switcher({ session, role, unsaved, onSettings }: Props) {
         />
       )}
     </>
+  );
+}
+
+/**
+ * Editor, Source Control and Terminal, one width each whatever they read.
+ * It sits at the middle of the window rather than of the space left over, so
+ * a long workspace name cannot push it off centre. Terminal is drawn in its
+ * own window: picking it raises that window, and the dot on it says a shell
+ * is running there — lit when one printed while out of view.
+ */
+function ModeSelector({ ws, role }: { ws: Workspace | undefined; role: WindowRole }) {
+  const current = modeOf(ws, role);
+  const shells = ws?.terminals.length ?? 0;
+  const waiting = ws?.terminals.some((t) => t.attention) ?? false;
+  return (
+    <div className="mode-select" role="tablist" aria-label="Mode">
+      {MODES.map((m) => (
+        <button
+          key={m.id}
+          role="tab"
+          aria-selected={m.id === current}
+          className={m.id === current ? "on" : ""}
+          onClick={() => void pick(ws, m.id, role).catch(report)}
+          title={`${m.label} (${m.hotkey})`}
+        >
+          <span className="tab-glyph"><Icon name={m.icon} size={14} /></span>
+          <span className="tab-word">{m.label}</span>
+          {m.id === "terminal" && shells > 0 && (
+            <span className={`mode-dot${waiting ? " waiting" : ""}`} title={`${shells} shell${shells === 1 ? "" : "s"} running${waiting ? ", one with new output" : ""}`} />
+          )}
+        </button>
+      ))}
+    </div>
   );
 }
 

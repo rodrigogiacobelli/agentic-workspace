@@ -17,8 +17,11 @@ export type Action =
   | "copy-relative-path"
   | "cycle-mode"
   | "git"
-  | "files"
+  | "explorer"
   | "outline"
+  | "mode-editor"
+  | "mode-scm"
+  | "mode-terminal"
   | "split-editor"
   | "move-editor"
   | "settings"
@@ -43,13 +46,16 @@ export function actionFor(e: KeyboardEvent): Action | null {
       case "v": return "paste";
       case "f": return "search";
       case "g": return "git";
-      case "e": return "files";
+      case "e": return "explorer";
       case "o": return "outline";
       case "Tab": return "prev-tab";
     }
     return null;
   }
   switch (key) {
+    case "1": return "mode-editor";
+    case "2": return "mode-scm";
+    case "3": return "mode-terminal";
     case "p": return "quick-open";
     case "Tab": return "next-tab";
     case "s": return "save";
@@ -66,4 +72,5 @@ export function actionFor(e: KeyboardEvent): Action | null {
 export const TERMINAL_ACTIONS = new Set<Action>([
   "switch-workspace", "focus-other-window", "new-terminal", "close-terminal",
   "next-tab", "prev-tab", "copy", "paste", "search", "settings", "quit",
+  "mode-editor", "mode-scm",
 ]);

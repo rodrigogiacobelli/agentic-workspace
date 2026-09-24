@@ -41,6 +41,14 @@ output: porcelain v2 for status, `for-each-ref` for branches, `worktree list
 formats for logs. Hunks are staged by piping a one-hunk patch to
 `git apply --cached`. No git library is linked.
 
+Every invocation sets `GIT_OPTIONAL_LOCKS=0`. A `git status` otherwise takes
+and drops `index.lock` inside the git directory the watcher watches, the
+watcher reports the change, and the refresh it starts runs `git status` again,
+five times a second for every repository. A stash is named by its commit, not
+its `stash@{N}` position: `git_stash_apply` and `git_stash_drop` look the
+position up again in `stash list`, and refuse a stash that is gone, since a
+stash pushed or dropped from a terminal renumbers the ones below it.
+
 ## Rationale
 
 - Hooks run, signing happens, credential helpers are consulted, and every

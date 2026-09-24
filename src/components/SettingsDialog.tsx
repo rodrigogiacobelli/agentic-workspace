@@ -5,9 +5,9 @@ import * as settings from "../settings";
 import { allThemes, isImported } from "../themes";
 import { useDismiss } from "../motion";
 import type { HotkeyStatus, Settings, Workspace } from "../types";
-import { defaultLayout, normalize, showPanel, PANELS } from "./dock";
+import { normalizeAll, panelInfo, showPanel } from "./dock";
 import { Dropdown } from "./Menu";
-import { report } from "./Switcher";
+import { report } from "../notice";
 
 interface Props {
   current: Settings;
@@ -91,8 +91,8 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
           </span>
         </label>
         <label className="setting">
-          <span>Panel tabs</span>
-          <Dropdown value={current.panelTabs} options={[{ id: "text", label: "Words" }, { id: "icons", label: "Icons" }]} onChange={(id) => set({ panelTabs: id as "text" | "icons" })} />
+          <span>Modes and panel tabs read as</span>
+          <Dropdown value={current.tabDisplay} options={[{ id: "labels", label: "Labels" }, { id: "icons", label: "Icons" }]} onChange={(id) => set({ tabDisplay: id as "labels" | "icons" })} />
         </label>
         <h3>Raise from anywhere</h3>
         {text("Preferred key (portal syntax, e.g. CTRL+ALT+a)", current.globalHotkey, (v) => set({ globalHotkey: v }))}
@@ -136,14 +136,17 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
           />
         </label>
         <h3>Panels</h3>
-        {normalize(current.panelLayout ?? defaultLayout()).hidden.map((id) => (
-          <div className="setting" key={id}>
-            <span>{PANELS.find((p) => p.id === id)?.label ?? id} is hidden</span>
-            <button onClick={() => set({ panelLayout: showPanel(normalize(current.panelLayout ?? defaultLayout()), id) })}>Show</button>
-          </div>
-        ))}
+        {(["editor", "scm"] as const).flatMap((mode) => {
+          const layouts = normalizeAll(current.panelLayout);
+          return layouts[mode].hidden.map((id) => (
+            <div className="setting" key={id}>
+              <span>{panelInfo(id)?.label ?? id} is hidden in {mode === "editor" ? "Editor" : "Source Control"}</span>
+              <button onClick={() => set({ panelLayout: { ...layouts, [mode]: showPanel(layouts[mode], id) } })}>Show</button>
+            </div>
+          ));
+        })}
         <div className="setting">
-          <span>Files, Search, Git and Outline back in one left sidebar</span>
+          <span>Every mode's panels back where they started</span>
           <button onClick={() => set({ panelLayout: null })}>Reset panel layout</button>
         </div>
         <h3>Agent signals</h3>

@@ -3,19 +3,26 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, events } from "../api";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
+import { Live, useLive } from "../live";
+import { pick } from "../modes";
+import { report } from "../notice";
+import * as repo from "../repo";
 import * as settings from "../settings";
-import type { PanelId, PanelLayout, Region, RepoInfo, Session, StatusEntry, Workspace } from "../types";
-import { PANELS, defaultLayout, dropPanel, hidePanel, leafKey, normalize, placePanel, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
-import { EditorArea, closeTab, groupOrder } from "./EditorArea";
+import type { AreaId, DiffSpec, DockedMode, PanelId, PanelLayout, PanelLayouts, Region, Session, WorkLeaf, Workspace } from "../types";
+import { BranchesPanel } from "./BranchesPanel";
+import { CommitPanel } from "./CommitPanel";
+import { dropPanel, hidePanel, leafKey, normalizeAll, panelInfo, placePanel, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
+import { EditorArea, activeGroupOf, areaOf, closeTab, groupOrder } from "./EditorArea";
 import { FileTree } from "./FileTree";
-import { GitPanel } from "./GitPanel";
+import { HistoryPanel } from "./HistoryPanel";
 import { Icon } from "./icons";
 import { ContextMenu } from "./Menu";
 import { Outline } from "./Outline";
 import { Palette, type PaletteItem } from "./Palette";
 import { SearchPanel } from "./SearchPanel";
 import { PANEL_MIME, SplitTree, useDropZone } from "./SplitTree";
-import { report } from "./Switcher";
+import { TagsPanel } from "./TagsPanel";
+import { WorktreesPanel } from "./WorktreesPanel";
 
 interface Props {
   session: Session;
@@ -23,58 +30,68 @@ interface Props {
   openSettings: () => void;
 }
 
-const same = (a: PanelLayout, b: PanelLayout) => JSON.stringify(a) === JSON.stringify(b);
+const DOCKED: DockedMode[] = ["editor", "scm"];
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** The working area a docked mode shows: the Editor's files, or Source Control's diffs. */
+const areaFor = (mode: DockedMode): AreaId => (mode === "scm" ? "review" : "editor");
+
+/** Files open in the Editor: a file asked for from anywhere brings the Editor forward. */
+function openInEditor(ws: Workspace, path: string, preview: boolean): Promise<string> {
+  if (ws.mode !== "editor") void api.setMode(ws.id, "editor").catch(report);
+  return api.openFile(ws.id, path, preview);
+}
 
 export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) {
   const ws = session.workspaces.find((w) => w.id === session.active);
-  const [selected, setSelected] = useState<string | null>(null);
+  const wsRef = useRef(ws);
+  wsRef.current = ws;
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
-  const [gitStatus, setGitStatus] = useState<StatusEntry[]>([]);
-  const [gitInfo, setGitInfo] = useState<RepoInfo | null>(null);
-  const [gitTick, setGitTick] = useState(0);
-  const [, bump] = useState(0);
+  /** The path each workspace's tree has selected, for the copy-path key. */
+  const selection = useRef(new Map<string, string | null>());
 
-  // The panel layout is the application's, kept with the settings; the
-  // settings dialog can reset it or show a hidden panel from any window.
-  const [layout, setLayout] = useState<PanelLayout>(() => normalize(settings.get()?.panelLayout ?? defaultLayout()));
-  const [iconTabs, setIconTabs] = useState(settings.get()?.panelTabs === "icons");
-  const layoutRef = useRef(layout);
-  layoutRef.current = layout;
+  // The dock trees are the application's, kept with the settings; the
+  // settings dialog can reset them or show a hidden panel from any window.
+  const [layouts, setLayouts] = useState<PanelLayouts>(() => normalizeAll(settings.get()?.panelLayout));
+  const layoutsRef = useRef(layouts);
+  layoutsRef.current = layouts;
   useEffect(() => settings.subscribe((s) => {
-    setIconTabs(s.panelTabs === "icons");
-    const next = normalize(s.panelLayout ?? defaultLayout());
-    if (!same(next, layoutRef.current)) setLayout(next);
+    const next = normalizeAll(s.panelLayout);
+    if (!same(next, layoutsRef.current)) setLayouts(next);
   }), []);
-  const update = useCallback((next: PanelLayout) => {
-    if (same(next, layoutRef.current)) return;
-    setLayout(next);
-    void settings.update({ panelLayout: next }).catch(report);
+  const update = useCallback((mode: DockedMode, next: PanelLayout) => {
+    if (same(next, layoutsRef.current[mode])) return;
+    const all = { ...layoutsRef.current, [mode]: next };
+    layoutsRef.current = all;
+    setLayouts(all);
+    void settings.update({ panelLayout: all }).catch(report);
   }, []);
-  const focusPanel = useCallback((id: PanelId) => update(showPanel(layoutRef.current, id)), [update]);
+  /** A panel's hotkey shows it wherever it sits, bringing its mode forward (DOCK-10). */
+  const focusPanel = useCallback((id: PanelId) => {
+    const info = panelInfo(id);
+    const w = wsRef.current;
+    if (!info || !w) return;
+    if (w.mode !== info.mode) void api.setMode(w.id, info.mode).catch(report);
+    update(info.mode, showPanel(layoutsRef.current[info.mode], id));
+    window.dispatchEvent(new CustomEvent("panel-focus", { detail: { workspaceId: w.id, id } }));
+  }, [update]);
+  /** Something opened in a mode's working area comes to the front of it, over any panel shown there. */
+  const front = useCallback((mode: DockedMode) => update(mode, setActivePanel(layoutsRef.current[mode], "work", null)), [update]);
+  /** Files open in the Editor, in front of whatever panel its working area shows. */
+  const openFile = useCallback((w: Workspace, path: string, preview: boolean) => {
+    front("editor");
+    return openInEditor(w, path, preview);
+  }, [front]);
 
-  // Git status follows the working tree: any change in the workspace, or in
-  // its repository, refreshes it.
-  const refreshGit = useCallback(() => setGitTick((n) => n + 1), []);
+  // A workspace's views are built the first time it is shown and kept from
+  // then on; the one on screen follows the watcher (decision 6).
+  const [mounted, setMounted] = useState<string[]>(() => (session.active ? [session.active] : []));
   useEffect(() => {
-    if (!ws) return;
-    let cancelled = false;
-    api.gitInfo(ws.id).then((i) => { if (!cancelled) setGitInfo(i); }).catch(() => setGitInfo({ isRepo: false, branch: null, detached: false, state: null, isWorktree: false, mainWorktree: null, upstream: null, ahead: 0, behind: 0 }));
-    api.gitStatus(ws.id).then((s) => { if (!cancelled) setGitStatus(s); }).catch(() => setGitStatus([]));
-    return () => { cancelled = true; };
-  }, [ws?.id, gitTick]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    let timer: number | null = null;
-    const schedule = (id: string) => {
-      if (id !== ws?.id) return;
-      if (timer) window.clearTimeout(timer);
-      timer = window.setTimeout(refreshGit, 300);
-    };
-    const a = events.onDirChanged((c) => schedule(c.workspaceId));
-    const b = events.onGitChanged(schedule);
-    return () => { void a.then((u) => u()); void b.then((u) => u()); if (timer) window.clearTimeout(timer); };
-  }, [ws?.id, refreshGit]);
+    const id = session.active;
+    if (id) setMounted((m) => (m.includes(id) ? m : [...m, id]));
+    repo.show(id);
+  }, [session.active]);
 
-  useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
   useEffect(() => {
     editors.retain(editors.allTabIds(session.workspaces));
     editors.follow(session.workspaces);
@@ -83,16 +100,22 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   // Links inside documents open files here; notices surface here.
   useEffect(() => {
     editors.setHooks({
-      openFile: (rel) => { if (ws) void api.openFile(ws.id, rel, true).catch(report); },
+      openFile: (rel) => { if (ws) void openFile(ws, rel, true).catch(report); },
       notice: (m) => report(m),
-      showCommit: (hash) => { focusPanel("git"); window.dispatchEvent(new CustomEvent("show-commit", { detail: hash })); },
+      showCommit: (hash) => {
+        focusPanel("history");
+        // History may only now be mounting with its mode; the event waits for it.
+        window.setTimeout(() => window.dispatchEvent(new CustomEvent("show-commit", { detail: hash })), 300);
+      },
     });
-  }, [ws, focusPanel]);
+  }, [ws, focusPanel, openFile]);
 
   // A terminal link or a notification asked for a file at a line.
   useEffect(() => {
     const unlisten = events.onOpenAt(async (t) => {
       if (t.workspaceId !== session.active) await api.switchWorkspace(t.workspaceId).catch(report);
+      await api.setMode(t.workspaceId, "editor").catch(report);
+      front("editor");
       api.openFile(t.workspaceId, t.path, true).then((id) => { if (t.line > 0) editors.revealLine(id, t.line, Math.max(0, t.column - 1)); }).catch(report);
     });
     return () => { void unlisten.then((u) => u()); };
@@ -108,7 +131,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   // document, wherever over the editor they were dropped (FIX-10).
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      const activeId = ws ? editors.activeEditorId(ws) : null;
+      const activeId = ws && ws.mode === "editor" ? editors.activeEditorId(ws) : null;
       if (event.payload.type !== "drop" || !activeId) return;
       void editors.doc(activeId)?.insertPaths(event.payload.paths);
     });
@@ -127,33 +150,41 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     const onKey = (e: KeyboardEvent) => {
       const action = actionFor(e);
       if (!action) return;
-      const activeId = ws ? editors.activeEditorId(ws) : null;
+      // Tab keys act on the working area of the mode on screen.
+      const area = areaFor(ws?.mode ?? "editor");
+      const activeId = ws ? activeGroupOf(ws, area)?.activeEditor ?? null : null;
       switch (action) {
         case "switch-workspace": openSwitcher(); break;
         case "focus-other-window": void api.focusWindow("terminal"); break;
+        case "mode-editor": void pick(ws, "editor", "workspace").catch(report); break;
+        case "mode-scm": void pick(ws, "scm", "workspace").catch(report); break;
+        case "mode-terminal": void pick(ws, "terminal", "workspace").catch(report); break;
         case "quick-open": void openQuickOpen(); break;
         case "search": focusPanel("search"); break;
-        case "git": focusPanel("git"); break;
-        case "files": focusPanel("files"); break;
+        case "git": focusPanel("commit"); break;
+        case "explorer": focusPanel("explorer"); break;
         case "outline": focusPanel("outline"); break;
         case "settings": openSettings(); break;
         case "save": if (activeId) void editors.save(activeId).catch(report); break;
         case "close-editor": if (ws && activeId) void closeTab(ws, activeId); break;
         case "cycle-mode": if (activeId) editors.doc(activeId)?.cycleMode(); break;
-        case "split-editor": if (ws) void api.splitEditor(ws.id).catch(report); break;
+        case "split-editor": if (ws) void api.splitEditor(ws.id, area).catch(report); break;
         case "move-editor": {
           // The next group in reading order, or a new one when there is no other (ED-42).
           if (!ws || !activeId) break;
-          const order = groupOrder(ws);
-          const i = order.indexOf(ws.activeGroup ?? "");
+          const state = areaOf(ws, area);
+          const order = groupOrder(state);
+          const i = order.indexOf(state.activeGroup ?? "");
           const next = order.length > 1 ? order[(i + 1) % order.length] : "";
           void api.moveEditor(ws.id, activeId, next, null).catch(report);
           break;
         }
-        case "next-tab": cycle(ws, 1); break;
-        case "prev-tab": cycle(ws, -1); break;
+        case "next-tab": cycle(ws, area, 1); break;
+        case "prev-tab": cycle(ws, area, -1); break;
         case "copy-relative-path": {
-          const path = selected ?? (ws && activeId ? editors.activeGroup(ws)?.editors.find((t) => t.id === activeId)?.path : undefined);
+          // The tree's selection is on screen only in the Editor.
+          const tree = ws?.mode === "editor" ? selection.current.get(ws.id) : null;
+          const path = tree ?? (ws && activeId ? activeGroupOf(ws, area)?.editors.find((t) => t.id === activeId)?.path : undefined);
           if (path) void api.copyText(path);
           break;
         }
@@ -167,18 +198,71 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return () => window.removeEventListener("keydown", onKey, true);
   });
 
-  if (!ws) {
-    return <main className="empty">Add a folder to start.</main>;
-  }
+  const alive = mounted
+    .map((id) => session.workspaces.find((w) => w.id === id))
+    .filter((w): w is Workspace => !!w);
+
+  return (
+    <main className="workspace-main">
+      {alive.map((w) => (
+        <WorkspaceView
+          key={w.id}
+          ws={w}
+          session={session}
+          visible={w.id === session.active}
+          layouts={layouts}
+          update={update}
+          front={front}
+          openFile={openFile}
+          selection={selection.current}
+        />
+      ))}
+      {!ws && <div className="empty">Add a folder to start.</div>}
+      {quickOpen && ws && (
+        <Palette
+          title="Open file"
+          items={quickOpen}
+          onClose={() => setQuickOpen(null)}
+          onPick={(item) => { setQuickOpen(null); void openFile(ws, item.id, true).catch(report); }}
+        />
+      )}
+    </main>
+  );
+}
+
+interface ViewProps {
+  ws: Workspace;
+  session: Session;
+  visible: boolean;
+  layouts: PanelLayouts;
+  update: (mode: DockedMode, next: PanelLayout) => void;
+  front: (mode: DockedMode) => void;
+  openFile: (ws: Workspace, path: string, preview: boolean) => Promise<string>;
+  selection: Map<string, string | null>;
+}
+
+/**
+ * One workspace's docked modes. A mode is built the first time it is shown
+ * and stays mounted, so switching mode — or workspace — paints rather than
+ * rebuilds, and a mode comes back with its tabs, its scroll and its cursor
+ * where they were. A hidden view skips rendering (`content-visibility`).
+ */
+function WorkspaceView({ ws, session, visible, layouts, update, front, openFile, selection }: ViewProps) {
+  const [shown, setShown] = useState<DockedMode[]>([ws.mode]);
+  useEffect(() => { setShown((s) => (s.includes(ws.mode) ? s : [...s, ws.mode])); }, [ws.mode]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const select = (path: string | null) => { selection.set(ws.id, path); setSelected(path); };
+  const { status } = repo.useRepo(ws.id);
 
   const openAt = (path: string, line: number, column: number) => {
-    api.openFile(ws.id, path, true).then((id) => editors.revealLine(id, line, column)).catch(report);
+    openFile(ws, path, true).then((id) => editors.revealLine(id, line, column)).catch(report);
   };
 
   // A single click previews and the tree keeps its focus, so Ctrl+C and the
   // other tree keys still reach it; a double click or Enter opens for keeps
   // and hands focus to the document.
   const openFromTree = (path: string, preview: boolean) => {
+    front("editor");
     if (!preview) (document.activeElement as HTMLElement | null)?.blur();
     api.openFile(ws.id, path, preview).then((id) => { if (!preview) editors.doc(id)?.focus(); }).catch(report);
   };
@@ -191,74 +275,111 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     doc.insertCitation(paths);
   };
 
-  // Files with work-tree changes or not yet tracked; what is only staged does not count (FIX-06).
-  const unstaged = gitStatus.filter((s) => s.untracked || s.conflicted || s.worktree !== ".").length;
+  const onDiff = (path: string, diff: DiffSpec) => { front("scm"); void api.openDiff(ws.id, path, diff).catch(report); };
+  const onOpenFile = (path: string) => void openFile(ws, path, true).catch(report);
 
   const renderPanel = (id: PanelId) => {
     if (!ws.available) return <div className="tree-loading">The directory {ws.path} is missing.</div>;
     switch (id) {
-      case "files": return <FileTree key={ws.id} ws={ws} selected={selected} onSelect={setSelected} onOpen={openFromTree} onQuote={quote} gitStatus={gitStatus} />;
-      case "search": return <SearchPanel key={ws.id} ws={ws} onOpen={openAt} />;
+      case "explorer": return <FileTree key="explorer" kind="explorer" ws={ws} selected={selected} onSelect={select} onOpen={openFromTree} onQuote={quote} gitStatus={status} />;
+      case "custom": return <FileTree key="custom" kind="custom" ws={ws} selected={selected} onSelect={select} onOpen={openFromTree} onQuote={quote} gitStatus={status} />;
+      case "search": return <SearchPanel ws={ws} onOpen={openAt} />;
       case "outline": return <Outline ws={ws} />;
-      case "git": return <GitPanel key={ws.id} ws={ws} session={session} status={gitStatus} info={gitInfo} refresh={refreshGit} onDiff={(p, d) => void api.openDiff(ws.id, p, d).catch(report)} onOpenFile={(p) => void api.openFile(ws.id, p, true).catch(report)} />;
+      case "commit": return <CommitPanel ws={ws} onDiff={onDiff} onOpenFile={onOpenFile} />;
+      case "history": return <HistoryPanel ws={ws} onDiff={onDiff} />;
+      case "branches": return <BranchesPanel ws={ws} session={session} />;
+      case "worktrees": return <WorktreesPanel ws={ws} session={session} />;
+      case "tags": return <TagsPanel ws={ws} />;
     }
   };
 
   return (
-    <main className="workspace-main">
-      <SplitTree<DockLeaf>
-        node={layout.root}
-        path={[]}
-        keyOf={leafKey}
-        renderLeaf={(leaf) =>
-          leaf.kind === "editor" ? (
-            <EditorLeaf layout={layout} update={update}><EditorArea ws={ws} onGitChanged={refreshGit} /></EditorLeaf>
-          ) : (
-            <RegionView region={leaf} layout={layout} update={update} unstaged={unstaged} icons={iconTabs} render={renderPanel} />
-          )
-        }
-        onResize={(path, sizes) => update(resizeSplit(layout, path, sizes))}
-      />
-      {quickOpen && (
-        <Palette
-          title="Open file"
-          items={quickOpen}
-          onClose={() => setQuickOpen(null)}
-          onPick={(item) => { setQuickOpen(null); void api.openFile(ws.id, item.id, true).catch(report); }}
-        />
-      )}
-    </main>
+    <div className={`workspace-view${visible ? "" : " is-hidden"}`}>
+      {DOCKED.filter((m) => shown.includes(m)).map((mode) => {
+        const layout = layouts[mode];
+        const set = (next: PanelLayout) => update(mode, next);
+        return (
+          <div key={mode} className={`mode-view${mode === ws.mode ? "" : " is-hidden"}`}>
+            <Live.Provider value={visible && mode === ws.mode}>
+            <SplitTree<DockLeaf>
+              node={layout.root}
+              path={[]}
+              keyOf={leafKey}
+              renderLeaf={(leaf) =>
+                leaf.kind === "work" ? (
+                  <WorkLeafView ws={ws} mode={mode} leaf={leaf} layout={layout} update={set} unstaged={repo.unstagedCount(status)} openFile={openFile} render={renderPanel} />
+                ) : (
+                  <RegionView workspaceId={ws.id} mode={mode} region={leaf} layout={layout} update={set} unstaged={repo.unstagedCount(status)} render={renderPanel} />
+                )
+              }
+              onResize={(path, sizes) => set(resizeSplit(layout, path, sizes))}
+            />
+            </Live.Provider>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-/** The editor area as a dock leaf: panels dropped on its edges get a region beside it. */
-function EditorLeaf({ layout, update, children }: { layout: PanelLayout; update: (l: PanelLayout) => void; children: React.ReactNode }) {
+/** The panel a drag carries, when it belongs to this mode's tree. */
+function draggedPanel(e: React.DragEvent, mode: DockedMode): PanelId | null {
+  const id = e.dataTransfer.getData(PANEL_MIME) as PanelId;
+  return panelInfo(id)?.mode === mode ? id : null;
+}
+
+/**
+ * The working area as a dock leaf. An edge makes a region beside it; the
+ * centre, or its tab strip, takes the panel as one of its own tabs.
+ */
+function WorkLeafView({ ws, mode, leaf, layout, update, unstaged, openFile, render }: {
+  ws: Workspace;
+  mode: DockedMode;
+  leaf: WorkLeaf;
+  layout: PanelLayout;
+  update: (l: PanelLayout) => void;
+  unstaged: number;
+  openFile: (ws: Workspace, path: string, preview: boolean) => Promise<string>;
+  render: (id: PanelId) => React.ReactNode;
+}) {
   const zone = useDropZone(
     (types) => types.includes(PANEL_MIME),
-    (z, e) => update(dropPanel(layout, e.dataTransfer.getData(PANEL_MIME) as PanelId, "editor", z)),
-    { edgesOnly: true },
+    (z, e) => { const id = draggedPanel(e, mode); if (id) update(dropPanel(layout, id, "work", z)); },
+    { centerOver: (target) => !!target.closest(".tab-bar") },
   );
   return (
-    <div className="editor-leaf" ref={zone.ref} {...zone.handlers}>
-      {children}
+    <div className="work-leaf" ref={zone.ref} {...zone.handlers}>
+      <EditorArea
+        ws={ws}
+        area={areaFor(mode)}
+        panels={{
+          ids: leaf.panels,
+          active: leaf.active,
+          onPick: (id) => update(setActivePanel(layout, "work", id)),
+          onHide: (id) => update(hidePanel(layout, id)),
+          unstaged,
+          render,
+        }}
+        onOpenInEditor={(path) => void openFile(ws, path, false).catch(report)}
+      />
       {zone.overlay}
     </div>
   );
 }
 
 /** One tabbed stack of panels. Its tabs are dragged to move a panel (DOCK-01). */
-function RegionView({ region, layout, update, unstaged, icons, render }: {
+function RegionView({ workspaceId, mode, region, layout, update, unstaged, render }: {
+  workspaceId: string;
+  mode: DockedMode;
   region: Region;
   layout: PanelLayout;
   update: (l: PanelLayout) => void;
   unstaged: number;
-  /** Tabs read as icons rather than words. */
-  icons: boolean;
   render: (id: PanelId) => React.ReactNode;
 }) {
   const zone = useDropZone(
     (types) => types.includes(PANEL_MIME),
-    (z, e) => update(dropPanel(layout, e.dataTransfer.getData(PANEL_MIME) as PanelId, region.id, z)),
+    (z, e) => { const id = draggedPanel(e, mode); if (id) update(dropPanel(layout, id, region.id, z)); },
     { ignore: (target) => !!target.closest(".sidebar-tabs") },
   );
   // A panel tab dropped on the strip lands at that position: the way to
@@ -267,13 +388,19 @@ function RegionView({ region, layout, update, unstaged, icons, render }: {
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; id: PanelId } | null>(null);
   const isPanel = (e: React.DragEvent) => e.dataTransfer.types.includes(PANEL_MIME);
   const dropAt = (e: React.DragEvent, index: number | null) => {
-    const panel = e.dataTransfer.getData(PANEL_MIME) as PanelId;
+    const panel = draggedPanel(e, mode);
     setOver(null);
     if (!panel) return;
     e.preventDefault();
     e.stopPropagation();
     update(placePanel(layout, panel, region.id, index));
   };
+  const active = panelInfo(region.active);
+  // A tab shown once stays mounted behind the others, so a fetch still
+  // running or a list scrolled halfway survives a look at another tab.
+  const live = useLive();
+  const [seen, setSeen] = useState<PanelId[]>([region.active]);
+  useEffect(() => { setSeen((s) => (s.includes(region.active) ? s : [...s, region.active])); }, [region.active]);
   return (
     <aside className="region" ref={zone.ref} {...zone.handlers}>
       <div
@@ -283,7 +410,7 @@ function RegionView({ region, layout, update, unstaged, icons, render }: {
         onDrop={(e) => dropAt(e, null)}
       >
         {region.panels.map((id, i) => {
-          const panel = PANELS.find((p) => p.id === id);
+          const info = panelInfo(id);
           return (
             <div
               key={id}
@@ -293,29 +420,39 @@ function RegionView({ region, layout, update, unstaged, icons, render }: {
               onDragStart={(e) => { e.dataTransfer.setData(PANEL_MIME, id); e.dataTransfer.effectAllowed = "move"; }}
               onDragOver={(e) => { if (isPanel(e)) { e.preventDefault(); e.stopPropagation(); setOver(i); } }}
               onDrop={(e) => dropAt(e, i)}
-              onClick={() => update(setActivePanel(layout, region.id, id))}
+              onClick={() => {
+                update(setActivePanel(layout, region.id, id));
+                window.dispatchEvent(new CustomEvent("panel-focus", { detail: { workspaceId, id } }));
+              }}
               onContextMenu={(e) => { e.preventDefault(); setTabMenu({ x: e.clientX, y: e.clientY, id }); }}
-              title={`${panel?.label ?? id} (${panel?.hotkey ?? ""})`}
+              title={info?.hotkey ? `${info.label} (${info.hotkey})` : info?.label ?? id}
             >
-              {icons && panel ? <Icon name={panel.icon} /> : (panel?.label ?? id)}
-              {id === "git" && unstaged ? <span className="tab-count">{icons ? unstaged : `(${unstaged})`}</span> : null}
+              <span className="tab-glyph">{info && <Icon name={info.icon} />}</span>
+              <span className="tab-word">{info?.label ?? id}</span>
+              {id === "commit" && unstaged > 0 && <span className="tab-count">{unstaged}</span>}
             </div>
           );
         })}
       </div>
       {tabMenu && (
         <ContextMenu x={tabMenu.x} y={tabMenu.y} anchor={tabMenu} onClose={() => setTabMenu(null)}>
-          <button onClick={() => { update(hidePanel(layout, tabMenu.id)); setTabMenu(null); }}>Hide {PANELS.find((p) => p.id === tabMenu.id)?.label ?? tabMenu.id}</button>
+          <button onClick={() => { update(hidePanel(layout, tabMenu.id)); setTabMenu(null); }}>Hide {panelInfo(tabMenu.id)?.label ?? tabMenu.id}</button>
         </ContextMenu>
       )}
-      {render(region.active)}
+      {/* The tab says the panel's name only in words; drawn as a glyph, the panel carries it. */}
+      <div className="panel-title">{active?.label}</div>
+      {region.panels.filter((id) => id === region.active || seen.includes(id)).map((id) => (
+        <div key={id} className="panel-slot" hidden={id !== region.active}>
+          <Live.Provider value={live && id === region.active}>{render(id)}</Live.Provider>
+        </div>
+      ))}
       {zone.overlay}
     </aside>
   );
 }
 
-function cycle(ws: Workspace | undefined, delta: number) {
-  const group = ws ? editors.activeGroup(ws) : undefined;
+function cycle(ws: Workspace | undefined, area: AreaId, delta: number) {
+  const group = ws ? activeGroupOf(ws, area) : undefined;
   if (!ws || !group || group.editors.length === 0) return;
   const i = group.editors.findIndex((t) => t.id === group.activeEditor);
   const next = group.editors[(i + delta + group.editors.length) % group.editors.length];

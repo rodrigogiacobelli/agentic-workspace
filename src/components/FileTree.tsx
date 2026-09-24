@@ -7,10 +7,12 @@ import { ContextMenu, RowMenu, SubMenu } from "./Menu";
 import { Prompt } from "./Prompt";
 import { FILE_MIME } from "./SplitTree";
 import { duration } from "../motion";
-import { report } from "./Switcher";
+import { report } from "../notice";
 
 interface Props {
   ws: Workspace;
+  /** The workspace's own tree, or its custom views. */
+  kind: "explorer" | "custom";
   /** A single click opens a preview tab; a double click or a new file opens a permanent one. */
   onOpen: (path: string, preview: boolean) => void;
   /** Inserts a citation of each path into the active document, one per line. */
@@ -64,11 +66,11 @@ function join(dir: string, name: string): string {
 }
 
 /**
- * The tree rooted at the workspace, read one directory at a time — or a
- * custom view: its entries at the root whatever their depth, each expanding
- * to its real children (VIEW-03, VIEW-04).
+ * Explorer: the tree rooted at the workspace, read one directory at a time.
+ * Custom: one of the workspace's views — its entries at the root whatever
+ * their depth, each expanding to its real children (VIEW-03, VIEW-04).
  */
-export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = [] }: Props) {
+export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitStatus = [] }: Props) {
   const gitMap = useMemo(() => statusMap(gitStatus), [gitStatus]);
   const [listings, setListings] = useState<Map<string, Entry[]>>(new Map());
   const [menu, setMenu] = useState<Menu | null>(null);
@@ -86,7 +88,8 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
   /** Directories still drawn while their collapse plays out. */
   const [collapsing, setCollapsing] = useState<Set<string>>(new Set());
   const inflight = useRef(new Set<string>());
-  const view = ws.views.find((v) => v.id === ws.activeView) ?? null;
+  // Custom shows the view last picked, or the first there is.
+  const view = kind === "custom" ? (ws.views.find((v) => v.id === ws.activeView) ?? ws.views[0] ?? null) : null;
   const entriesKey = view?.entries.join("\n") ?? "";
 
   const load = useCallback((dir: string) => {
@@ -340,7 +343,7 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
   // A view's root: its entries in order, each expanding to real children.
   const renderView = (): React.ReactNode => {
     if (!viewEntries) return <div className="tree-loading loading">Loading…</div>;
-    if (viewEntries.length === 0) return <div className="tree-loading">Nothing has been sent to this view yet. Right-click a file or folder in Files and choose “Send to view”.</div>;
+    if (viewEntries.length === 0) return <div className="tree-loading">Nothing has been sent to this view yet. Right-click a file or folder in Explorer and choose “Send to view”.</div>;
     return viewEntries.map((e) => {
       const expanded = e.isDir && ws.expanded.includes(e.path);
       const open = () => { onSelect(e.path); if (e.missing) return; if (e.isDir) toggle(e.path); else onOpen(e.path, true); };
@@ -420,47 +423,55 @@ export function FileTree({ ws, onOpen, onQuote, selected, onSelect, gitStatus = 
 
   return (
     <div className="sidebar-body">
-      <div className="tree-head">
-        <RowMenu
-          label={view ? view.name : "Files"}
-          title={view ? `View: ${view.name}` : "The workspace's files"}
-          minWidth={220}
-          rows={[
-            { id: "", name: "Files", selected: !view, onPick: () => void api.setActiveView(ws.id, null).catch(report) },
-            ...ws.views.map((v) => ({
-              id: v.id,
-              name: v.name,
-              selected: v.id === view?.id,
-              onPick: () => void api.setActiveView(ws.id, v.id).catch(report),
-              onRename: () => setDialog({ kind: "rename-view", view: v }),
-              onRemove: () => void deleteView(v),
-            })),
-          ]}
-          footer={{ label: "＋ New view…", onClick: () => setDialog({ kind: "new-view" }) }}
-        />
-        <span className="tree-tools">
-          <button onClick={() => create("new-file")} disabled={creation === null} title={creation === null ? "Select a folder in the view first" : `New file in ${creation || "the workspace root"}`}><Icon name="newFile" /></button>
-          <button onClick={() => create("new-folder")} disabled={creation === null} title={creation === null ? "Select a folder in the view first" : `New folder in ${creation || "the workspace root"}`}><Icon name="newFolder" /></button>
-        </span>
-      </div>
-      <input
-        className="tree-filter"
-        placeholder="Filter files"
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Escape") setFilter(""); }}
-      />
-      <nav
-        className="tree"
-        tabIndex={0}
-        onKeyDown={onKey}
-        onMouseDown={(e) => { if (e.target === e.currentTarget) onSelect(null); }}
-        onContextMenu={(ev) => { ev.preventDefault(); openMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
-      >
-        {view
-          ? (filter ? renderFilteredView() : renderView())
-          : (filter ? (filtered ? renderFiltered("", 0) : <div className="tree-loading loading">Loading…</div>) : render("", 0))}
-      </nav>
+      {kind === "custom" && !view ? (
+        <div className="panel-empty">
+          No custom views yet. A view gathers files and folders from anywhere in the workspace at its root: right-click one in Explorer and choose “Send to view”.
+          <div><button onClick={() => setDialog({ kind: "new-view" })}>New view…</button></div>
+        </div>
+      ) : (
+        <>
+          <div className="tree-head">
+            {view && (
+              <RowMenu
+                label={view.name}
+                title={`View: ${view.name}`}
+                minWidth={220}
+                rows={ws.views.map((v) => ({
+                  id: v.id,
+                  name: v.name,
+                  selected: v.id === view.id,
+                  onPick: () => void api.setActiveView(ws.id, v.id).catch(report),
+                  onRename: () => setDialog({ kind: "rename-view", view: v }),
+                  onRemove: () => void deleteView(v),
+                }))}
+                footer={{ label: "＋ New view…", onClick: () => setDialog({ kind: "new-view" }) }}
+              />
+            )}
+            <span className="tree-tools">
+              <button onClick={() => create("new-file")} disabled={creation === null} title={creation === null ? "Select a folder in the view first" : `New file in ${creation || "the workspace root"}`}><Icon name="newFile" /></button>
+              <button onClick={() => create("new-folder")} disabled={creation === null} title={creation === null ? "Select a folder in the view first" : `New folder in ${creation || "the workspace root"}`}><Icon name="newFolder" /></button>
+            </span>
+          </div>
+          <input
+            className="tree-filter"
+            placeholder="Filter files"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") setFilter(""); }}
+          />
+          <nav
+            className="tree"
+            tabIndex={0}
+            onKeyDown={onKey}
+            onMouseDown={(e) => { if (e.target === e.currentTarget) onSelect(null); }}
+            onContextMenu={(ev) => { ev.preventDefault(); openMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
+          >
+            {view
+              ? (filter ? renderFilteredView() : renderView())
+              : (filter ? (filtered ? renderFiltered("", 0) : <div className="tree-loading loading">Loading…</div>) : render("", 0))}
+          </nav>
+        </>
+      )}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} anchor={menu} onClose={() => setMenu(null)}>
           {/* A view's root is a list of shortcuts, not a directory: nothing new is created there (VIEW-06). */}

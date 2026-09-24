@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useLive } from "../live";
 import type { SearchHit, Workspace } from "../types";
 import { report } from "./Switcher";
 
@@ -15,7 +16,31 @@ export function SearchPanel({ ws, onOpen }: Props) {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searched, setSearched] = useState("");
   const input = useRef<HTMLInputElement>(null);
-  useEffect(() => input.current?.focus(), []);
+  // The field takes the keyboard when the panel first appears, and when its
+  // tab or its hotkey brings it forward — not when a mode or a workspace
+  // comes back, which returns the keyboard to the document it left. A hotkey
+  // that also switches mode lands before the mode is on screen, so the focus
+  // waits for it.
+  const live = useLive();
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const wanted = useRef(false);
+  useEffect(() => {
+    input.current?.focus();
+    const onFocus = (e: Event) => {
+      const { workspaceId, id } = (e as CustomEvent<{ workspaceId: string; id: string }>).detail;
+      if (workspaceId !== ws.id || id !== "search") return;
+      if (liveRef.current) input.current?.focus();
+      else wanted.current = true;
+    };
+    window.addEventListener("panel-focus", onFocus);
+    return () => window.removeEventListener("panel-focus", onFocus);
+  }, [ws.id]);
+  useEffect(() => {
+    if (!live || !wanted.current) return;
+    wanted.current = false;
+    input.current?.focus();
+  });
 
   const run = () => {
     const q = query;

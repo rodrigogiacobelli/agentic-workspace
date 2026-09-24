@@ -6,6 +6,7 @@ import * as settings from "./settings";
 import { useDismiss } from "./motion";
 import { Palette } from "./components/Palette";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { StatusBar } from "./components/StatusBar";
 import { Switcher, report } from "./components/Switcher";
 import { TerminalWindow } from "./components/TerminalWindow";
 import { WorkspaceWindow } from "./components/WorkspaceWindow";
@@ -19,7 +20,6 @@ export function App({ role }: { role: WindowRole }) {
   // Keyed, not indexed: a toast plays its own exit, and an index would hand
   // that state to whichever message shifted up into its place.
   const [notices, setNotices] = useState<{ id: number; text: string }[]>([]);
-  const [, bump] = useState(0);
 
   useEffect(() => {
     let next = 0;
@@ -42,7 +42,6 @@ export function App({ role }: { role: WindowRole }) {
     };
   }, []);
 
-  useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
 
   if (!session || !current) return null;
 
@@ -55,12 +54,13 @@ export function App({ role }: { role: WindowRole }) {
 
   return (
     <div className={`app app-${role}`}>
-      <Switcher session={session} role={role} unsaved={editors.dirtyCount()} onSettings={() => setShowSettings(true)} />
+      <Switcher session={session} role={role} onSettings={() => setShowSettings(true)} />
       {role === "terminal" ? (
         <TerminalWindow session={session} openSwitcher={() => setSwitcher(true)} openSettings={() => setShowSettings(true)} />
       ) : (
         <WorkspaceWindow session={session} openSwitcher={() => setSwitcher(true)} openSettings={() => setShowSettings(true)} />
       )}
+      <StatusBar session={session} role={role} />
       {switcher && (
         <Palette
           title="Switch workspace"

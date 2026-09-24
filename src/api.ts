@@ -5,8 +5,8 @@ import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
-  BlameLine, Branches, ClipboardFiles, CommitDetail, DiffSpec, DirChanged, Entry, HotkeyStatus, ImportedTheme, LogEntry,
-  RepoInfo, SearchHit, Session, Settings, StatusEntry, StoredAsset, WindowRole, WorktreeEntry,
+  AreaId, BlameLine, Branches, ClipboardFiles, CommitDetail, DiffSpec, DirChanged, DockedMode, Entry, HotkeyStatus, ImportedTheme,
+  LogEntry, RepoInfo, SearchHit, Session, Settings, Stash, StatusEntry, StoredAsset, Tag, WindowRole, WorktreeEntry,
 } from "./types";
 
 /** Terminal output arrives base64-encoded (see `pty::MAX_MESSAGE_BYTES`); the
@@ -32,11 +32,14 @@ export const api = {
   switchWorkspace: (id: string) => invoke<void>("switch_workspace", { id }),
   removeWorkspace: (id: string) => invoke<void>("remove_workspace", { id }),
   renameWorkspace: (id: string, name: string) => invoke<void>("rename_workspace", { id, name }),
+  /** Which mode the Workspace window shows for a workspace. */
+  setMode: (workspaceId: string, mode: DockedMode) => invoke<void>("set_mode", { workspaceId, mode }),
   setExpanded: (workspaceId: string, path: string, expanded: boolean) =>
     invoke<void>("set_expanded", { workspaceId, path, expanded }),
   /** A preview open reuses the group's preview tab; a permanent one keeps its own. */
   openFile: (workspaceId: string, path: string, preview: boolean) =>
     invoke<string>("open_file", { workspaceId, path, preview }),
+  /** Opens a diff in Source Control's working area, never the Editor's. */
   openDiff: (workspaceId: string, path: string, diff: DiffSpec) =>
     invoke<string>("open_diff", { workspaceId, path, diff }),
   pinEditor: (workspaceId: string, id: string) => invoke<void>("pin_editor", { workspaceId, id }),
@@ -48,15 +51,15 @@ export const api = {
     invoke<void>("reorder_editors", { workspaceId, groupId, ids, moved }),
   setActiveGroup: (workspaceId: string, groupId: string) =>
     invoke<void>("set_active_group", { workspaceId, groupId }),
-  splitEditor: (workspaceId: string) => invoke<void>("split_editor", { workspaceId }),
+  splitEditor: (workspaceId: string, area: AreaId = "editor") => invoke<void>("split_editor", { workspaceId, area }),
   /** An empty `groupId` opens a new group to the right of the active one. */
   moveEditor: (workspaceId: string, id: string, groupId: string, index: number | null) =>
     invoke<void>("move_editor", { workspaceId, id, groupId, index }),
   /** A tab or a file dropped on a group's centre or one of its edges. */
   dropEditor: (workspaceId: string, source: { editor?: string; path?: string }, target: string, zone: string, index: number | null) =>
     invoke<void>("drop_editor", { workspaceId, source, target, zone, index }),
-  setLayoutSizes: (workspaceId: string, path: number[], sizes: number[]) =>
-    invoke<void>("set_layout_sizes", { workspaceId, path, sizes }),
+  setLayoutSizes: (workspaceId: string, area: AreaId, path: number[], sizes: number[]) =>
+    invoke<void>("set_layout_sizes", { workspaceId, area, path, sizes }),
   setEditorView: (workspaceId: string, id: string, mode: string, line: number) =>
     invoke<void>("set_editor_view", { workspaceId, id, mode, line }),
   focusWindow: (label: WindowRole) => invoke<void>("focus_window", { label }),
@@ -172,8 +175,9 @@ export const api = {
   gitCommit: (workspaceId: string, message: string, amend: boolean) =>
     invoke<string>("git_commit", { workspaceId, message, amend }),
   gitLastMessage: (workspaceId: string) => invoke<string>("git_last_message", { workspaceId }),
-  gitLog: (workspaceId: string, skip: number, limit: number, path: string | null) =>
-    invoke<LogEntry[]>("git_log", { workspaceId, skip, limit, path }),
+  /** In date order, so a commit always comes before its parents; `all` walks every branch, remote and tag, not only HEAD. */
+  gitLog: (workspaceId: string, skip: number, limit: number, path: string | null, all: boolean) =>
+    invoke<LogEntry[]>("git_log", { workspaceId, skip, limit, path, all }),
   gitShow: (workspaceId: string, hash: string) => invoke<CommitDetail>("git_show", { workspaceId, hash }),
   gitBlame: (workspaceId: string, path: string) => invoke<BlameLine[]>("git_blame", { workspaceId, path }),
   gitBranches: (workspaceId: string) => invoke<Branches>("git_branches", { workspaceId }),
@@ -193,8 +197,21 @@ export const api = {
   gitWorktreeDirty: (path: string) => invoke<string[]>("git_worktree_dirty", { path }),
   gitPruneWorktrees: (workspaceId: string, dryRun: boolean) =>
     invoke<string[]>("git_prune_worktrees", { workspaceId, dryRun }),
+  /** Git's whole output on success; on failure the rejection carries git's whole message. */
   gitRemote: (workspaceId: string, action: "fetch" | "pull" | "push", setUpstream: boolean) =>
     invoke<string>("git_remote", { workspaceId, action, setUpstream }),
+  gitStashes: (workspaceId: string) => invoke<Stash[]>("git_stashes", { workspaceId }),
+  /** Stashes every change, untracked files included. */
+  gitStashPush: (workspaceId: string, message: string | null) => invoke<string>("git_stash_push", { workspaceId, message }),
+  /** Applies the stash with commit `hash`, wherever it sits now; `pop` drops it once applied. */
+  gitStashApply: (workspaceId: string, hash: string, pop: boolean) => invoke<string>("git_stash_apply", { workspaceId, hash, pop }),
+  gitStashDrop: (workspaceId: string, hash: string) => invoke<string>("git_stash_drop", { workspaceId, hash }),
+  /** Newest first. */
+  gitTags: (workspaceId: string) => invoke<Tag[]>("git_tags", { workspaceId }),
+  /** An annotated tag when `message` is given, a lightweight one otherwise; `target` defaults to HEAD. */
+  gitCreateTag: (workspaceId: string, name: string, message: string | null, target: string | null) =>
+    invoke<void>("git_create_tag", { workspaceId, name, message, target }),
+  gitDeleteTag: (workspaceId: string, name: string) => invoke<string>("git_delete_tag", { workspaceId, name }),
 
   copyText: (text: string) => writeText(text),
   pasteText: () => readText(),

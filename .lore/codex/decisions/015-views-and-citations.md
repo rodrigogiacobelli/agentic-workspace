@@ -80,7 +80,7 @@ so moving the cursor into it shows the `@path` that is in the file (CITE-09).
 `asset_links` in the settings is `markdown` or `citation` (CITE-03). It decides
 the text `Doc.insertLink` writes after an asset is stored, and nothing else:
 `save_asset` and `import_asset` put the file in the workspace's clipboard
-folder either way (CITE-04). *Quote to AI* in the Files panel writes a citation
+folder either way (CITE-04). *Quote to AI* in Explorer or Custom writes a citation
 whatever the setting says, for a tree row or a view row alike (CITE-05,
 CITE-12), one per line in tree order for a `Ctrl`-click selection of several
 (CITE-13).

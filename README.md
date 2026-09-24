@@ -3,12 +3,12 @@
 A native Linux desktop app for running several agent-driven projects at once —
 without losing the one you just switched away from.
 
-> **Status: seven milestones.** Workspaces, the two windows, terminals that
+> **Status: eight milestones.** Workspaces, the two windows, terminals that
 > survive a switch, the file tree, session restore, the three-mode markdown
 > editor, git with worktrees, the two agent signals, app-drawn window chrome
 > over a tray-resident process, draggable editor splits and panels, custom
-> views, path citations and the typing helpers run. `.lore/codex/` holds the
-> decisions behind it.
+> views, path citations, the typing helpers, and the Editor, Source Control and
+> Terminal modes run. `.lore/codex/` holds the decisions behind it.
 
 ---
 
@@ -49,12 +49,23 @@ back.
 window, each a real OS window you can put on its own monitor or virtual desktop.
 Both always show the same project; a hotkey raises the other.
 
+**Three modes.** The Workspace window is in one of two modes: *Editor*, for
+writing and reading documents, or *Source Control*, for reviewing and
+committing. *Terminal* is the third, drawn in the Terminal window. Each mode has
+its own panels, its own tabs and its own layout, so a diff never lands among
+your documents. Switching mode — or workspace — brings back exactly what you
+left: the same tabs, the same scroll, the same cursor. Each workspace remembers
+which mode you were in.
+
 **One row of chrome, and a tray.** Neither window has a KDE title bar. A single
-30 px title row carries the workspace selector, the branch, the path, the
-settings button and the window controls, and it drags, double-click-maximises,
-snaps and resizes the window exactly as a title bar does. Closing a window hides
-it — the app stays in the tray with every terminal still running, and the tray
-menu shows a window, switches workspace or quits.
+30 px title row carries the workspace selector, the mode selector, the settings
+button and the window controls, and it drags, double-click-maximises, snaps and
+resizes the window exactly as a title bar does. Mode buttons and panel tabs read
+as labels or as icons, whichever you choose. A status bar along the bottom of
+both windows shows what the current mode knows, plus the workspace and its
+branch; clicking the branch opens Source Control. Closing a window hides it —
+the app stays in the tray with every terminal still running, and the tray menu
+shows a window, switches workspace or quits.
 
 **Terminals that survive the switch.** Tabbed, full-fidelity terminals — good
 enough for `claude`, `tmux` and `vim`. Switch away and they keep running. Come
@@ -77,14 +88,15 @@ double-clicking it or dragging it makes it permanent.
 
 **A layout you drag into shape.** Drop an editor tab on a group's edge to split
 the area in that direction, on its centre to move it there, and drag any divider
-to resize. The Files, Search, Git and Outline panels move the same way — onto
-any edge of any region, or into another region's tab strip — so a panel can sit
-left, right or below the editor. A panel closed from its tab comes back from
-the title row's *View* menu or its hotkey. Editor splits belong to the
-workspace; panel placement belongs to the app.
+to resize. Panels move the same way — onto any edge of any region, into another
+region's tab strip, or onto the centre of the working area, where the panel
+becomes a tab beside your documents or diffs. A panel closed from its tab comes
+back from the title row's *View* menu or its hotkey. Editor splits belong to the
+workspace; panel placement belongs to the app, one layout per mode.
 
-**Custom views.** A view is a named list of shortcuts into the workspace. Send
-files and folders to it from the file tree and they sit at its root whatever
+**Custom views.** A view is a named list of shortcuts into the workspace, shown
+in the Editor's *Custom* panel. Send files and folders to it from *Explorer*
+and they sit at its root whatever
 their depth on disk, each folder expanding to its real children. Nothing is
 copied and nothing is moved; deleting a view deletes the list.
 
@@ -105,9 +117,14 @@ line comments, bracket pairs that wrap a selection, `Tab` to nest a list item
 and `Alt+C` to tick a task box. They work in every view of a document, the
 rendered one included.
 
-**Git, including worktrees.** Status, diffs, hunk staging, commits, history and
-blame. Plus branches and worktrees, because a project here is often *itself* a
-worktree of another one — and creating one offers to open it as a new workspace.
+**Git, including worktrees.** Source Control mode has five panels: *Commit*
+(conflicts, staged, changed and untracked files, stashes, and the commit box),
+*History* (a graph of the branches with each commit's author, age and hash),
+*Branches* (local and remote, with fetch, pull and push and git's full output),
+*Worktrees* and *Tags*. Diffs open side by side or inline in its working area,
+with hunk staging; blame stays in the Editor. Worktrees matter because a project
+here is often *itself* a worktree of another one — and creating one offers to
+open it as a new workspace.
 
 **It tells you when an agent needs you.** A workspace you left running gets an
 attention badge when its terminal produces output, and an optional desktop
@@ -176,24 +193,25 @@ under KDE, and the four failures that stop it before a window appears.
 |---|---|---|
 | `Ctrl+Shift+P` | both | Switch workspace |
 | `Ctrl+Shift+Space` | both | Focus the other window |
+| `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | both | Editor / Source Control / Terminal mode |
 | `Ctrl+Q` | both | Quit |
 | `Ctrl+Alt+A` | anywhere | Raise the window you last used (bound through the desktop portal; reassign it in System Settings → Shortcuts) |
 | `Ctrl+Shift+T` / `Ctrl+Shift+W` | terminal | New / close terminal tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | both | Next / previous tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | terminal | Copy / paste |
 | `Ctrl+Shift+F` | terminal / workspace | Search the scrollback / the Search panel |
-| `Ctrl+Shift+E` | workspace | The Files panel |
-| `Ctrl+Shift+G` | workspace | The Git panel |
+| `Ctrl+Shift+E` | workspace | The Explorer panel |
+| `Ctrl+Shift+G` | workspace | The Commit panel, in Source Control |
 | `Ctrl+Shift+O` | workspace | The Outline panel |
 | `Ctrl+P` | workspace | Quick open a file |
-| `Ctrl+S` / `Ctrl+W` | workspace | Save / close the editor tab |
+| `Ctrl+S` / `Ctrl+W` | workspace | Save / close the tab |
 | `Ctrl+E` | workspace | Cycle the markdown editor: source → split → rich |
-| `Ctrl+\` / `Ctrl+Alt+\` | workspace | Split the editor area / move the tab to the next group |
+| `Ctrl+\` / `Ctrl+Alt+\` | workspace | Split the working area / move the tab to the next group |
 | `Ctrl+,` | both | Settings |
 | `Ctrl+Alt+Shift+C` | workspace | Copy the selected path, relative to the workspace |
 
-A panel hotkey selects and focuses that panel wherever you have docked it, and
-brings it back if you closed it.
+A panel hotkey selects and focuses that panel wherever you have docked it,
+switches to its mode, and brings it back if you closed it.
 
 Inside a document:
 

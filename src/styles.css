@@ -16,8 +16,10 @@
      on a menu at the edge of the screen. */
   --z-drop: 5;
   --z-resize: 10;
-  --z-menu: 100;
   --z-overlay: 200;
+  /* Above the overlays: a dropdown inside a dialog opens over the dialog. A
+     menu closes on any press outside it, so it cannot trap what is below. */
+  --z-menu: 250;
   --z-notice: 300;
   --z-scrollbar: 350;
   --z-tooltip: 400;
@@ -94,8 +96,8 @@ input:focus { border-color: var(--accent); }
 
 /* The title row: app-drawn in place of the compositor's title bar (CHR-01). */
 .switcher {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  position: relative;
+  display: flex;
   align-items: center;
   height: 30px;
   background: var(--bg-raised);
@@ -103,15 +105,68 @@ input:focus { border-color: var(--accent); }
   flex: none;
   font-size: 12px;
 }
-.switcher-left { display: flex; align-items: center; gap: 8px; min-width: 0; height: 100%; padding-left: 8px; }
-.switcher-center { display: flex; align-items: center; gap: 4px; justify-self: center; }
-.switcher-right { display: flex; align-items: center; gap: 4px; justify-self: end; height: 100%; }
+/* The left end stops short of the mode selector, whose half-width follows the
+   width of its buttons: three of them, and the pill's own padding. */
+.switcher-left { display: flex; align-items: center; gap: 4px; min-width: 0; height: 100%; padding-left: 8px; max-width: calc(50% - 1.5 * var(--mode-width) - 16px); }
+.switcher-logo { flex: none; display: flex; color: var(--accent); padding: 0 2px; }
+/* Above the mode selector, and opaque: in a window too narrow for both, the
+   controls stay whole and clickable and the selector passes under them. */
+.switcher-right { position: relative; z-index: 1; display: flex; align-items: center; gap: 4px; height: 100%; margin-left: auto; background: var(--bg-raised); }
 .switcher-right > button { padding: 0 6px; height: 22px; line-height: 20px; }
 /* The control is the workspace's name and nothing else: it takes the width
    that name needs, and the caret every other dropdown carries would sit in
    space the name has a better use for. */
-.switcher-select { font-weight: 600; max-width: 320px; padding: 0 8px; }
+.dropdown.switcher-select { font-weight: 600; min-width: 0; max-width: 280px; padding: 0 8px; background: transparent; border-color: transparent; }
+.dropdown.switcher-select:hover, .dropdown.switcher-select.open { background: var(--bg-hover); border-color: var(--border); }
 .switcher-select .dropdown-caret { display: none; }
+/* Centred on the window, not on the space the two ends leave, so a long
+   workspace name cannot push it off centre. Every button is one width, and
+   that width is the reader's choice of labels or icons (decision 1). */
+:root { --mode-width: 132px; }
+:root[data-tabs="icons"] { --mode-width: 40px; }
+.mode-select {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.mode-select button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--mode-width);
+  height: 20px;
+  padding: 0;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.mode-select button:hover { color: var(--fg); background: transparent; }
+.mode-select button.on { color: var(--fg); background: var(--bg-hover); box-shadow: inset 0 0 0 1px var(--border); }
+.mode-select button.on .icon { color: var(--accent); }
+/* A shell is running in the other window; lit when one printed out of view.
+   It sits in the corner so it takes none of the button's width. */
+.mode-dot { position: absolute; top: 3px; right: 5px; width: 5px; height: 5px; border-radius: 50%; background: var(--fg-faint); }
+.mode-dot.waiting { background: var(--accent); }
+/* Labels or icons, never both: every strip draws a word and a glyph, and this
+   is the one switch that picks (decision 1). */
+.tab-glyph { display: inline-flex; align-items: center; }
+:root:not([data-tabs="icons"]) .tab-glyph,
+:root[data-tabs="icons"] .tab-word { display: none; }
+/* Three 132 px labels need a window about 880 px wide to sit centred clear of
+   both ends; narrower than that the selector falls back to its glyphs. */
+@media (max-width: 880px) {
+  :root { --mode-width: 40px; }
+  :root .mode-select .tab-word { display: none; }
+  :root .mode-select .tab-glyph { display: inline-flex; }
+}
 .switcher-path { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon { flex: none; vertical-align: -3px; }
 .row-menu { display: flex; flex-direction: column; max-width: 560px; }
@@ -190,7 +245,13 @@ button.row-disclose:hover { color: var(--fg); background: transparent; }
 
 main { flex: 1; display: flex; min-height: 0; }
 .terminal-main { flex-direction: column; }
-.workspace-main { flex-direction: row; }
+.workspace-main { position: relative; }
+/* Every workspace shown so far, and each of its modes, stays mounted and
+   stacked; the ones not on screen skip rendering but keep their layout, their
+   scroll and their editors' state, so coming back paints rather than rebuilds
+   (decision 6). `visibility` covers a webview without `content-visibility`. */
+.workspace-view, .mode-view { position: absolute; inset: 0; display: flex; min-width: 0; min-height: 0; }
+.workspace-view.is-hidden, .mode-view.is-hidden { content-visibility: hidden; visibility: hidden; pointer-events: none; }
 .empty { display: flex; align-items: center; justify-content: center; color: var(--fg-dim); height: 100%; width: 100%; }
 
 /* The strip scrolls; the controls at its end do not go with it. */
@@ -281,13 +342,41 @@ main { flex: 1; display: flex; min-height: 0; }
 .drop-top { bottom: 50%; }
 .drop-bottom { top: 50%; }
 
-.region { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.editor-leaf { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
-.sidebar-tabs { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); background: var(--bg-raised); overflow: hidden; }
+/* A panel sizes its own content to the region it is in — History drops its
+   author and hash columns when narrow — so every place a panel can dock is a
+   size container (decision 9). */
+.region { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; container-type: inline-size; }
+.work-leaf { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
+.work-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; container-type: inline-size; }
+.work-panel[hidden] { display: none; }
+/* One per tab a region has shown; the ones behind the front tab stay mounted. */
+.panel-slot { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.panel-slot[hidden] { display: none; }
+.group-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.group-body[hidden] { display: none; }
+.panel-tab .tab-glyph { color: var(--fg-dim); }
+.panel-tab.active .tab-glyph { color: var(--accent); }
+.sidebar-tabs { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); background: var(--bg-raised); overflow: hidden; flex: none; }
+:root[data-tabs="icons"] .sidebar-tabs [role="tab"] { flex: none; width: 34px; }
+.sidebar-tabs [role="tab"].active .tab-glyph { color: var(--accent); }
+/* Drawn as a glyph, a tab no longer names its panel, so the panel does. */
+.panel-title { display: none; }
+:root[data-tabs="icons"] .panel-title {
+  display: block;
+  flex: none;
+  padding: 4px 9px;
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  border-bottom: 1px solid var(--border);
+}
 .sidebar-tabs [role="tab"] { flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; color: var(--fg-dim); padding: 5px 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-tabs [role="tab"]:hover { background: var(--bg-hover); }
 .sidebar-tabs [role="tab"].active { color: var(--fg); }
 .tab-count { font-size: 10px; color: var(--fg-dim); }
+:root:not([data-tabs="icons"]) .tab-count::before { content: "("; }
+:root:not([data-tabs="icons"]) .tab-count::after { content: ")"; }
 .media-view { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; overflow: auto; background: var(--bg); }
 .media-view img, .media-view video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .media-view audio { width: min(560px, 100%); }
@@ -295,7 +384,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .tree-filter { margin: 6px; }
 .tree-head { display: flex; gap: 4px; align-items: center; padding: 6px 6px 0; }
 .tree-head .dropdown { flex: 1; min-width: 0; justify-content: space-between; }
-.tree-tools { display: flex; gap: 1px; flex: none; }
+.tree-tools { display: flex; gap: 1px; flex: none; margin-left: auto; }
 .tree-tools button { padding: 0 4px; height: 22px; color: var(--fg-dim); }
 .tree-tools button:disabled { color: var(--fg-faint); cursor: default; background: transparent; }
 .tree-row .icon { margin-right: 2px; }
@@ -424,17 +513,31 @@ main { flex: 1; display: flex; min-height: 0; }
 .banner.warn { border-left: 3px solid #fcd34d; }
 .banner.info { border-left: 3px solid var(--accent); }
 
+/* The application's status bar, in both windows: each mode's facts on the
+   left, the workspace and its branch holding the right end. */
 .statusbar {
+  flex: none;
   display: flex;
-  gap: 16px;
+  gap: 14px;
   align-items: center;
-  padding: 2px 10px;
+  height: 22px;
+  padding: 0 10px;
   font-size: 11px;
   color: var(--fg-dim);
   background: var(--bg-raised);
   border-top: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
 }
-.statusbar-language { margin-left: auto; height: 18px; font-size: 11px; color: var(--fg-dim); background: transparent; border-color: transparent; }
+.statusbar-grow { flex: 1; }
+.statusbar-mode { text-transform: capitalize; }
+.statusbar-mono, .statusbar-workspace { font-family: var(--mono); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; }
+.statusbar-danger { color: var(--danger); }
+.statusbar-language { height: 18px; font-size: 11px; color: var(--fg-dim); background: transparent; border-color: transparent; }
+.statusbar button.statusbar-branch { height: 18px; font-family: var(--mono); font-size: 10.5px; color: var(--fg); }
+.statusbar-branch .ahead { color: #86efac; }
+.statusbar-branch .behind { color: #e0b35a; }
+.statusbar-branch .state { color: var(--danger); }
 .binary-notice { padding: 24px; color: var(--fg-dim); text-align: center; }
 .binary-notice button { border: 1px solid var(--border); }
 
@@ -539,7 +642,6 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 
 /* Git */
-.switcher-branch { color: var(--fg-dim); font-size: 12px; white-space: nowrap; }
 .attention-badge { color: var(--accent); font-size: 10px; }
 .tab.attention .tab-label::before { content: "● "; color: var(--accent); font-size: 9px; vertical-align: middle; }
 .tree-git { margin-left: auto; padding-left: 8px; font-size: 11px; color: var(--fg-dim); }
@@ -550,19 +652,19 @@ main { flex: 1; display: flex; min-height: 0; }
 .tree-row.git-\! .tree-name, .tree-row.git-\! .tree-git { color: var(--danger); }
 .tree-row.ignored .tree-name { color: var(--fg-faint); }
 
-.git-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; font-size: 12px; }
-.git-header { display: flex; align-items: center; gap: 4px; padding: 6px; border-bottom: 1px solid var(--border); }
-.git-branch { font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: left; }
-.git-state { color: var(--danger); font-weight: 600; }
-.git-ab { color: var(--fg-dim); }
-.git-note { padding: 4px 8px; color: var(--fg-dim); border-bottom: 1px solid var(--border); }
-/* Two sections, one scroller each: the changes, at a height the edge below
-   them sets, and the history with whatever is left. */
-.git-changes { flex: none; overflow: auto; }
-.git-resize { flex: none; height: 5px; background: var(--border); cursor: row-resize; }
-.git-resize:hover { background: var(--accent); }
-.git-empty { padding: 16px; color: var(--fg-dim); }
-.git-empty button { border: 1px solid var(--border); }
+/* A panel's body: an optional toolbar, then a list that scrolls. Every
+   Source Control panel is built from these, so five of them read as one. */
+.panel { display: flex; flex-direction: column; flex: 1; min-height: 0; font-size: 12px; }
+.panel-bar { flex: none; display: flex; align-items: center; gap: 4px; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.panel-bar > input { flex: 1; min-width: 0; height: 22px; }
+.panel-bar > button { flex: none; height: 22px; padding: 0 6px; color: var(--fg-dim); }
+.panel-bar > button:hover { color: var(--fg); }
+.panel-bar > button:disabled { color: var(--fg-faint); cursor: default; background: transparent; }
+.panel-bar > button.on { color: var(--fg); background: var(--bg-hover); }
+.panel-list { flex: 1; min-height: 0; overflow: auto; }
+.panel-empty { padding: 12px; color: var(--fg-dim); }
+.panel-empty button { border: 1px solid var(--border); margin-top: 8px; }
+.panel-note { flex: none; padding: 4px 8px; color: var(--fg-dim); border-bottom: 1px solid var(--border); }
 .git-section { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
 .git-section-title { position: sticky; top: 0; z-index: 1; background: var(--bg); display: flex; justify-content: space-between; align-items: center; padding: 6px 8px 2px; font-weight: 600; }
 .git-section-title button { font-size: 11px; color: var(--fg-dim); }
@@ -584,26 +686,148 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-commit textarea { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; resize: vertical; }
 .git-commit-actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
 .git-commit-actions button { border: 1px solid var(--border); }
-.git-history { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.git-filter { margin: 4px 8px; }
-.git-log { flex: 1; overflow: auto; }
-.git-commit-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 6px; padding: 3px 8px; cursor: pointer; }
-.git-commit-row:hover { background: var(--bg-hover); }
-.git-commit-row.selected { background: var(--bg-hover); }
 .git-chevron { color: var(--fg-dim); font-size: 10px; padding-top: 2px; }
-.git-copy { grid-column: 3; grid-row: 1 / span 2; align-self: center; padding: 0 4px; color: var(--fg-dim); opacity: 0; pointer-events: none; }
-.git-commit-row:hover .git-copy, .git-copy:focus-visible { opacity: 1; pointer-events: auto; }
-.git-copy:hover { color: var(--fg); }
-.git-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.git-meta { grid-column: 2; color: var(--fg-dim); font-size: 11px; }
-.git-commit-files { padding: 0 0 6px 14px; border-bottom: 1px solid var(--border); }
 .git-dir { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-row .git-path { flex: 0 1 auto; }
 .git-row .git-dir { flex: 1 1 auto; }
-.list-actions { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-.list-actions button { border: 1px solid var(--border); }
-.row-action { margin-left: auto; padding: 0 6px; color: var(--fg-dim); }
 .palette-list li { align-items: center; }
+
+/* Commit */
+/* An operation git is in the middle of: the one note that is a warning. */
+.panel-note.danger { color: var(--danger); }
+/* The section's name is its disclosure. It is a button so the keyboard
+   reaches it, and it reads as the title it stands in for: no fill on hover,
+   and no press, since a title that shrank under the pointer would claim to be
+   a control it is not. */
+.git-section-title .git-section-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 0; border: none; font-size: inherit; font-weight: inherit; color: inherit; text-align: left; }
+.git-section-toggle:hover { background: transparent; }
+.git-section-toggle:active { transform: none; }
+.git-section-toggle .git-chevron { width: 10px; padding-top: 0; }
+/* A stash is not a file: nothing opens from its row, so the row takes no
+   pointer, and its mark wears the one git colour no status letter uses. */
+.git-row.stash { cursor: default; }
+.git-letter.stash { color: #c4b5fd; }
+.git-actions button:disabled,
+.git-section-title button:disabled,
+.git-commit-actions button:disabled { color: var(--fg-faint); cursor: default; background: transparent; }
+/* The commit box sits at the panel's foot, under the list it commits. */
+.panel > .git-commit { border-top: 1px solid var(--border); border-bottom: none; }
+/* The subject's length against git's 50 (GIT-20). It warns in colour and
+   blocks nothing: the counter pushes itself left so the buttons keep their
+   place at the right. */
+.git-subject-count { margin-right: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-faint); }
+.git-subject-count.over { color: #e0b35a; }
+
+/* History */
+/* The panel is its own query container, so it measures the room it has
+   wherever it is docked — a region or a tab of the working area — and gives
+   up columns rather than becoming a second component (decision 9). The graph
+   column's width is `--graph-w`, set from the widest run of lanes loaded. */
+.history { container-type: inline-size; }
+.history-head,
+.history-row {
+  display: grid;
+  grid-template-columns: var(--graph-w) minmax(0, 1fr) 112px 40px 56px;
+  align-items: center;
+  column-gap: 8px;
+  padding-right: 8px;
+}
+.history-head { flex: none; padding-top: 3px; padding-bottom: 3px; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-faint); border-bottom: 1px solid var(--border); }
+/* 22 px is ROW_H in HistoryPanel.tsx. Each row draws its own slice of the
+   graph edge to edge, and the lanes only meet from one row to the next while
+   the two agree — so the row has a height and no vertical padding. */
+.history-row { position: relative; height: 22px; cursor: pointer; }
+.history-row:hover, .history-row.selected { background: var(--bg-hover); }
+.history-row:hover .git-actions, .history-row .git-actions:focus-within { opacity: 1; pointer-events: auto; }
+.history-rail { display: block; }
+.history-rail path { fill: none; stroke-width: 1.6; }
+.history-rail circle { stroke-width: 1.6; }
+.history-subject { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; }
+.history-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The cells carry no `display` of their own, so the container queries below
+   hide them without a specificity contest. */
+.history-row .history-author { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-dim); font-size: 11.5px; }
+.history-row .history-when,
+.history-row .history-hash { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); }
+.history-avatar { display: inline-grid; place-items: center; width: 15px; height: 15px; margin-right: 6px; border-radius: 50%; vertical-align: middle; font-size: 8.5px; font-weight: 700; color: var(--bg); }
+/* The refs at a commit, ahead of its subject: HEAD's branch solid, the other
+   local branches tinted, remotes outlined, tags in the warning colour. A long
+   name gives way with the subject rather than pushing it out of the row. */
+.ref { flex: 0 1 auto; min-width: 3ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10px; line-height: 14px; padding: 0 4px; border: 1px solid transparent; border-radius: 3px; }
+.ref.head { background: var(--accent); color: var(--bg); font-weight: 700; }
+.ref.local { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.ref.remote { color: var(--fg-dim); border-color: var(--border); }
+.ref.tag { background: color-mix(in srgb, #e0b35a 14%, transparent); color: #e0b35a; border-color: color-mix(in srgb, #e0b35a 40%, transparent); }
+/* An open commit's files, indented past the graph. The lanes that leave the
+   commit run on down beside them, so opening a commit does not break the
+   graph; no border closes the list, since it would cross those lanes. */
+.history-files { position: relative; padding: 0 0 4px var(--graph-w); }
+.history-files > .history-rail { position: absolute; left: 0; top: 0; height: 100%; }
+@container (max-width: 520px) {
+  .history-head, .history-row { grid-template-columns: var(--graph-w) minmax(0, 1fr) 40px; }
+  .history-author, .history-hash { display: none; }
+}
+@container (max-width: 330px) {
+  .history-head, .history-row { grid-template-columns: var(--graph-w) minmax(0, 1fr); }
+  .history-when { display: none; }
+}
+
+/* Branches, Worktrees and Tags: lists of refs. Each row is a .git-row, with
+   its hover actions in .git-actions; these are the parts a ref row has and a
+   file row does not. The upstream, a tag's subject and any other dimmed
+   detail are .git-dir, which already takes the row's slack and ellipsises. */
+.ref-mark { flex: none; width: 12px; text-align: center; font-size: 9px; color: var(--fg-faint); }
+.ref-mark.on { color: var(--accent); }
+.ref-mark.tag { display: flex; justify-content: center; color: #e0b35a; }
+.ref-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 11.5px; }
+.ref-name.tag { color: #e0b35a; }
+.ref-ab { flex: none; display: flex; gap: 4px; font-family: var(--mono); font-size: 10px; }
+.ref-ab .ahead, .remote-op .ahead { color: #86efac; }
+.ref-ab .behind, .remote-op .behind { color: #e0b35a; }
+.ref-meta { flex: none; display: flex; gap: 6px; color: var(--fg-dim); font-size: 11px; }
+.ref-hash { font-family: var(--mono); font-size: 10.5px; }
+/* A row whose click does nothing: only its actions do, so the pointer must
+   not promise otherwise. */
+.git-row.plain { cursor: default; }
+
+/* What marks a worktree. A pill, not a word in the path's colour, because
+   four of them can stand on one row and each has to read on its own. */
+.ref-pill { flex: none; font-size: 10px; line-height: 14px; padding: 0 5px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-dim); }
+.ref-pill.open { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.ref-pill.warn { color: #e0b35a; border-color: color-mix(in srgb, #e0b35a 45%, transparent); }
+.ref-pill.gone { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+
+/* Two lines: the branch and its pills, then the path. The mark spans both so
+   every branch name starts at the same place. The actions stay absolute over
+   the row, as on any .git-row, and take no grid cell. */
+.git-row.wt-row { display: grid; grid-template-columns: 12px minmax(0, 1fr); column-gap: 6px; row-gap: 1px; padding: 4px 8px; }
+.wt-row .ref-mark { grid-row: 1 / span 2; align-self: center; }
+.wt-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wt-path { grid-column: 2; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 10.5px; color: var(--fg-dim); }
+
+/* Fetch, Pull and Push: three equal buttons, since none of them is the usual
+   one. While one runs every one is disabled, and the running one reads as
+   pressed rather than greyed out — it is the one saying what is happening. */
+.panel-bar > .remote-op { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 4px; border-color: var(--border); color: var(--fg); white-space: nowrap; }
+.panel-bar > .remote-op[aria-busy="true"] { color: var(--fg); background: var(--bg-hover); }
+
+/* Git's whole report of the last fetch, pull or push (GIT-17). A toast would
+   show one line of it, and a failure is read in full or not at all, so it
+   stays until dismissed and scrolls past a few lines. The rule on the left
+   is always there and only coloured on failure, so the text does not move
+   when the outcome lands. Selectable, so the error can be copied out. */
+.remote-output { flex: none; display: flex; align-items: flex-start; background: var(--bg-raised); border-bottom: 1px solid var(--border); border-left: 3px solid transparent; }
+.remote-output pre { flex: 1; min-width: 0; max-height: 160px; overflow: auto; margin: 0; padding: 6px 8px; font: 11px/1.45 var(--mono); color: var(--fg-dim); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.remote-output.failed { border-left-color: var(--danger); }
+.remote-output.failed pre { color: var(--danger); }
+.remote-output > button { flex: none; display: flex; align-items: center; margin: 3px 3px 0 0; padding: 3px; color: var(--fg-dim); }
+.remote-output > button:hover { color: var(--fg); }
+
+/* A narrow region gives up a tag's date before its name or subject: the
+   short hash beside it still says where the tag points. */
+@container (max-width: 280px) {
+  .ref-date { display: none; }
+}
 
 .diff-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .diff-header { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
@@ -659,7 +883,7 @@ button,
 .dropdown,
 .tree-row,
 .git-row,
-.git-commit-row,
+.history-row,
 .row,
 .search-hit,
 .palette-list li,
@@ -702,9 +926,12 @@ input, textarea {
     border-color     var(--d-instant) var(--e-out);
 }
 
+/* The commit subject's counter: its colour is state, on the hover clock. */
+.git-subject-count { transition: color var(--d-instant) var(--e-out); }
+
 /* Colour and geometry are two clocks: a divider lights up as fast as any
    other hover, and the cursor over it says the rest. */
-.divider, .git-resize { transition: background-color var(--d-instant) var(--e-out); }
+.divider { transition: background-color var(--d-instant) var(--e-out); }
 
 /* --- Menus, dropdowns, popovers, tooltips (§11.2) ------------------------ */
 
@@ -833,6 +1060,16 @@ input, textarea {
 .drop-zone { transition: opacity var(--d-fast) var(--e-out); }
 @starting-style { .drop-zone { opacity: 0; } }
 
+/* The output box arrives by fading in (§11.3, an inline reveal), and its
+   outcome is a change of colour, which is state and moves at hover speed. */
+.remote-output {
+  transition:
+    opacity           var(--d-base)    var(--e-out),
+    border-left-color var(--d-instant) var(--e-out);
+}
+.remote-output pre { transition: color var(--d-instant) var(--e-out); }
+@starting-style { .remote-output { opacity: 0; } }
+
 /* --- Lists that appear (§11.6) ------------------------------------------- */
 
 /* Nothing here staggers, and that is the considered answer rather than an
@@ -902,7 +1139,7 @@ input, textarea {
 /* Revealed by hover. `visibility` and `display: none` are discrete — the
    first blinks off, the second moves the row's layout under the pointer —
    so each of these is an opacity fade with the space already reserved. */
-.tab-close, .git-copy, .row-actions, .git-actions {
+.tab-close, .row-actions, .git-actions {
   transition: opacity var(--d-instant) var(--e-out), color var(--d-instant) var(--e-out);
 }
 

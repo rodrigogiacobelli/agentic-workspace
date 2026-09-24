@@ -139,13 +139,15 @@ A native Linux desktop app for running several agent-driven projects at once.
 Two OS windows — a file tree and markdown editor, and a tabbed terminal — over a
 workspace switcher that keeps every project's terminals alive in the background.
 
-Seven milestones run. The first three: workspaces, both windows, backend-owned
+Eight milestones run. The first three: workspaces, both windows, backend-owned
 terminals, the file tree, session restore, the three-mode markdown editor with
 clipboard assets and external-change handling, git with branches and worktrees,
 and the two agent signals. The next four: app-drawn window chrome over a
 tray-resident process, preview tabs, the layout tree that drives both editor
 splits and panel docking, custom views, `@` citations with *Quote to AI*, the
-typing helpers, and the operations document. The Rust backend is
+typing helpers, and the operations document. The eighth: modes — Editor and
+Source Control in the Workspace window, Terminal in its own — each owning its
+panels, its working area and its dock tree (`017-modes`). The Rust backend is
 `src-tauri/src/`, the React frontend is `src/`, the editor is `src/editor/`.
 Mermaid, the grammar importer and HTML preview are not built; treat any claim
 about them as false until you have read the code. The second in-flight
