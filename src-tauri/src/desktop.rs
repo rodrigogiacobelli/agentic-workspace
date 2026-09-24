@@ -5,16 +5,41 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Must match `identifier` in `tauri.conf.json`: the task bar and the portal
-/// look the application up by this exact name.
+/// The one name every desktop surface keys off: the desktop entry's filename,
+/// its `Icon=` and `StartupWMClass`, the installed icon files, the Wayland
+/// `app_id`, the portal's app id, the tray tooltip, the name a notification
+/// carries, the single-instance bus name and the application data directory.
+///
+/// A development build carries its own, so it runs beside an installed build
+/// instead of contending with it for every one of those. The release value must
+/// match `identifier` in `tauri.conf.json`, which is what Tauri resolves the
+/// webview's own storage directory from — the one surface this split does not
+/// reach.
+#[cfg(not(debug_assertions))]
 pub const APP_ID: &str = "dev.agenticworkspace.app";
+#[cfg(not(debug_assertions))]
 pub const APP_NAME: &str = "Agentic Workspace";
+#[cfg(debug_assertions)]
+pub const APP_ID: &str = "dev.agenticworkspace.app.dev";
+#[cfg(debug_assertions)]
+pub const APP_NAME: &str = "Agentic Workspace (dev)";
+
+/// A development build's entry exists for the portal, which refuses an app id it
+/// cannot resolve to one, and stays out of the launcher: its `Exec` wants Vite on
+/// port 1420, so starting it from a menu answers with a connection error rather
+/// than a window.
+#[cfg(debug_assertions)]
+const NO_DISPLAY: &str = "NoDisplay=true\n";
+#[cfg(not(debug_assertions))]
+const NO_DISPLAY: &str = "";
 
 const ICON_SVG: &str = include_str!("../../assets/icon.svg");
 const ICON_PNG_256: &[u8] = include_bytes!("../icons/128x128@2x.png");
 
-/// Writes `<data_dir>/applications/<APP_ID>.desktop` when it is missing or its
-/// `Exec` no longer names the running binary. Returns the path when written.
+/// Writes `<data_dir>/applications/<APP_ID>.desktop` when it is missing or when
+/// it differs from the entry this build wants. Returns the path when written.
+/// A development build writes its own file, named after its own `APP_ID`, so it
+/// never takes over the entry an installed build put there.
 pub fn ensure_entry(data_dir: &Path) -> Result<Option<PathBuf>> {
     let dir = data_dir.join("applications");
     let path = dir.join(format!("{APP_ID}.desktop"));
@@ -88,7 +113,8 @@ fn entry_contents(exec: &str) -> String {
          Icon={APP_ID}\n\
          Terminal=false\n\
          Categories=Development;Utility;\n\
-         StartupWMClass={APP_ID}\n"
+         StartupWMClass={APP_ID}\n\
+         {NO_DISPLAY}"
     )
 }
 

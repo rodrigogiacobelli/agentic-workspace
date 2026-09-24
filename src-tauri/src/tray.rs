@@ -16,7 +16,15 @@ use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// `tray_icon` builds the StatusNotifierItem's own id and the icon file it
+/// writes under `$XDG_RUNTIME_DIR/tray-icon/` from this, so a development build
+/// takes a different one: two builds sharing it share the panel's per-item
+/// settings and race on the same filenames, which shows as one build briefly
+/// publishing the other's attention dot.
+#[cfg(not(debug_assertions))]
 pub const ID: &str = "main";
+#[cfg(debug_assertions)]
+pub const ID: &str = "main-dev";
 
 /// What the menu and icon were last built from, so a publish that changes
 /// nothing visible does not rebuild an open menu under the pointer.

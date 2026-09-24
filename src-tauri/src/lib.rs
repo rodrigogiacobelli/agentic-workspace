@@ -27,10 +27,15 @@ pub const EVENT_QUIT_REQUESTED: &str = "quit-requested";
 fn setup(app: &mut tauri::App) -> Result<()> {
     let handle = app.handle().clone();
 
-    let data_dir = handle.path().app_data_dir().context("resolving the application data directory")?;
-    std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
-
     let xdg_data = handle.path().data_dir().context("resolving the user data directory")?;
+
+    // Not `app_data_dir()`: that resolves from the `identifier` in
+    // `tauri.conf.json`, which a development build shares with an installed one,
+    // and one data directory holding two live sessions loses whichever saved
+    // first. `APP_ID` carries the build's own identity; for a release build the
+    // two resolve to the same path.
+    let data_dir = xdg_data.join(desktop::APP_ID);
+    std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
     if let Err(e) = desktop::ensure_icons(&xdg_data) {
         eprintln!("agentic-workspace: could not install the application icon ({e:#})");
     }
@@ -180,8 +185,13 @@ fn restore_scheduling() {
 
 /// GTK3 takes a Wayland toplevel's `app_id` from `g_get_prgname()`, which
 /// defaults to the executable name; the task bar resolves a window to a desktop
-/// entry by that id. Naming the process after the identifier keeps the chain
-/// intact. `enableGTKAppId` in `tauri.conf.json` does not reach the surface.
+/// entry by that id. Naming the process after `APP_ID` keeps the chain intact.
+///
+/// `enableGTKAppId` in `tauri.conf.json` is off, and has to be: it does not
+/// reach the `app_id` a toplevel carries, and what it does instead is hand
+/// GTK the `identifier` to register as a `GApplication` — a second name on the
+/// session bus, claimed by both builds, that makes whichever process starts
+/// second a remote instance which tao exits at the top of its event loop.
 fn set_application_id() {
     glib::set_prgname(Some(desktop::APP_ID));
     glib::set_application_name(desktop::APP_NAME);
@@ -194,10 +204,16 @@ pub fn run() {
 
     tauri::Builder::default()
         // Registered first so a second launch is answered before anything
-        // else initialises: it raises the running instance's windows.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            windows::raise_last_focused(app);
-        }))
+        // else initialises: it raises the running instance's windows. The bus
+        // name comes off `APP_ID` rather than the config identifier, so a
+        // development build claims its own and starts beside an installed
+        // build instead of raising that one and exiting.
+        .plugin(
+            tauri_plugin_single_instance::Builder::new()
+                .callback(|app, _argv, _cwd| windows::raise_last_focused(app))
+                .dbus_id(desktop::APP_ID)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())

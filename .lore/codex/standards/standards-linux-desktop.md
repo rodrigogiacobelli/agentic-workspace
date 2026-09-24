@@ -6,8 +6,9 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   a declaration is silently dropped for, window placement limits, the focus that
   gates a clipboard read, global shortcut binding through the portal, overlay
   scrollbars over app-drawn menus, the main loop a synchronous command blocks,
-  the scheduling class an auto-nice daemon hands down, the AppImage strip flag
-  and the Cargo version floor. Each fails silently when broken.
+  the scheduling class an auto-nice daemon hands down, the identity a development
+  build carries so it runs beside an installed one, the AppImage strip flag and
+  the Cargo version floor. Each fails silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
   - standards-motion
@@ -39,8 +40,10 @@ does not:
 | The installed icon filename | The application, at startup |
 
 GTK3 takes `app_id` from `g_get_prgname()`, which defaults to the executable
-name rather than the application identifier. Setting the program name to the
-identifier before GTK reads it is what keeps the chain intact.
+name rather than the application identifier. `set_application_id` in
+`src-tauri/src/lib.rs` sets the program name to `desktop::APP_ID` before GTK
+reads it, and that is what keeps the chain intact: one constant fills all four
+rows, which is why they agree.
 
 A desktop entry that exists is not necessarily one that loads. GLib splits
 `Exec` with `g_shell_parse_argv` and requires `argv[0]` to resolve through
@@ -60,10 +63,53 @@ print(Gio.DesktopAppInfo.new('<app-id>.desktop'))"
 
 ## Desktop integration is repaired at startup
 
-The desktop entry and the icon theme files are written at every launch when
-missing or stale, rather than documented as a manual setup step. Each fails
-silently when absent, so assuming their presence produces a failure with no
-message attached.
+`desktop::ensure_icons` writes the icon theme files at every launch, and
+`desktop::ensure_entry` writes the desktop entry whenever it differs from the one
+the running build wants, rather than either being documented as a manual setup
+step. Each fails silently when absent, so assuming their presence produces a
+failure with no message attached.
+
+Neither repair is conditional on the build. A development build writes its own
+entry and its own icons, named after its own `APP_ID`, and so does not reach an
+installed build's files at all.
+
+## A development build carries its own identity
+
+`desktop::APP_ID` and `desktop::APP_NAME` are split by `debug_assertions`: a
+development build is `dev.agenticworkspace.app.dev`, an installed build is
+`dev.agenticworkspace.app`. Everything named after the identity splits with it —
+the application data directory, the desktop entry and its icons, the Wayland
+`app_id`, the app id the portal registers, the tray item and the single-instance
+bus name — so both builds run at once, each on its own session, and a
+development run leaves an install untouched.
+
+`enableGTKAppId` in `tauri.conf.json` is `false`, and has to be. It does not
+reach the `app_id` a toplevel carries, which `g_get_prgname()` decides; what it
+does instead is hand GTK the `identifier` to register as a `GApplication`. That
+is a second name on the session bus, taken from the config rather than from
+`APP_ID`, so both builds claim it: tao makes whichever process starts second a
+remote instance and returns from its event loop, after `setup` has already
+written the entry and registered a tray. That process exits 0, with no window
+and no message.
+
+The split stops at the webview's own storage directory, which Tauri resolves
+from `identifier` rather than from `APP_ID`, so both builds share
+`~/.local/share/dev.agenticworkspace.app/` for WebKit's caches, its cookie jar
+and its HSTS store. No application state lives there and the frontend stores
+nothing in the browser, so nothing collides; whatever it stores there later,
+both builds share.
+
+A development build's entry names its binary under `src-tauri/target/debug/`, a
+path `cargo clean` empties. GLib discards an entry whose `Exec` resolves to
+nothing, the portal then refuses the app id, and the development hotkey binds
+nothing until the next `pnpm tauri dev` writes the entry again. That entry also
+carries `NoDisplay=true`, because a binary whose webview loads `devUrl` answers
+a launch from a menu with a connection error rather than a window.
+
+The two builds are one component each to KGlobalAccel, and a key belongs to one
+component: `settings.rs` defaults a development build to `CTRL+ALT+d` against an
+installed build's `CTRL+ALT+a`, since the second component to ask for a key that
+is taken is told it has none.
 
 ## WebKitGTK needs the DMA-BUF renderer disabled on Wayland
 

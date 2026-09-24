@@ -3,8 +3,9 @@ id: operations-running-agentic-workspace
 title: Running Agentic Workspace
 summary: How to run Agentic Workspace from a checkout on Arch, build the deb, rpm
   and AppImage bundles, install the AppImage and replace it with a newer build without
-  losing the session, start the app at login under KDE, and read the four failures
-  that stop it before a window appears.
+  losing the session, run a development build beside an installed one, start the app
+  at login under KDE, and read the four failures that stop it before a window
+  appears.
 related:
 - standards-linux-desktop
 - 008-tauri-v2-on-arch-kde
@@ -74,6 +75,28 @@ Both windows are declared `"visible": false` in `src-tauri/tauri.conf.json`;
 so a successful start puts the Workspace window and the Terminal window on
 screen together.
 
+## A development build runs beside an installed one
+
+`pnpm tauri dev` and an installed AppImage run at the same time. A development
+build's `desktop::APP_ID` is `dev.agenticworkspace.app.dev`, which gives it its
+own data directory, its own desktop entry and icons, its own Wayland `app_id`,
+its own tray item reading **Agentic Workspace (dev)**, its own portal
+registration holding `Ctrl+Alt+D`, and its own single-instance bus name. Neither
+build reads the other's session, settings, window geometry, drafts or themes, and
+neither answers the other's launch.
+
+A development build therefore opens with an empty workspace list. Copying the
+installed build's session across, with both builds closed, starts it on the same
+workspaces:
+
+```fish
+cp ~/.local/share/dev.agenticworkspace.app/session.json \
+   ~/.local/share/dev.agenticworkspace.app.dev/session.json
+```
+
+`standards-linux-desktop` holds what the identity reaches, the one surface it
+does not, and the `tauri.conf.json` flag that defeats the whole arrangement.
+
 ## Build a release
 
 ```fish
@@ -110,10 +133,10 @@ carries WebKitGTK, GTK and their dependencies inside the bundle.
 
 ## Where the app keeps its state
 
-Tauri resolves the application data directory from the `identifier` in
-`src-tauri/tauri.conf.json`, which makes it
-`~/.local/share/dev.agenticworkspace.app/` on Linux. `setup` creates it at
-launch.
+`setup` joins `desktop::APP_ID` onto the XDG data directory and creates the
+result at launch: `~/.local/share/dev.agenticworkspace.app/` for an installed
+build, `~/.local/share/dev.agenticworkspace.app.dev/` for a development one.
+Each entry below is one per build.
 
 | Entry | Written by | Holds |
 |---|---|---|
@@ -133,41 +156,95 @@ every launch:
 `~/.local/share/applications/dev.agenticworkspace.app.desktop`, and the icons at
 `~/.local/share/icons/hicolor/scalable/apps/dev.agenticworkspace.app.svg` and
 `~/.local/share/icons/hicolor/256x256/apps/dev.agenticworkspace.app.png`.
-`desktop::ensure_entry` rewrites the entry whenever its `Exec` no longer names
-the running binary, and `desktop::ensure_icons` rewrites the icons
-unconditionally. `standards-linux-desktop` holds the reason both are repaired at
-startup rather than installed by hand.
+`desktop::ensure_entry` rewrites the entry whenever it differs from the one the
+running build wants, and `desktop::ensure_icons` rewrites the icons
+unconditionally. Both files are named after `desktop::APP_ID`, so a development
+build maintains its own pair rather than these.
+`standards-linux-desktop` holds the reason they are repaired at startup rather
+than installed by hand.
 
 ## Install and update
 
 On Arch the AppImage is the install. The deb and rpm exist for other
 distributions and are not used here.
 
-Copy the bundle to a fixed path and make it executable:
+Give the bundle a permanent home under a version-free name, make it executable,
+and launch it:
 
 ```fish
-mkdir -p ~/.local/bin
-cp src-tauri/target/release/bundle/appimage/*.AppImage ~/.local/bin/agentic-workspace.AppImage
-chmod +x ~/.local/bin/agentic-workspace.AppImage
+mkdir -p ~/Applications
+mv "src-tauri/target/release/bundle/appimage/Agentic Workspace_<version>_amd64.AppImage" \
+   ~/Applications/AgenticWorkspace.AppImage
+chmod +x ~/Applications/AgenticWorkspace.AppImage
+~/Applications/AgenticWorkspace.AppImage
 ```
 
-The path is fixed because the desktop entry names it. An AppImage runs from a
-mount under `/tmp` that is torn down on exit, so `desktop::launch_path` writes
-the value of `$APPIMAGE` into `Exec` rather than the mount point. A bundle moved
-to a different path leaves a stale `Exec` behind until it is launched once from
-its new location, where `desktop::ensure_entry` rewrites the entry.
+The desktop entry names the file the application ran from.
+`desktop::launch_path` returns the path in `$APPIMAGE` when that variable holds
+an absolute path that still stats as a file, and the running executable
+otherwise — an AppImage's executable sits inside a temporary directory the
+runtime removes on exit, so the variable is what makes `Exec` name something
+that outlasts the process.
 
-**Replacing the install with a newer build.** Quit the app first, then overwrite
-the file in place:
+`~/Applications` sits outside the build tree, because an AppImage run out of
+`src-tauri/target/` points the entry at a path `cargo clean` empties.
+`AgenticWorkspace.AppImage` carries no version, because the next version bump
+renames the bundle and leaves the entry naming a file that is gone. GLib
+discards an entry whose `Exec` resolves to nothing, so the launcher has nothing
+to start; `standards-linux-desktop` holds the rule.
+
+**Verifying the install.** The installed build writes the desktop entry and the
+icons itself, naming the AppImage it ran from. It does that in `setup`, which
+runs only in a process that starts: `tauri_plugin_single_instance` claims
+`dev.agenticworkspace.app.SingleInstance` while Tauri builds the application, so
+a second launch under that same identity raises the window the running instance
+last used and exits with the entry untouched. Quit the installed build before
+installing over it.
 
 ```fish
-cp src-tauri/target/release/bundle/appimage/*.AppImage ~/.local/bin/agentic-workspace.AppImage
+grep Exec ~/.local/share/applications/dev.agenticworkspace.app.desktop
+```
+
+`Exec` names the absolute path of the installed AppImage, in the double quotes
+`desktop::quote_exec` writes.
+
+KService rebuilds the launcher's cache itself — kded6 watches the directories it
+caches for as long as the session runs — so what a launcher offers follows the
+entry on disk. `Could not find the program` is KIO's message when the `Exec` it
+ran names nothing, so read the entry before rebuilding anything: a bundle moved
+but not yet launched still names its old path in the file, where no rebuild
+reaches it. Rebuilding by hand settles a launcher still offering a path the
+entry no longer names:
+
+```fish
+kbuildsycoca6
+```
+
+A `pnpm tauri dev` run leaves that entry alone: its `APP_ID` is
+`dev.agenticworkspace.app.dev`, so `desktop::ensure_entry` writes
+`dev.agenticworkspace.app.dev.desktop` beside it. That entry carries
+`NoDisplay=true` and no launcher offers it, because a development binary loads
+`devUrl` and answers a launch with a connection error rather than a window.
+
+**Replacing the install with a newer build.** Quit the app first, then move the
+new bundle onto the installed path:
+
+```fish
+mv "src-tauri/target/release/bundle/appimage/Agentic Workspace_<version>_amd64.AppImage" \
+   ~/Applications/AgenticWorkspace.AppImage
 ```
 
 Quitting means the tray menu's **Quit** entry or `Ctrl+Q` in either window.
-Closing a window calls `windows::hide`, which leaves the process running with
-every terminal alive; `cp` over a running install truncates the file the mounted
-AppImage is reading from.
+Closing a window calls `windows::hide` while the tray is up, which leaves the
+process running with every terminal alive and answering the next launch by
+raising itself, so the new build never starts. `tauri build` empties
+`src-tauri/target/release/bundle/appimage/` before it bundles, so a release
+worth rolling back to survives only as a copy made before the next build.
+
+An installed build never looks for a newer one. `tauri-plugin-updater` is not a
+dependency in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` sets no
+`createUpdaterArtifacts`, so moving a new bundle onto
+`~/Applications/AgenticWorkspace.AppImage` is the only update there is.
 
 Everything under `~/.local/share/dev.agenticworkspace.app/` survives the
 replacement untouched: the new build reads the same session, settings, window
@@ -175,41 +252,59 @@ geometry, drafts and imported themes.
 
 **A store the build cannot read.** `store::load` compares the `version` field in
 `session.json` against the `SESSION_VERSION` constant in
-`src-tauri/src/state.rs` that the running build carries.
-A file whose version is higher — and a file that fails to parse — goes to
-`store::set_aside`, which renames it to `session.json.unreadable-<seconds>`
-where the suffix is the Unix time of the rename. The app then starts with an
-empty workspace list and shows a notice naming the file it moved. Nothing is
-deleted.
+`src-tauri/src/state.rs` that the running build carries, and hands a file whose
+version is higher — or one that fails to parse — to `store::set_aside`. That
+renames it to `session.json.unreadable-<seconds>` rather than deleting it, the
+suffix being the Unix time of the rename. The app then starts with an empty
+workspace list and shows a notice naming the file it moved.
 
-**Rolling back.** Copy the previous AppImage over the same path, with the app
-not running. When the build being rolled back from had raised the session
-format, the older build refuses the store it finds and moves it aside on its
-first launch, and the workspaces are in that moved-aside file rather than in the
-empty `session.json` written over it. Restoring it by hand returns the session
-to any build that reads its format:
+**Rolling back.** Copy `session.json` aside first:
+
+```fish
+cp ~/.local/share/dev.agenticworkspace.app/session.json ~/session-before-rollback.json
+```
+
+Then put a previous AppImage at `~/Applications/AgenticWorkspace.AppImage` with
+the app not running, and launch it. No save raises the `version` field, so a
+store written before a format bump keeps its old number: an older build accepts
+it — anything at or below its own `SESSION_VERSION` — and drops whatever the
+newer format added on its next save, with no notice and nothing set aside. Only
+a store the newer build wrote from scratch carries the higher number, and that
+one the older build refuses — the workspaces are then in the file
+`store::set_aside` renamed, not in the empty `session.json` the older build
+writes in its place, and restoring it by hand returns the session to any build
+that reads its format:
 
 ```fish
 cd ~/.local/share/dev.agenticworkspace.app
 mv session.json.unreadable-1758556800 session.json
 ```
 
-Restore it while the app is not running; a running process overwrites
-`session.json` within 30 seconds.
+Restore either copy while the app is not running; the periodic save started in
+`setup` overwrites `session.json` within 30 seconds. The launch settles the
+desktop entry too: `desktop::ensure_entry` compares the whole entry against the
+one the running build wants and writes when the two differ.
 
 ## Start at login
 
 Under KDE Plasma: **System Settings → Autostart → Add → Application**, then pick
 Agentic Workspace. The entry the dialog lists is
 `~/.local/share/applications/dev.agenticworkspace.app.desktop`, which
-`desktop::ensure_entry` writes — so the app has to have run once before the
-entry exists. Copying that file into `~/.config/autostart/` does the same thing
+`desktop::ensure_entry` writes when an installed build runs — so that build has
+to have run once before the entry exists. A `pnpm tauri dev` run writes
+`dev.agenticworkspace.app.dev.desktop` instead, which `NoDisplay=true` keeps out
+of the dialog. Copying that file into `~/.config/autostart/` does the same thing
 without the dialog:
 
 ```fish
 mkdir -p ~/.config/autostart
 cp ~/.local/share/applications/dev.agenticworkspace.app.desktop ~/.config/autostart/
 ```
+
+Copy it after the app has run from its installed location.
+`desktop::ensure_entry` rewrites the entry under
+`~/.local/share/applications/` and nothing else, so the copy under
+`~/.config/autostart/` keeps the `Exec` it was made with.
 
 The app never starts hidden. `windows::show_all` shows both windows at every
 launch, restoring each one's saved size and maximised state from `windows.json`.
@@ -223,7 +318,10 @@ The tray icon is a StatusNotifierItem through libayatana-appindicator. On Linux
 that host delivers menu events only, so a left click opens the menu rather than
 raising a window. The menu's first entry, **Show Agentic Workspace**, raises the
 window that held focus last; below it `tray::menu` lists both windows with a
-check mark against the ones on screen, then the workspaces, then **Quit**.
+check mark against the ones on screen, then the workspaces, then **Quit**. That
+entry and the icon's tooltip both name `desktop::APP_NAME`, so a development
+build's tray item reads **Show Agentic Workspace (dev)** and the two are
+distinguishable.
 
 A desktop with no StatusNotifierItem host does not strand the process:
 `tray::init` fails, `setup` shows a notice saying so, and `on_close_requested`

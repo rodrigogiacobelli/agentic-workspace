@@ -65,17 +65,19 @@ requires (CHR-07).
 
 Closing a window runs `windows::hide`: the geometry is recorded and the window
 disappears while the process lives on in the tray (TRAY-01, TRAY-07).
-`tray::menu` builds **Show Agentic Workspace**, one checked entry per window,
-one checked entry per workspace with a dot against any background workspace
-wanting attention, and **Quit** (TRAY-03, TRAY-04, TRAY-06). `tray::icon`
+`tray::menu` builds a first entry reading **Show** and `desktop::APP_NAME` —
+**Show Agentic Workspace** from an installed build, **Show Agentic Workspace
+(dev)** from a development one — then one checked entry per window, one checked
+entry per workspace with a dot against any background workspace wanting
+attention, and **Quit** (TRAY-03, TRAY-04, TRAY-06). `tray::icon`
 paints an orange dot into the corner of the application icon while a background
 workspace wants attention (TRAY-05). Quit and the last-window close both route
 through the Workspace window, which owns the unsaved-buffer prompt.
 
 libappindicator's menu-only event model means the tray icon is built with
 `show_menu_on_left_click(true)`: a left click opens the menu, and its first
-entry, **Show Agentic Workspace**, raises the window `state.last_focused` names
-(TRAY-02). No handler sees a bare click.
+entry, the one `desktop::APP_NAME` names, raises the window
+`state.last_focused` names (TRAY-02). No handler sees a bare click.
 
 `windows::record` keeps each window's size, position, maximised state and
 monitor name in `windows.json` beside the session, keyed by window label;

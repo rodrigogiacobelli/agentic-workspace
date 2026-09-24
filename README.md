@@ -159,14 +159,15 @@ meets it.
 
 ```bash
 pnpm install
-pnpm tauri dev          # development: both windows, hot reload
+pnpm tauri dev          # development: both windows, hot reload, its own identity and state
 pnpm release            # deb / rpm / AppImage under src-tauri/target/release/bundle/
 cd src-tauri && cargo test --lib     # unit tests; no compositor or PTY needed
 ```
 
 `lore codex show operations-running-agentic-workspace` carries the rest:
 what each package is linked against, where the app keeps its state, how to
-install an AppImage and replace it with a newer build, how to start it at login
+install an AppImage and replace it with a newer build, why `pnpm tauri dev` runs
+beside an installed build instead of colliding with it, how to start it at login
 under KDE, and the four failures that stop it before a window appears.
 
 ## Keys

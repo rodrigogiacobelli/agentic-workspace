@@ -82,7 +82,10 @@ impl Default for Settings {
             quiet_threshold_s: 20,
             asset_warn_mb: 5,
             asset_links: "markdown".into(),
-            global_hotkey: "CTRL+ALT+a".into(),
+            // KGlobalAccel gives one key to one component, and a development
+            // build is a component of its own, so it asks for its own key
+            // rather than the one an installed build already holds.
+            global_hotkey: if cfg!(debug_assertions) { "CTRL+ALT+d" } else { "CTRL+ALT+a" }.into(),
             languages: HashMap::new(),
             panel_tabs: "text".into(),
             markdown_mode: "source".into(),
