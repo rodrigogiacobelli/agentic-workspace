@@ -60,7 +60,7 @@ re-run.
 ## Consequences
 
 **Easier:**
-- A workspace switch detaches a view and attaches another; no process is
+- A workspace switch changes which terminal is on screen; no process is
   signalled.
 - The frontend can be reloaded, and a rendering crash costs no running work.
 

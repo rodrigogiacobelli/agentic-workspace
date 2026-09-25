@@ -1,7 +1,7 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
-import { useChanged } from "../live";
+import { useChanged, useKept, useKeptScroll } from "../live";
 import { rank } from "../fuzzy";
 import { report } from "../notice";
 import * as repo from "../repo";
@@ -30,18 +30,23 @@ const VERB: Record<Remote, { running: string; done: string }> = {
  * Local and remote branches, and the operations that move them between the
  * two. Fetch, pull and push live here since Remote stopped being a panel of
  * its own, and git's whole output of the last one stays under them until it
- * is dismissed — a toast would show one line of it (GIT-17).
+ * is dismissed — a toast would show one line of it (GIT-17). The lists, the
+ * filter and an operation's progress and output are kept, so one still running
+ * when the panel is taken down shows how it ended when the panel is back.
  */
 export function BranchesPanel({ ws, session }: { ws: Workspace; session: Session }) {
   const { info } = repo.useRepo(ws.id);
   const isRepo = info?.isRepo === true;
-  const [branches, setBranches] = useState<Branches | null>(null);
-  const [query, setQuery] = useState("");
+  const [branches, setBranches] = useKept<Branches | null>(`${ws.id}:branches:list`, null);
+  const [query, setQuery] = useKept(`${ws.id}:branches:filter`, "");
   const [step, setStep] = useState<Step | null>(null);
-  const [busy, setBusy] = useState<Remote | null>(null);
-  const [output, setOutput] = useState<{ text: string; failed: boolean } | null>(null);
+  const [busy, setBusy] = useKept<Remote | null>(`${ws.id}:branches:busy`, null);
+  const [output, setOutput] = useKept<{ text: string; failed: boolean } | null>(`${ws.id}:branches:output`, null);
+  /** An operation ran from this panel since it was built: its box fades in, where a kept one is drawn in place. */
+  const arriving = useRef(false);
+  const scroller = useKeptScroll<HTMLDivElement>(`${ws.id}:branches:scroll`, branches !== null);
 
-  const load = useCallback(() => api.gitBranches(ws.id).then(setBranches).catch(report), [ws.id]);
+  const load = useCallback(() => api.gitBranches(ws.id).then(setBranches).catch(report), [ws.id, setBranches]);
   useEffect(() => { if (isRepo) void load(); }, [isRepo, load]);
   // An agent may branch from a terminal; the watcher says so.
   useChanged(ws.id, () => { if (isRepo) void load(); });
@@ -95,6 +100,7 @@ export function BranchesPanel({ ws, session }: { ws: Workspace; session: Session
   // else in the panel stays usable while it runs.
   const sync = async (action: Remote) => {
     setBusy(action);
+    arriving.current = true;
     setOutput({ text: VERB[action].running, failed: false });
     try {
       const out = await api.gitRemote(ws.id, action, action === "push" && !info.upstream);
@@ -124,7 +130,7 @@ export function BranchesPanel({ ws, session }: { ws: Workspace; session: Session
         <button title="New branch…" onClick={() => setStep({ kind: "name" })}>＋</button>
       </div>
       {output && (
-        <div className={`remote-output${output.failed ? " failed" : ""}`}>
+        <div className={`remote-output${output.failed ? " failed" : ""}${arriving.current ? " arriving" : ""}`}>
           <pre>{output.text}</pre>
           <button title="Dismiss" onClick={() => setOutput(null)}><Icon name="close" size={12} /></button>
         </div>
@@ -132,7 +138,7 @@ export function BranchesPanel({ ws, session }: { ws: Workspace; session: Session
       <div className="panel-bar">
         <input placeholder="Filter branches" value={query} onChange={(e) => setQuery(e.target.value)} />
       </div>
-      <div className="panel-list">
+      <div ref={scroller} className="panel-list">
         {!branches && <div className="tree-loading loading">Loading…</div>}
         {local.length > 0 && (
           <div className="git-section">

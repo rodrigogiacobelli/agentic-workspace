@@ -50,7 +50,11 @@ decided the shape of the answer:
 
 Output **accumulates on a 5 ms window** before it leaves the backend. The
 window is armed by the first byte to arrive and is never extended, so no byte
-waits longer than the window however hard the program writes.
+waits longer than the window however hard the program writes. That window is
+the terminal on screen's — `AppState.foreground`, the active terminal of the
+active workspace. Every other terminal accumulates on a **250 ms window** that
+ends early once 64 KiB is waiting, and `pty::show` wakes a terminal's flusher
+the moment it comes on screen.
 
 Each message travels as **base64 in a JSON body, capped at 6000 bytes** of
 terminal output, which encodes to 8002 characters and stays under tauri's
@@ -86,6 +90,10 @@ life of the process.
   appears at once or a second later.
 - The window, the watermarks and the acknowledgement size are VSCode's, which
   runs the same emulator over the same problem.
+- Nobody reads a terminal that is not on screen, so its output has no latency
+  to protect: the long window turns an agent's redraws in a background
+  workspace from up to two hundred messages a second into four, with the same
+  bytes in the same order.
 
 ## Alternatives considered
 
@@ -108,7 +116,9 @@ life of the process.
   rather than by a queue inside the application.
 
 **Harder:**
-- Output is delayed by up to the window, which a keystroke's echo pays.
+- Output is delayed by up to the window, which a keystroke's echo pays. A
+  terminal not on screen delivers output, and so raises its attention badge,
+  up to 250 ms late.
 - Two threads serve each pseudoterminal — one reading, one flushing — and a
   hangup has to release a reader parked at the high-water mark.
 - The encoding is a contract between `pty.rs` and `terminals.ts`, and the size

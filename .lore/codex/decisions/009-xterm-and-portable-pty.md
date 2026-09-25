@@ -90,8 +90,9 @@ re-attach. It is not the mechanism a workspace switch relies on.
   rather than application code.
 
 **Harder:**
-- Every terminal ever opened holds an xterm.js instance and its scrollback in
-  the Terminal window's memory for the life of the application.
+- Every open terminal tab holds an xterm.js instance and its scrollback in the
+  Terminal window's memory until the tab closes, whatever workspace is on
+  screen.
 - The Terminal window is hidden, not closed, so that its instances survive;
   the application decides when hiding becomes quitting.
 - The backend's ring buffer is bounded and has to be trimmed at a line

@@ -71,8 +71,21 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
     result
 }
 
-/// Writes the session atomically.
+/// The text of the last session write that succeeded. Held across the write,
+/// so it always names what the last write put on disk.
+static WRITTEN: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
+/// Writes the session atomically, unless the file already holds exactly this:
+/// most saves, the half-minute tick above all, would put the same bytes back.
+/// A file deleted since is written again.
 pub fn save(data_dir: &Path, session: &Session) -> Result<()> {
     let text = serde_json::to_string_pretty(session).context("serialising the session")?;
-    write_atomic(&data_dir.join(FILE), &text)
+    let path = data_dir.join(FILE);
+    let mut written = WRITTEN.lock();
+    if *written == text && path.exists() {
+        return Ok(());
+    }
+    write_atomic(&path, &text)?;
+    *written = text;
+    Ok(())
 }

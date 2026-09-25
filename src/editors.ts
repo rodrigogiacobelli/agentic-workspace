@@ -16,8 +16,9 @@ export function activeEditorId(ws: Workspace): string | null {
   return activeGroup(ws)?.activeEditor ?? null;
 }
 
+/** Every tab open anywhere: the Editor's files and Source Control's diffs. */
 export function allTabIds(workspaces: Workspace[]): Set<string> {
-  return new Set(workspaces.flatMap((w) => w.groups.flatMap((g) => g.editors.map((e) => e.id))));
+  return new Set(workspaces.flatMap((w) => [...w.groups, ...w.review.groups].flatMap((g) => g.editors.map((e) => e.id))));
 }
 
 /** An open tab: a text document, media shown as itself, or a file the editor declines. */
@@ -60,7 +61,8 @@ export function dirtyCount(): number {
   return n;
 }
 
-export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElement): Promise<Entry> {
+/** Shows a tab's document in `container`, opening it first if needed; `focus` false leaves focus where it is. */
+export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElement, focus = true): Promise<Entry> {
   let entry = registry.get(tab.id);
   if (!entry) {
     const kind = mediaKind(tab.path);
@@ -94,15 +96,18 @@ export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElemen
         void api.pinEditor(ws.id, tab.id).catch(() => {});
       });
     }
-    entry = { doc: d };
-    registry.set(tab.id, entry);
     const draft = await api.readDraft(ws.id, tab.path).catch(() => null);
     if (draft !== null && draft !== text) d.restoreDraft(draft);
     else if (draft !== null) void api.deleteDraft(ws.id, tab.path).catch(() => {});
+    // Registered only once it is shown just below: a group mounts again when
+    // the registry gains its tab, and that mount must find the document
+    // already in place rather than show it first, taking focus it was not given.
+    entry = { doc: d };
+    registry.set(tab.id, entry);
     notify();
   }
   if ("doc" in entry) {
-    entry.doc.mount(container, tab.line || 1);
+    entry.doc.mount(container, tab.line || 1, focus);
     const target = pending.get(tab.id);
     if (target) {
       pending.delete(tab.id);
@@ -112,8 +117,9 @@ export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElemen
   return entry;
 }
 
-export function unmount(id: string): void {
-  doc(id)?.unmount();
+/** Takes a document off `container`; one already shown in another group stays there. */
+export function unmount(id: string, container: HTMLElement): void {
+  doc(id)?.unmount(container);
 }
 
 export function dispose(id: string): void {

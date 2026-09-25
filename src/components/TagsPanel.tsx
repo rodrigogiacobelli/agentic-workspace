@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
-import { useChanged } from "../live";
+import { useChanged, useKept, useKeptScroll } from "../live";
 import { rank } from "../fuzzy";
 import { report } from "../notice";
 import * as repo from "../repo";
@@ -12,15 +12,20 @@ import { Prompt } from "./Prompt";
 
 type Step = { kind: "name" } | { kind: "kind"; name: string } | { kind: "message"; name: string };
 
-/** The repository's tags, newest first; create one at HEAD, copy a name, delete one. */
+/**
+ * The repository's tags, newest first; create one at HEAD, copy a name, delete
+ * one. The list and the filter are kept, so the panel rebuilt when it comes
+ * back paints them at once and reads the tags again behind them.
+ */
 export function TagsPanel({ ws }: { ws: Workspace }) {
   const { info } = repo.useRepo(ws.id);
   const isRepo = info?.isRepo === true;
-  const [tags, setTags] = useState<Tag[] | null>(null);
-  const [query, setQuery] = useState("");
+  const [tags, setTags] = useKept<Tag[] | null>(`${ws.id}:tags:list`, null);
+  const [query, setQuery] = useKept(`${ws.id}:tags:filter`, "");
   const [step, setStep] = useState<Step | null>(null);
+  const scroller = useKeptScroll<HTMLDivElement>(`${ws.id}:tags:scroll`, tags !== null);
 
-  const load = useCallback(() => api.gitTags(ws.id).then(setTags).catch(report), [ws.id]);
+  const load = useCallback(() => api.gitTags(ws.id).then(setTags).catch(report), [ws.id, setTags]);
   useEffect(() => { if (isRepo) void load(); }, [isRepo, load]);
   // An agent may tag a release from a terminal; the watcher says so.
   useChanged(ws.id, () => { if (isRepo) void load(); });
@@ -53,7 +58,7 @@ export function TagsPanel({ ws }: { ws: Workspace }) {
         <input placeholder="Filter tags" value={query} onChange={(e) => setQuery(e.target.value)} />
         <button title="New tag at HEAD…" onClick={() => setStep({ kind: "name" })}>＋</button>
       </div>
-      <div className="panel-list">
+      <div ref={scroller} className="panel-list">
         {!tags && <div className="tree-loading loading">Loading…</div>}
         {shown.map((t) => (
           <div key={t.name} className="git-row plain" title={`${t.name}${t.annotated ? " (annotated)" : ""}\n${t.subject}`}>

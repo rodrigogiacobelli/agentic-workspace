@@ -36,7 +36,10 @@ Key forces:
 ## Decision
 
 The frontend is **React 19 with TypeScript, built by Vite**. Both windows load
-the same bundle and select their role from the Tauri window label.
+the same entry — the title row, the status bar, settings and the palettes —
+select their role from the Tauri window label, and import only that role's
+half: the Workspace window never loads xterm.js and the Terminal window never
+loads CodeMirror (`018-mount-what-is-on-screen`).
 
 There is **no frontend state store**. The backend publishes one `session`
 snapshot — workspaces, their tabs, the active workspace — as a Tauri event
@@ -88,4 +91,7 @@ mounts the instance's element into place.
 - **The snapshot is the contract.** Its TypeScript type mirrors the backend's
   serialised struct field for field.
 - **Presentation state that need not survive a switch stays local.** A hovered
-  row or an open menu is component state, not session state.
+  row or an open menu is component state, not session state. Presentation
+  state that must survive a switch — a filter, a draft, a list already
+  fetched, a scroll offset — is kept in `src/live.ts`
+  (`018-mount-what-is-on-screen`), not in the session.

@@ -246,12 +246,8 @@ button.row-disclose:hover { color: var(--fg); background: transparent; }
 main { flex: 1; display: flex; min-height: 0; }
 .terminal-main { flex-direction: column; }
 .workspace-main { position: relative; }
-/* Every workspace shown so far, and each of its modes, stays mounted and
-   stacked; the ones not on screen skip rendering but keep their layout, their
-   scroll and their editors' state, so coming back paints rather than rebuilds
-   (decision 6). `visibility` covers a webview without `content-visibility`. */
+/* Only the workspace on screen is mounted, in the mode it is in; it fills the body. */
 .workspace-view, .mode-view { position: absolute; inset: 0; display: flex; min-width: 0; min-height: 0; }
-.workspace-view.is-hidden, .mode-view.is-hidden { content-visibility: hidden; visibility: hidden; pointer-events: none; }
 .empty { display: flex; align-items: center; justify-content: center; color: var(--fg-dim); height: 100%; width: 100%; }
 
 /* The strip scrolls; the controls at its end do not go with it. */
@@ -1004,8 +1000,11 @@ input, textarea {
   transition-timing-function: var(--e-in);
 }
 .tree-branch > * { min-height: 0; overflow: hidden; overflow: visible clip; }
+/* Only a branch opened while the tree is on screen unfolds (`.unfold`): a
+   tree built again when its workspace or mode comes back draws its open
+   branches open. */
 @starting-style {
-  .tree-branch.open { grid-template-rows: 0fr; }
+  .tree-branch.open.unfold { grid-template-rows: 0fr; }
 }
 
 /* --- Dialogs and the overlays behind them (§11.4) ------------------------ */
@@ -1061,14 +1060,17 @@ input, textarea {
 @starting-style { .drop-zone { opacity: 0; } }
 
 /* The output box arrives by fading in (§11.3, an inline reveal), and its
-   outcome is a change of colour, which is state and moves at hover speed. */
+   outcome is a change of colour, which is state and moves at hover speed.
+   Only a box an operation run from the panel creates fades (`.arriving`): a
+   panel built again when its workspace or mode comes back draws a kept box in
+   place. */
 .remote-output {
   transition:
     opacity           var(--d-base)    var(--e-out),
     border-left-color var(--d-instant) var(--e-out);
 }
 .remote-output pre { transition: color var(--d-instant) var(--e-out); }
-@starting-style { .remote-output { opacity: 0; } }
+@starting-style { .remote-output.arriving { opacity: 0; } }
 
 /* --- Lists that appear (§11.6) ------------------------------------------- */
 

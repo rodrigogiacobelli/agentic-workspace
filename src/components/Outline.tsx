@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import * as editors from "../editors";
-import { useLive } from "../live";
+import { useKeptScroll, useLive } from "../live";
 import type { Workspace } from "../types";
 
-/** The headings of the active markdown document, the one at the cursor marked. */
+/**
+ * The headings of the active markdown document, the one at the cursor marked.
+ * Its scroll is kept per tab: a rebuilt outline opens where its document's
+ * was left, and a document never opens at another's offset.
+ */
 export function Outline({ ws }: { ws: Workspace }) {
   const [, bump] = useState(0);
   // Out of sight it follows nothing: every keystroke in any document would
@@ -11,6 +15,7 @@ export function Outline({ ws }: { ws: Workspace }) {
   const live = useLive();
   useEffect(() => (live ? editors.subscribe(() => bump((n) => n + 1)) : undefined), [live]);
   const activeId = editors.activeEditorId(ws);
+  const scroller = useKeptScroll<HTMLElement>(`${ws.id}:tab:${activeId}:outline-scroll`);
   const doc = activeId ? editors.doc(activeId) : undefined;
   if (!doc) return <div className="tree-loading">Open a markdown file to see its outline.</div>;
   if (!doc.isMarkdown) return <div className="tree-loading">{doc.path} is not a markdown file.</div>;
@@ -18,7 +23,7 @@ export function Outline({ ws }: { ws: Workspace }) {
   const trail = doc.headingTrail();
   const current = trail.length ? trail[trail.length - 1].from : -1;
   return (
-    <nav className="tree outline">
+    <nav key={activeId} ref={scroller} className="tree outline">
       {headings.length === 0 && <div className="tree-loading">No headings.</div>}
       {headings.map((h) => (
         <div

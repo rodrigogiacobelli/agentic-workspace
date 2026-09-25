@@ -3,10 +3,10 @@ import { api } from "../api";
 import { actionFor } from "../hotkeys";
 import { pick } from "../modes";
 import { useDismiss } from "../motion";
+import { report } from "../notice";
 import * as terminals from "../terminals";
 import type { Session, TerminalTab, Workspace } from "../types";
 import { ContextMenu } from "./Menu";
-import { report } from "./Switcher";
 import { TabOverflow, useTabStrip } from "./tabs";
 
 interface Props {
@@ -32,7 +32,11 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
   const [searching, setSearching] = useState(false);
   const shownRef = useRef<string | null>(null);
 
-  useEffect(() => terminals.onTitles(() => bump((n) => n + 1)), []);
+  // The tab strip names the shown workspace's shells; a title from a
+  // terminal in another workspace changes nothing here.
+  useEffect(() => terminals.onTitles((id) => {
+    if (ws?.terminals.some((t) => t.id === id)) bump((n) => n + 1);
+  }), [ws]);
 
   // A path printed in a terminal is resolved against that terminal's working
   // directory, then opened in the Workspace window at its line.
@@ -139,6 +143,30 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
         <SearchBar id={activeId} onClose={() => { setSearching(false); terminals.get(activeId)?.term.focus(); }} />
       )}
     </main>
+  );
+}
+
+/**
+ * The status bar's facts for the Terminal window: the shell on screen, what
+ * it runs, where, and how many others there are.
+ */
+export function TerminalFacts({ ws }: { ws: Workspace }) {
+  const [, bump] = useState(0);
+  const shown = ws.activeTerminal;
+  useEffect(() => terminals.onTitles((id) => { if (id === shown) bump((n) => n + 1); }), [shown]);
+  const tab = ws.terminals.find((t) => t.id === shown);
+  const root = ws.path.replace(/\/+$/, "");
+  const cwd = tab ? (tab.cwd === root ? "." : tab.cwd.startsWith(`${root}/`) ? `./${tab.cwd.slice(root.length + 1)}` : tab.cwd) : null;
+  const waiting = ws.terminals.filter((t) => t.attention).length;
+  return (
+    <>
+      {tab && <span className="statusbar-mono">{terminals.get(tab.id)?.title || tab.name || "shell"}</span>}
+      {cwd && <span className="statusbar-mono" title={tab?.cwd}>{cwd}</span>}
+      <span>
+        {ws.terminals.length} tab{ws.terminals.length === 1 ? "" : "s"}
+        {waiting > 0 && ` · ${waiting} with output`}
+      </span>
+    </>
   );
 }
 

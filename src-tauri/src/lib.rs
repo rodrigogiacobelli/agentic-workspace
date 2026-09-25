@@ -72,6 +72,7 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         watcher: Mutex::new(watch::Watcher::new(handle.clone())),
         windows: Mutex::new(windows::load(&data_dir)),
         tray: tray::Tray::default(),
+        published: Mutex::new(String::new()),
         data_dir,
         notices: Mutex::new(notices),
     });
@@ -111,14 +112,17 @@ fn setup(app: &mut tauri::App) -> Result<()> {
     let portal = handle.clone();
     std::thread::Builder::new().name("global-hotkey".into()).spawn(move || hotkey::run_blocking(portal)).ok();
 
-    // Terminal working directories change with no event to observe; a periodic
-    // save keeps the session file close to the truth if the process is killed.
+    // Terminal working directories change with no event to observe. The shell
+    // on screen is followed as it prints (`agent::quiet_loop`); every other
+    // one reaches the windows here, and the session file stays close to the
+    // truth if the process is killed. A publish that finds nothing moved
+    // sends and writes nothing.
     let ticker = handle.clone();
     std::thread::Builder::new()
         .name("session-persist".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
-            session::persist(&ticker);
+            session::publish(&ticker);
             windows::save(&ticker);
         })
         .ok();

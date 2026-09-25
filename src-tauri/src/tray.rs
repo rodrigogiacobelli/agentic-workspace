@@ -32,6 +32,10 @@ pub const ID: &str = "main-dev";
 pub struct Tray {
     available: AtomicBool,
     signature: Mutex<String>,
+    /// Whether the icon shows the attention dot. The menu changes with every
+    /// workspace renamed or switched to, the icon only when this flips, and
+    /// each new icon costs GTK a PNG decode in a separate process.
+    dotted: AtomicBool,
 }
 
 impl Tray {
@@ -80,8 +84,16 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-/// Rebuilds the menu and picks the icon from the current session.
+/// Rebuilds the menu and picks the icon from the current session. Publishes
+/// come from any thread, and two rebuilds running at once could land in the
+/// wrong order under a signature that then skips the right one; on the main
+/// thread they run one at a time, each reading the session as it runs.
 pub fn refresh(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || apply(&handle));
+}
+
+fn apply(app: &AppHandle) {
     let state = app.state::<AppState>();
     if !state.tray.is_available() {
         return;
@@ -118,8 +130,10 @@ pub fn refresh(app: &AppHandle) {
         }
         Err(e) => eprintln!("agentic-workspace: could not build the tray menu ({e:#})"),
     }
-    if let Some(image) = icon(app, attention) {
-        let _ = tray.set_icon(Some(image));
+    if state.tray.dotted.swap(attention, Ordering::SeqCst) != attention {
+        if let Some(image) = icon(app, attention) {
+            let _ = tray.set_icon(Some(image));
+        }
     }
 }
 

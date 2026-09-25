@@ -2,7 +2,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, events } from "../api";
-import * as editors from "../editors";
 import { MODES, modeOf, pick } from "../modes";
 import { report } from "../notice";
 import type { Session, WindowRole, Workspace } from "../types";
@@ -48,9 +47,11 @@ export function Switcher({ session, role, onSettings }: Props) {
 
   const remove = async (w: Workspace) => {
     const parts = [];
-    const unsaved = editors.dirtyCount();
+    // Buffers live in the Workspace window alone: the Terminal window has
+    // none to count, and importing the editors there would fetch CodeMirror.
+    const unsaved = role === "workspace" && w.id === session.active ? (await import("../editors")).dirtyCount() : 0;
     if (w.terminals.length) parts.push(`${w.terminals.length} terminal tab${w.terminals.length === 1 ? "" : "s"} will be closed and their processes terminated`);
-    if (w.id === session.active && unsaved) parts.push(`${unsaved} unsaved editor buffer${unsaved === 1 ? "" : "s"} will be lost`);
+    if (unsaved) parts.push(`${unsaved} unsaved editor buffer${unsaved === 1 ? "" : "s"} will be lost`);
     const detail = parts.length ? `\n\n${parts.join(".\n")}.` : "";
     const yes = await ask(`Remove workspace "${w.name}"?${detail}\n\nNo file on disk is deleted.`, {
       title: "Remove workspace",

@@ -68,29 +68,71 @@ pub struct RepoInfo {
     pub common_dir: Option<String>,
 }
 
-pub fn info(root: &Path) -> RepoInfo {
-    let Ok(dirs) = git(root, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"]) else {
-        return RepoInfo::default();
+/// Ahead and behind from `%(upstream:track)`: `[ahead 2, behind 1]`,
+/// `[ahead 2]`, `[gone]`, or empty when the two agree.
+fn track(text: &str) -> (u32, u32) {
+    let num = |key: &str| -> u32 {
+        text.split(['[', ']', ','])
+            .map(str::trim)
+            .find_map(|p| p.strip_prefix(key))
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(0)
     };
-    let mut lines = dirs.lines();
-    let git_dir = lines.next().map(str::to_string);
-    let common_dir = lines.next().map(str::to_string);
-    let toplevel = lines.next().map(str::to_string);
+    (num("ahead "), num("behind "))
+}
+
+/// What a repository is and where its HEAD is, without scanning the working
+/// tree: the summary is recomputed on every change in the git directory, and
+/// a `git status` there would stat every tracked file each time.
+pub fn info(root: &Path) -> RepoInfo {
+    // One process answers the directories and where HEAD points: a branch's
+    // full ref, or `HEAD` itself when detached. On an unborn branch there is
+    // nothing for HEAD to resolve to and git fails the whole command, so the
+    // directories are asked again alone and the branch comes from the
+    // symbolic ref. The top level, whose answer is skipped, is asked both
+    // times because it fails outside a working tree: a bare repository, or a
+    // workspace opened inside a git directory, is not a repository here.
+    let (git_dir, common_dir, head) = match git(root, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel", "--symbolic-full-name", "HEAD"]) {
+        Ok(out) => {
+            let mut l = out.lines().map(str::to_string);
+            (l.next(), l.next(), l.nth(1))
+        }
+        Err(_) => match git(root, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"]) {
+            Ok(out) => {
+                let mut l = out.lines().map(str::to_string);
+                (l.next(), l.next(), None)
+            }
+            Err(_) => return RepoInfo::default(),
+        },
+    };
     let is_worktree = git_dir != common_dir;
     let main_worktree = if is_worktree {
         common_dir.as_ref().and_then(|c| Path::new(c).parent().map(|p| p.display().to_string()))
     } else {
         None
     };
-    let _ = toplevel;
 
     let mut info = RepoInfo { is_repo: true, is_worktree, main_worktree, git_dir: git_dir.clone(), common_dir, ..Default::default() };
-    match git(root, &["symbolic-ref", "--short", "-q", "HEAD"]) {
-        Ok(b) if !b.trim().is_empty() => info.branch = Some(b.trim().to_string()),
-        _ => {
+    match head.as_deref() {
+        Some("HEAD") => {
             info.detached = true;
             info.branch = git(root, &["rev-parse", "--short", "HEAD"]).ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
         }
+        Some(full) => {
+            info.branch = Some(full.strip_prefix("refs/heads/").unwrap_or(full).to_string());
+            // The branch's upstream and how far the two have diverged, from
+            // the ref alone.
+            if let Ok(out) = git(root, &["for-each-ref", "--format=%(upstream:short)%1f%(upstream:track)", full]) {
+                if let Some((upstream, t)) = out.lines().next().and_then(|l| l.split_once('\x1f')) {
+                    info.upstream = Some(upstream.to_string()).filter(|u| !u.is_empty());
+                    (info.ahead, info.behind) = track(t);
+                }
+            }
+        }
+        None => match git(root, &["symbolic-ref", "--short", "-q", "HEAD"]) {
+            Ok(b) if !b.trim().is_empty() => info.branch = Some(b.trim().to_string()),
+            _ => info.detached = true,
+        },
     }
     if let Some(dir) = git_dir.as_deref().map(Path::new) {
         info.state = if dir.join("MERGE_HEAD").exists() {
@@ -107,29 +149,25 @@ pub fn info(root: &Path) -> RepoInfo {
             None
         };
     }
-    if let Ok(status) = git(root, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=no"]) {
-        for line in status.split('\0') {
-            if let Some(rest) = line.strip_prefix("# branch.upstream ") {
-                info.upstream = Some(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-                let mut parts = rest.split_whitespace();
-                info.ahead = parts.next().and_then(|a| a.trim_start_matches('+').parse().ok()).unwrap_or(0);
-                info.behind = parts.next().and_then(|b| b.trim_start_matches('-').parse().ok()).unwrap_or(0);
-            }
-        }
-    }
     info
 }
 
-/// Recomputes the summary the session snapshot carries for a workspace.
-pub fn refresh_summary(app: &tauri::AppHandle, workspace_id: &str) {
+/// Recomputes the summary the session snapshot carries for a workspace, and
+/// says whether it differs from the one held: most changes in a git directory
+/// — the index, `FETCH_HEAD` with nothing new — leave it as it was, and
+/// nothing then needs publishing.
+pub fn refresh_summary(app: &tauri::AppHandle, workspace_id: &str) -> bool {
     use tauri::Manager;
     let state = app.state::<AppState>();
     let root = {
         let session = state.session.lock();
         match session.workspace(workspace_id) {
             Some(ws) if ws.path.is_dir() => ws.path.clone(),
-            _ => return,
+            // A directory gone — a worktree removed or moved — holds no
+            // repository, as at launch. Losing the summary is the change that
+            // has the workspace pruned or marked unavailable.
+            Some(_) => return state.git.lock().remove(workspace_id).is_some(),
+            None => return false,
         }
     };
     let i = info(&root);
@@ -163,7 +201,18 @@ pub fn refresh_summary(app: &tauri::AppHandle, workspace_id: &str) {
         git_dir: i.git_dir.map(PathBuf::from),
         common_dir: i.common_dir.map(PathBuf::from),
     };
-    state.git.lock().insert(workspace_id.to_string(), summary);
+    // A workspace removed while git ran keeps no summary: the watcher reads
+    // every one held to attribute a change.
+    let session = state.session.lock();
+    if session.workspace(workspace_id).is_none() {
+        return false;
+    }
+    let mut git = state.git.lock();
+    if git.get(workspace_id) == Some(&summary) {
+        return false;
+    }
+    git.insert(workspace_id.to_string(), summary);
+    true
 }
 
 #[tauri::command(async)]
@@ -631,21 +680,13 @@ pub fn git_branches(state: tauri::State<AppState>, workspace_id: String) -> Resu
             if f.len() < 5 {
                 return None;
             }
-            let track = f[2];
-            let num = |key: &str| -> u32 {
-                track
-                    .split(['[', ']', ','])
-                    .map(str::trim)
-                    .find_map(|p| p.strip_prefix(key))
-                    .and_then(|n| n.trim().parse().ok())
-                    .unwrap_or(0)
-            };
+            let (ahead, behind) = track(f[2]);
             Some(Branch {
                 name: f[0].to_string(),
                 current: f[3] == "*",
                 upstream: if f[1].is_empty() { None } else { Some(f[1].to_string()) },
-                ahead: num("ahead "),
-                behind: num("behind "),
+                ahead,
+                behind,
                 worktree: if f[4].is_empty() { None } else { Some(f[4].to_string()) },
             })
         })
@@ -954,10 +995,12 @@ pub fn git_remote(app: tauri::AppHandle, state: tauri::State<AppState>, workspac
     let result = run(&root, &args, true).map_err(err);
     // A fetch or a push moves only `refs/remotes/…`, which the watcher does
     // not see, so the ahead and behind counts and the history are told here.
-    refresh_summary(&app, &workspace_id);
+    let changed = refresh_summary(&app, &workspace_id);
     use tauri::Emitter;
     let _ = app.emit(crate::watch::EVENT_GIT_CHANGED, &workspace_id);
-    crate::session::publish(&app);
+    if changed {
+        crate::session::publish(&app);
+    }
     result
 }
 

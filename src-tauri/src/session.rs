@@ -30,7 +30,7 @@ pub fn persist(app: &AppHandle) -> Session {
         .into_iter()
         .filter_map(|(id, pid)| std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|cwd| (id, cwd)))
         .collect();
-    let snapshot = {
+    let (snapshot, moved) = {
         let mut session = state.session.lock();
         let mut attention = state.attention.lock();
         let git = state.git.lock();
@@ -56,19 +56,38 @@ pub fn persist(app: &AppHandle) -> Session {
                 ws.attention |= tab.attention;
             }
         }
-        *state.foreground.lock() = foreground;
-        session.clone()
+        let mut current = state.foreground.lock();
+        let moved = *current != foreground;
+        *current = foreground;
+        drop(current);
+        (session.clone(), moved)
     };
+    if moved {
+        pty::show(&state);
+    }
     if let Err(e) = store::save(&state.data_dir, &snapshot) {
         notice(app, format!("Could not save the session: {e:#}"));
     }
     snapshot
 }
 
-/// The only writer of every surface that shows session state.
+/// The only writer of every surface that shows session state. A snapshot the
+/// windows already hold is not sent again: each one re-renders both windows
+/// whole. A window that loads later reads `get_session`.
 pub fn publish(app: &AppHandle) {
-    let snapshot = persist(app);
-    let _ = app.emit(EVENT_CHANGED, &snapshot);
+    let state = app.state::<AppState>();
+    {
+        let mut published = state.published.lock();
+        let snapshot = persist(app);
+        if let Ok(text) = serde_json::to_string(&snapshot) {
+            if *published != text {
+                let _ = app.emit_str(EVENT_CHANGED, text.clone());
+                *published = text;
+            }
+        }
+    }
+    // Outside the lock: the tray waits on the main thread, which may itself
+    // be waiting to publish.
     crate::tray::refresh(app);
 }
 
@@ -220,6 +239,10 @@ pub fn reorder<T>(items: &mut Vec<T>, ids: &[String], id_of: impl Fn(&T) -> &str
 
 pub fn activate(app: &AppHandle, id: &str) -> Result<()> {
     let state = app.state::<AppState>();
+    // The shells start before the workspace is made active: any publish from
+    // then on may carry it, and the Terminal window attaches to the terminals
+    // of the active workspace as soon as it hears.
+    let spawned = pty::ensure_live(app, id);
     {
         let mut session = state.session.lock();
         if session.workspace(id).is_none() {
@@ -229,7 +252,6 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<()> {
         session.recent.retain(|r| r != id);
         session.recent.insert(0, id.to_string());
     }
-    let spawned = pty::ensure_live(app, id);
     crate::git::refresh_summary(app, id);
     watch::sync(app);
     // Every way a workspace comes to the screen — the selector, the tray, a
@@ -302,7 +324,9 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
     result.map(|_| id)
 }
 
-#[tauri::command]
+/// Off the main thread: `activate` runs git and may start shells, and the
+/// main thread is the one delivering key presses.
+#[tauri::command(async)]
 pub fn switch_workspace(app: AppHandle, id: String) -> Result<(), String> {
     let result = activate(&app, &id).map_err(|e| format!("{e:#}"));
     publish(&app);
@@ -541,19 +565,19 @@ pub fn close_file(app: AppHandle, state: tauri::State<AppState>, workspace_id: S
     publish(&app);
 }
 
+/// A click on the tab already active changes nothing and publishes nothing.
 #[tauri::command]
 pub fn set_active_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String) {
     {
         let mut session = state.session.lock();
-        if let Some(area) = session.workspace_mut(&workspace_id).and_then(|ws| ws.area_of_editor_mut(&id)) {
-            let group_id = area.group_of_editor_mut(&id).map(|g| {
-                g.active_editor = Some(id.clone());
-                g.id.clone()
-            });
-            if let Some(g) = group_id {
-                area.active_group = Some(g);
-            }
+        let Some(area) = session.workspace_mut(&workspace_id).and_then(|ws| ws.area_of_editor_mut(&id)) else { return };
+        let Some(group) = area.group_of_editor_mut(&id) else { return };
+        let group_id = group.id.clone();
+        let was = group.active_editor.replace(id.clone());
+        if was.as_deref() == Some(id.as_str()) && area.active_group.as_deref() == Some(group_id.as_str()) {
+            return;
         }
+        area.active_group = Some(group_id);
     }
     publish(&app);
 }
@@ -562,9 +586,11 @@ pub fn set_active_editor(app: AppHandle, state: tauri::State<AppState>, workspac
 pub fn set_active_group(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, group_id: String) {
     {
         let mut session = state.session.lock();
-        if let Some(area) = session.workspace_mut(&workspace_id).and_then(|ws| ws.area_of_group_mut(&group_id)) {
-            area.active_group = Some(group_id);
+        let Some(area) = session.workspace_mut(&workspace_id).and_then(|ws| ws.area_of_group_mut(&group_id)) else { return };
+        if area.active_group.as_deref() == Some(group_id.as_str()) {
+            return;
         }
+        area.active_group = Some(group_id);
     }
     publish(&app);
 }

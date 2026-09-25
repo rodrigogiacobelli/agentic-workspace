@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { EditorState, Text } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, drawSelection, lineNumbers } from "@codemirror/view";
 import { StreamLanguage, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
@@ -6,7 +6,7 @@ import { diff as diffMode } from "@codemirror/legacy-modes/mode/diff";
 import { Chunk, MergeView } from "@codemirror/merge";
 import { tags as t } from "@lezer/highlight";
 import { api } from "../api";
-import { useChanged } from "../live";
+import { keep, peek, useChanged, useKept } from "../live";
 import { languageExtension, languageFor } from "../editor/languages";
 import { report } from "../notice";
 import * as repo from "../repo";
@@ -123,32 +123,42 @@ function hunkPatches(text: string): { line: number; patch: string }[] {
   return out;
 }
 
+/** Re-reads a diff when what it compares can have changed. */
+function Follow({ workspaceId, files, onChange }: { workspaceId: string; files: boolean; onChange: () => void }) {
+  useChanged(workspaceId, onChange, files);
+  return null;
+}
+
 /** One diff of one path, as a tab. It follows the repository: a commit that
- * empties it says so and offers to close (FIX-09). */
+ * empties it says so and offers to close (FIX-09). What it last read, its
+ * mode and its scroll are kept under the tab, so a diff rebuilt when its
+ * workspace or its mode comes back paints as it was left and re-reads after. */
 export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
   const host = useRef<HTMLDivElement>(null);
-  const [mode, setMode] = useState<"inline" | "side">(lastMode);
-  const [loaded, setLoaded] = useState<{ text: string; old: string; now: string } | null>(null);
+  const [loaded, setLoaded] = useKept<{ text: string; old: string; now: string } | null>(`${ws.id}:tab:${tab.id}:diff`, null);
+  /** How the reader left it: the mode, and how far down. Scrolling writes the
+   * offset without a render, and the view reads it back only when it is
+   * built. The two modes measure differently, so a new mode starts at the top. */
+  const [mode, setMode] = useKept(`${ws.id}:tab:${tab.id}:diff-mode`, lastMode);
+  const topKey = `${ws.id}:tab:${tab.id}:diff-top`;
+  const pick = (m: "inline" | "side") => {
+    lastMode = m;
+    if (m === mode) return;
+    keep(topKey, 0);
+    setMode(m);
+  };
   const [marks, setMarks] = useState<Mark[]>([]);
   const [tick, setTick] = useState(0);
-  /** What is on screen now, so a re-read that found nothing new is dropped
-   * rather than rebuilding the view under the reader. */
-  const shown = useRef<{ text: string; old: string; now: string } | null>(null);
-  /** Where the reader was, kept across a rebuild they did not ask for. The
-   * two modes measure differently, so an offset only restores into its own. */
-  const at = useRef<{ mode: "inline" | "side"; top: number }>({ mode: lastMode, top: 0 });
   const target = tab.diff!;
   const path = tab.path;
 
-  // A diff out of sight — another mode, another workspace — reads again once
-  // it is back, rather than on every write an agent makes meanwhile.
   const timer = useRef<number | null>(null);
   // A read already waiting takes later changes too; pushing it back would
   // starve it while an agent keeps writing.
-  useChanged(ws.id, () => {
+  const reread = () => {
     if (timer.current) return;
     timer.current = window.setTimeout(() => { timer.current = null; setTick((n) => n + 1); }, 300);
-  }, true);
+  };
   useEffect(() => () => { if (timer.current) window.clearTimeout(timer.current); }, []);
 
   useEffect(() => {
@@ -175,10 +185,7 @@ export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
       // A workspace where agents write is never quiet, and every write asks
       // this diff to re-read itself. Rebuilding the view for a file that did
       // not change would throw the reader back to the top of the diff.
-      const before = shown.current;
-      if (before && before.text === text && before.old === old && before.now === now) return;
-      shown.current = { text, old, now };
-      setLoaded({ text, old, now });
+      setLoaded((before) => (before && before.text === text && before.old === old && before.now === now ? before : { text, old, now }));
     };
     load().catch(report);
     return () => { cancelled = true; };
@@ -186,22 +193,40 @@ export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
 
   const empty = loaded !== null && loaded.text.trim() === "" && target.kind !== "commit";
 
-  useEffect(() => {
+  // Built in the layout phase, so a diff rebuilt from what it kept paints
+  // with its content rather than a frame of nothing.
+  useLayoutEffect(() => {
     const el = host.current;
     if (!el || !loaded || empty) return;
     el.replaceChildren();
     setMarks([]);
     // Side by side the merge view is the scroller; inline it is the editor's.
     const scroller = () => el.querySelector<HTMLElement>(".cm-mergeView, .cm-scroller");
+    // Hidden behind a panel shown over the group, a scroller reads 0 and
+    // takes no offset: it records nothing, and the offset waits for it to
+    // have a height.
     const remember = () => {
       const s = scroller();
-      if (s) at.current = { mode, top: s.scrollTop };
+      if (s && s.clientHeight > 0) keep(topKey, s.scrollTop);
     };
-    const restore = () =>
-      requestAnimationFrame(() => {
-        const s = scroller();
-        if (s && at.current.mode === mode && at.current.top) s.scrollTop = at.current.top;
+    // Read before the new view exists: its first measure may scroll it, and
+    // the listener would take that for the reader.
+    const top = peek<number>(topKey) ?? 0;
+    let waiting: ResizeObserver | null = null;
+    const restore = (v: EditorView) => {
+      const s = scroller();
+      if (!s || !top) return;
+      // Once the view has measured itself: an offset put back over the line
+      // heights it guessed before it had a height lands on another line.
+      const put = () => v.requestMeasure({ read: () => null, write: () => { s.scrollTop = top; } });
+      if (s.clientHeight > 0) { put(); return; }
+      waiting = new ResizeObserver(() => {
+        if (s.clientHeight === 0) return;
+        waiting?.disconnect();
+        put();
       });
+      waiting.observe(s);
+    };
     el.addEventListener("scroll", remember, true);
     // The ruler follows the content height, which is an estimate until the
     // lines below the fold have been measured.
@@ -225,8 +250,8 @@ export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
         gutter: true,
       });
       paint(mv.b, spans);
-      restore();
-      return () => { el.removeEventListener("scroll", remember, true); mv.destroy(); };
+      restore(mv.b);
+      return () => { waiting?.disconnect(); el.removeEventListener("scroll", remember, true); mv.destroy(); };
     }
     const doc = loaded.text || "(no differences)";
     const spans = inlineSpans(Text.of(doc.split("\n")));
@@ -258,19 +283,21 @@ export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
       }),
     });
     paint(view, spans);
-    restore();
-    return () => { el.removeEventListener("scroll", remember, true); view.destroy(); };
-  }, [loaded, empty, mode, path, target.kind, ws.id]);
+    restore(view);
+    return () => { waiting?.disconnect(); el.removeEventListener("scroll", remember, true); view.destroy(); };
+  }, [loaded, empty, mode, path, target.kind, ws.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const title =
     target.kind === "commit" ? `${target.hash?.slice(0, 7) ?? "commit"} — ${path}` : `${path} ${target.kind === "staged" ? "(staged)" : target.untracked ? "(untracked)" : "(changes)"}`;
 
   return (
     <div className="diff-view">
+      {/* A commit named by its hash never changes; a staged diff changes with the index, a worktree diff with the files too. */}
+      {!(target.kind === "commit" && target.hash) && <Follow workspaceId={ws.id} files={target.kind === "worktree"} onChange={reread} />}
       <div className="diff-header">
         <span className="diff-title" title={title}>{title}</span>
-        <button className={mode === "inline" ? "active" : ""} onClick={() => { lastMode = "inline"; setMode("inline"); }}>Inline</button>
-        <button className={mode === "side" ? "active" : ""} onClick={() => { lastMode = "side"; setMode("side"); }}>Side by side</button>
+        <button className={mode === "inline" ? "active" : ""} onClick={() => pick("inline")}>Inline</button>
+        <button className={mode === "side" ? "active" : ""} onClick={() => pick("side")}>Side by side</button>
         <button onClick={onOpenInEditor} title="Open the file in the Editor">Open in Editor ↗</button>
         <button onClick={onClose} title="Close">×</button>
       </div>

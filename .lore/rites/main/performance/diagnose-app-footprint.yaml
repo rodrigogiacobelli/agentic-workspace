@@ -1,0 +1,125 @@
+id: diagnose-app-footprint
+title: Diagnose an application that uses too much memory or CPU
+summary: Measure where the application's memory and CPU go — per process, per workspace visited, per event and idle — and name the mechanism that grew, against the shape 018-mount-what-is-on-screen fixes.
+trigger: >-
+  The owner reports the application as heavy: high memory in a system monitor,
+  a fan or a busy core while agents work, a slow start, or a switch between
+  workspaces that drags. Also reach for this before and after a change that
+  touches what the Workspace window mounts, what the watcher reports, or what
+  either window imports.
+
+nodes:
+  - id: start-headless
+    use: run-the-app-headless
+    then: sample-per-process
+
+  - id: sample-per-process
+    do: >-
+      Read `/proc/<pid>/smaps_rollup` (Pss, Pss_Anon) and utime+stime from
+      `/proc/<pid>/stat` for the application and every descendant, ten seconds
+      after launch. Then show every workspace in both modes through
+      `switch_workspace` and `set_mode`, sample again, and repeat the tour twice
+      more. Compare against a blank page: MiniBrowser on `about:blank` under the
+      same nested KWin holds about 52 MB PSS in its web process and 24 MB in its
+      network process. Record which process grew and whether the growth
+      stopped after the first tour.
+    then:
+      - if: the Workspace window's web process grows with every workspace shown and keeps growing across tours
+        goto: views-kept-mounted
+      - if: the Terminal window's web process sits far above a blank page with few DOM nodes
+        goto: check-the-split
+      - if: memory settles after one tour and CPU is the complaint
+        goto: count-git-under-churn
+
+  - id: check-the-split
+    do: >-
+      Build with `pnpm vite build` and list `dist/assets`. Read which modules
+      each chunk holds, from a sourcemap build or by grepping a marker:
+      `cm-editor` must appear only in the editor chunk and `xterm-screen` only
+      in the terminal chunk. In the running Terminal window,
+      `performance.getEntriesByType('resource')` must list no CodeMirror
+      module, and in the Workspace window no xterm module.
+    then:
+      - if: a role's chunk list includes the other role's modules
+        goto: split-merged
+      - if: each window loads only its half
+        goto: count-git-under-churn
+
+  - id: count-git-under-churn
+    do: >-
+      With every workspace shown once, run for sixty seconds: rewrite a file
+      in a git-ignored directory of one workspace every second, and run
+      `git status` in two repositories every two seconds. Count the lines the
+      git wrapper logs and the application's CPU over the minute, first with
+      the churned workspace out of sight, then with it on screen. Group the log
+      by subcommand and by `-C` directory.
+    then:
+      - if: git runs for workspaces that are not on screen, or the churn out of sight costs more than a trace of CPU
+        goto: background-not-quiet
+      - if: a prompt's `git status` alone starts summary refreshes or a publish
+        goto: lock-churn-leaks
+      - if: out of sight costs nothing and on screen costs about one listing and one status read per change
+        goto: time-the-switch
+
+  - id: time-the-switch
+    do: >-
+      Time each `switch_workspace` and `set_mode` in the Workspace window: from
+      the invoke to two animation frames (painted), and to the last DOM
+      mutation before 150 ms of quiet (settled). Check that the first frame
+      after a switch already shows the kept content — tree rows, diff lines, the
+      commit message — at its kept scroll.
+    then:
+      - if: settled times sit above a few hundred milliseconds, or the first frame is empty
+        goto: slow-switch
+      - if: switches settle fast and paint their kept content at once
+        goto: within-the-floor
+
+conclusions:
+  views-kept-mounted:
+    audience: whoever is changing the Workspace window
+    response: >-
+      Something keeps views mounted out of sight again: a list of shown
+      workspaces or modes in `WorkspaceWindow`, a view hidden with CSS instead
+      of unmounted, or a document or diff instance held past its tab.
+      `018-mount-what-is-on-screen` requires that only the workspace and mode on
+      screen are mounted; move the state that made keeping it tempting into
+      `useKept`.
+  split-merged:
+    audience: whoever last touched shared frontend code
+    response: >-
+      A static import from shared code — `App`, `Switcher`, `StatusBar`,
+      `SettingsDialog`, `Palette`, `Menu`, `api`, `settings`, `modes` — reaches
+      `editors`, `editor/*`, `repo` or `terminals`, and the build merged both
+      halves into both windows without a warning. Make that import dynamic.
+  background-not-quiet:
+    audience: whoever is changing the watcher or a panel
+    response: >-
+      A workspace out of sight is doing work. Check that `watch::sync` watches
+      the tree and tab directories of the active workspace only, that a panel
+      reads on change through `useChanged` or a Live-gated subscription, and
+      that `src/repo.ts` refreshes only the workspace on screen.
+  lock-churn-leaks:
+    audience: whoever is changing the watcher
+    response: >-
+      The watcher lets `*.lock` paths inside a git directory through, or a
+      summary refresh publishes without a change. The notify callback in
+      `Watcher::new` must drop lock paths through `is_git_lock`, and
+      `watch::emit` must publish only when `git::refresh_summary` reports a
+      change; the prompt of every shell runs `git status` after every command.
+  slow-switch:
+    audience: whoever is changing the switch path
+    response: >-
+      Look at what the switch runs: `switch_workspace` must stay an async
+      command, the summary must not walk the working tree, and each panel must
+      paint its kept data before its re-read lands. Name the panel or the git
+      command that dominates, and fix that one.
+  within-the-floor:
+    audience: the owner
+    response: >-
+      The application is at the floor this design allows: two WebKit web
+      processes and a network process, each with its fixed cost, one
+      workspace's mounted views, the open documents and kept state of the
+      workspaces visited, and per-event work only for the workspace on screen
+      and for changes in git directories. Report the numbers per
+      process, and say that a smaller figure needs a structural change, such as
+      releasing the Workspace window's web process while it sits in the tray.

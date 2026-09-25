@@ -1,10 +1,13 @@
 // The repository state of each workspace — git's summary, the status list and
 // the stashes — kept outside React, like the editor and terminal registries,
 // so the Commit panel, the Explorer's decorations and the status bar read one
-// copy of it. The watcher's events refresh the workspace on screen; one in the
-// background is only marked stale, and is read again when it is shown.
+// copy of it, and a panel rebuilt when its workspace comes back paints from it
+// at once. The watcher's events refresh the workspace on screen; one in the
+// background is only marked stale, and is read again when it is shown. A
+// refresh tells only that workspace's readers, and only when a read changed
+// something.
 
-import { useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { api, events } from "./api";
 import type { RepoInfo, Stash, StatusEntry } from "./types";
 
@@ -20,10 +23,16 @@ const NOT_A_REPO: RepoInfo = { isRepo: false, branch: null, detached: false, sta
 
 const repos = new Map<string, Repo>();
 const stale = new Set<string>();
-const timers = new Map<string, number>();
-/** The latest read asked for per workspace, so an older one landing late is dropped. */
-const reads = new Map<string, number>();
-const listeners = new Set<() => void>();
+/** A re-read waiting out its delay, and whether it reads everything or only the status. */
+const waiting = new Map<string, boolean>();
+/**
+ * The latest read asked for per workspace — `all` of everything, `status` of
+ * the status list, which every read takes — so an older one landing late is
+ * dropped for whatever a newer one reads.
+ */
+const reads = new Map<string, { all: number; status: number }>();
+let asked = 0;
+const listeners = new Map<string, Set<() => void>>();
 let active: string | null = null;
 let listening = false;
 
@@ -31,27 +40,73 @@ export function get(workspaceId: string): Repo {
   return repos.get(workspaceId) ?? EMPTY;
 }
 
-export function subscribe(cb: () => void): () => void {
-  listeners.add(cb);
-  return () => listeners.delete(cb);
+function subscribe(workspaceId: string, cb: () => void): () => void {
+  const set = listeners.get(workspaceId) ?? new Set();
+  listeners.set(workspaceId, set);
+  set.add(cb);
+  return () => {
+    set.delete(cb);
+    if (set.size === 0 && listeners.get(workspaceId) === set) listeners.delete(workspaceId);
+  };
 }
 
-/** Reads the workspace's repository again, now. */
-export async function refresh(workspaceId: string): Promise<void> {
-  const read = (reads.get(workspaceId) ?? 0) + 1;
-  reads.set(workspaceId, read);
+/** The earlier copy when a read brought back the same thing, so a list keeps its identity and its readers skip the work. */
+function same<T>(prev: T, next: T): T {
+  return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+}
+
+/** Stores what a read brought back, and tells the workspace's readers only if it changed anything. */
+function store(workspaceId: string, next: Partial<Repo>): void {
+  const prev = get(workspaceId);
+  const merged: Repo = {
+    info: next.info === undefined ? prev.info : same(prev.info, next.info),
+    status: next.status === undefined ? prev.status : same(prev.status, next.status),
+    stashes: next.stashes === undefined ? prev.stashes : same(prev.stashes, next.stashes),
+  };
+  if (merged.info === prev.info && merged.status === prev.status && merged.stashes === prev.stashes) return;
+  repos.set(workspaceId, merged);
+  listeners.get(workspaceId)?.forEach((cb) => cb());
+}
+
+/**
+ * Reads the workspace's repository again, now: all of it, or the status list
+ * alone. The status alone is not enough where no repository is held — a `git
+ * init` there reaches the watcher only as a change to the root — nor where git
+ * refuses the status, as it does once `.git` has gone.
+ */
+async function read(workspaceId: string, all: boolean): Promise<void> {
+  if (get(workspaceId).info?.isRepo !== true) all = true;
+  const n = ++asked;
+  const last = reads.get(workspaceId) ?? { all: 0, status: 0 };
+  reads.set(workspaceId, { all: all ? n : last.all, status: n });
+  if (!all) {
+    const status = await api.gitStatus(workspaceId).catch(() => null);
+    if (reads.get(workspaceId)?.status !== n) return;
+    if (status) store(workspaceId, { status });
+    else await read(workspaceId, true);
+    return;
+  }
   const info = await api.gitInfo(workspaceId).catch(() => NOT_A_REPO);
   const [status, stashes] = info.isRepo
     ? await Promise.all([api.gitStatus(workspaceId).catch(() => []), api.gitStashes(workspaceId).catch(() => [])])
     : [[], []];
-  if (reads.get(workspaceId) !== read) return;
-  repos.set(workspaceId, { info, status, stashes });
+  const latest = reads.get(workspaceId);
+  if (latest?.all !== n) return;
   stale.delete(workspaceId);
-  listeners.forEach((cb) => cb());
+  store(workspaceId, latest.status === n ? { info, status, stashes } : { info, stashes });
 }
 
-/** A change reported for a workspace: the one on screen re-reads 300 ms after the first. */
-function changed(workspaceId: string): void {
+/** Reads the workspace's repository again, now. */
+export function refresh(workspaceId: string): Promise<void> {
+  return read(workspaceId, true);
+}
+
+/**
+ * A change reported for a workspace: the one on screen re-reads 300 ms after
+ * the first. A file changing moves only the status list; the summary and the
+ * stashes change through the git directory, which reports itself.
+ */
+function changed(workspaceId: string, all: boolean): void {
   if (workspaceId !== active) {
     stale.add(workspaceId);
     return;
@@ -59,11 +114,14 @@ function changed(workspaceId: string): void {
   // A read already waiting takes this change too. Pushing it back instead
   // would starve it while changes keep arriving, and an agent at work in the
   // terminal keeps them arriving.
-  if (timers.has(workspaceId)) return;
-  timers.set(workspaceId, window.setTimeout(() => {
-    timers.delete(workspaceId);
-    void refresh(workspaceId);
-  }, 300));
+  const pending = waiting.get(workspaceId);
+  waiting.set(workspaceId, all || pending === true);
+  if (pending !== undefined) return;
+  window.setTimeout(() => {
+    const everything = waiting.get(workspaceId) === true;
+    waiting.delete(workspaceId);
+    void read(workspaceId, everything);
+  }, 300);
 }
 
 /**
@@ -73,8 +131,8 @@ function changed(workspaceId: string): void {
 export function show(workspaceId: string | null): void {
   if (!listening) {
     listening = true;
-    void events.onDirChanged((c) => changed(c.workspaceId));
-    void events.onGitChanged(changed);
+    void events.onDirChanged((c) => changed(c.workspaceId, false));
+    void events.onGitChanged((id) => changed(id, true));
   }
   active = workspaceId;
   if (workspaceId && (stale.has(workspaceId) || !repos.has(workspaceId))) void refresh(workspaceId);
@@ -86,7 +144,6 @@ export function unstagedCount(status: StatusEntry[]): number {
 }
 
 export function useRepo(workspaceId: string): Repo {
-  const [, bump] = useState(0);
-  useEffect(() => subscribe(() => bump((n) => n + 1)), []);
-  return get(workspaceId);
+  const sub = useCallback((cb: () => void) => subscribe(workspaceId, cb), [workspaceId]);
+  return useSyncExternalStore(sub, () => get(workspaceId));
 }

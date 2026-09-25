@@ -149,7 +149,11 @@ Each entry below is one per build.
 Each of those writers puts a temporary file beside the target and renames it, so
 an interrupted write leaves the previous contents intact. `session::quit` saves
 the session and the window geometry on the way out, and a thread started in
-`setup` saves both every 30 seconds in case the process is killed.
+`setup` publishes the session and saves the window geometry every 30 seconds,
+which carries every shell's working directory to the windows and keeps both
+files close to the truth if the process is killed. `store::save` skips a
+session write whose text matches the last one written while `session.json` is
+still there.
 
 The app maintains three more files outside that directory, checking them at
 every launch:
@@ -280,8 +284,8 @@ cd ~/.local/share/dev.agenticworkspace.app
 mv session.json.unreadable-1758556800 session.json
 ```
 
-Restore either copy while the app is not running; the periodic save started in
-`setup` overwrites `session.json` within 30 seconds. The launch settles the
+Restore either copy while the app is not running; the running app overwrites
+`session.json` the next time its session changes. The launch settles the
 desktop entry too: `desktop::ensure_entry` compares the whole entry against the
 one the running build wants and writes when the two differ.
 

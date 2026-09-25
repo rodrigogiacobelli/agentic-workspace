@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
+import { useKept, useKeptScroll, useLive } from "../live";
 import type { Entry, StatusEntry, View, Workspace } from "../types";
 import { fileIcon, Icon } from "./icons";
 import { ContextMenu, RowMenu, SubMenu } from "./Menu";
@@ -66,93 +67,210 @@ function join(dir: string, name: string): string {
 }
 
 /**
+ * The expanded directories a tree draws: those whose every ancestor is open
+ * too, up to a top-level directory — or, in a view, up to one of its entries.
+ * A directory left expanded inside a folded one is not drawn, and not read.
+ */
+function drawn(expanded: string[], roots: string[] | null): string[] {
+  const open = new Set(expanded);
+  const isRoot = (d: string) => (roots ? roots.includes(d) : !d.includes("/"));
+  return expanded.filter((dir) => {
+    for (let d = dir; open.has(d); d = dirOf(d)) if (isRoot(d)) return true;
+    return false;
+  });
+}
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Nothing listed yet. Never changed in place: a listing lands in a new map. */
+const NOTHING = new Map<string, Entry[]>();
+
+/**
+ * Whether the desktop clipboard held files when last asked: one answer for
+ * every tree, since the clipboard is the desktop's.
+ */
+let clipboardHasFiles: boolean | null = null;
+
+/**
  * Explorer: the tree rooted at the workspace, read one directory at a time.
  * Custom: one of the workspace's views — its entries at the root whatever
  * their depth, each expanding to its real children (VIEW-03, VIEW-04).
+ *
+ * The tree is taken down when its workspace or mode leaves the screen. Its
+ * listings, filter, view entries, multi-selection and scroll are kept per
+ * workspace and kind, so the tree built again paints as it was left, then
+ * reads what it draws afresh — it heard no change while it was down.
  */
 export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitStatus = [] }: Props) {
   const gitMap = useMemo(() => statusMap(gitStatus), [gitStatus]);
-  const [listings, setListings] = useState<Map<string, Entry[]>>(new Map());
+  const kept = `${ws.id}:tree:${kind}`;
+  const [listings, setListings] = useKept(`${kept}:listings`, NOTHING);
   const [menu, setMenu] = useState<Menu | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
-  const [filter, setFilter] = useState("");
-  const [allFiles, setAllFiles] = useState<string[] | null>(null);
-  const [viewEntries, setViewEntries] = useState<Entry[] | null>(null);
+  const [filter, setFilter] = useKept(`${kept}:filter`, "");
+  const [allFiles, setAllFiles] = useKept<string[] | null>(`${kept}:files`, null);
+  const [viewEntries, setViewEntries] = useKept<Entry[] | null>(`${kept}:view`, null);
   /** Ctrl+click adds rows to a selection that Quote to AI cites together (CITE-13). */
-  const [multi, setMulti] = useState<Set<string>>(new Set());
+  const [multi, setMulti] = useKept<Set<string>>(`${kept}:multi`, new Set());
   /** Every row drawn in this render, in tree order. */
   const order = useRef<string[]>([]);
   const [dragOver, setDragOver] = useState<string | null>(null);
   /** Whether the desktop clipboard holds files, so Paste is offered or not. */
-  const [hasFiles, setHasFiles] = useState(false);
+  const [hasFiles, setHasFiles] = useState(clipboardHasFiles === true);
   /** Directories still drawn while their collapse plays out. */
   const [collapsing, setCollapsing] = useState<Set<string>>(new Set());
   const inflight = useRef(new Set<string>());
   // Custom shows the view last picked, or the first there is.
   const view = kind === "custom" ? (ws.views.find((v) => v.id === ws.activeView) ?? ws.views[0] ?? null) : null;
   const entriesKey = view?.entries.join("\n") ?? "";
+  const roots = view?.entries ?? null;
+  /** What callbacks outliving a render read: the expansion and the view's entries as of the last one. */
+  const latest = useRef({ expanded: ws.expanded, roots });
+  latest.current = { expanded: ws.expanded, roots };
 
+  // A listing that comes back as it was changes nothing and draws nothing; one
+  // for a directory folded while it was read is dropped.
   const load = useCallback((dir: string) => {
     if (inflight.current.has(dir)) return;
     inflight.current.add(dir);
     api.listDir(ws.id, dir)
-      .then((entries) => setListings((m) => new Map(m).set(dir, entries)))
-      .catch(report)
+      .then((entries) => setListings((m) => {
+        if (dir && !latest.current.expanded.includes(dir)) return m;
+        return same(m.get(dir), entries) ? m : new Map(m).set(dir, entries);
+      }))
+      // A directory deleted while it was open stays in the expanded set, and
+      // every build would report it again; it is folded instead.
+      .catch((e) => {
+        if (dir && /No such file|os error 2/i.test(String(e))) void api.setExpanded(ws.id, dir, false).catch(() => {});
+        else report(e);
+      })
       .finally(() => inflight.current.delete(dir));
-  }, [ws.id]);
+  }, [ws.id, setListings]);
 
   const loadView = useCallback(() => {
     if (!view) { setViewEntries(null); return; }
-    api.statEntries(ws.id, view.entries).then(setViewEntries).catch(report);
-  }, [ws.id, view?.id, entriesKey]); // eslint-disable-line react-hooks/exhaustive-deps
+    api.statEntries(ws.id, view.entries).then((e) => setViewEntries((prev) => (same(prev, e) ? prev : e))).catch(report);
+  }, [ws.id, view?.id, entriesKey, setViewEntries]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Built, the tree reads its root and every directory it draws open, and a
+  // filter's file list: it heard nothing while it was down, and it paints
+  // from what it kept until the answers land. A directory opened after that is
+  // read as it opens. A file list dropped meanwhile, with its filter, stays
+  // dropped.
+  const expandedKey = ws.expanded.join("\n");
+  const built = useRef(false);
+  /** What the last pass drew: a directory coming into view is read even with a
+   *  listing kept, which the other tree may have folded and let go stale. */
+  const wasDrawn = useRef(new Set<string>());
   useEffect(() => {
-    load("");
-    ws.expanded.forEach((dir) => { if (!listings.has(dir)) load(dir); });
-    // Listings are keyed by directory; a change of expansion only adds.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ws.expanded, load]);
+    const all = !built.current;
+    built.current = true;
+    if (all && kind === "explorer") load("");
+    const now = drawn(ws.expanded, roots);
+    for (const dir of now) if (all || !wasDrawn.current.has(dir)) load(dir);
+    wasDrawn.current = new Set(now);
+    if (all && filter && allFiles !== null) refetchFiles(0);
+  }, [expandedKey, entriesKey, load]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A filter's file list is read again after a change, and the kept one paints
+  // until the answer lands. An agent writing in a watched directory reports a
+  // change several times a second, and every read walks the whole tree, so the
+  // changes of a second share one read; only the latest read asked for lands.
+  const filesRead = useRef<{ timer: number | null; asked: number }>({ timer: null, asked: 0 });
+  const refetchFiles = (delay: number) => {
+    const read = filesRead.current;
+    if (read.timer !== null) return;
+    read.timer = window.setTimeout(() => {
+      read.timer = null;
+      const asked = ++read.asked;
+      api.listFiles(ws.id)
+        .then((files) => { if (read.asked === asked) setAllFiles((prev) => (prev === null || same(prev, files) ? prev : files)); })
+        .catch(report);
+    }, delay);
+  };
+  useEffect(() => () => { if (filesRead.current.timer !== null) window.clearTimeout(filesRead.current.timer); }, []);
 
   useEffect(() => { loadView(); }, [loadView]);
 
   // A directory that leaves the expanded set keeps its children on screen for
   // as long as the collapse takes; React would otherwise take them away before
-  // the first frame of it.
-  const expandedKey = ws.expanded.join("\n");
+  // the first frame of it. Then its listing goes, with those of the
+  // directories inside it, and is read afresh when it opens again. The timer
+  // runs out even when another directory folds meanwhile.
   const wasExpanded = useRef(ws.expanded);
   useEffect(() => {
     const gone = wasExpanded.current.filter((d) => !ws.expanded.includes(d));
     wasExpanded.current = ws.expanded;
     if (!gone.length) return;
     setCollapsing((all) => new Set([...all, ...gone]));
-    const timer = window.setTimeout(() => {
+    window.setTimeout(() => {
       setCollapsing((all) => {
         const next = new Set(all);
         gone.forEach((d) => next.delete(d));
         return next;
       });
+      const shown = new Set(drawn(latest.current.expanded, latest.current.roots));
+      setListings((m) => {
+        const folded = [...m.keys()].filter((k) => !shown.has(k) && gone.some((d) => k === d || k.startsWith(`${d}/`)));
+        if (!folded.length) return m;
+        const next = new Map(m);
+        folded.forEach((k) => next.delete(k));
+        return next;
+      });
     }, duration("--d-base"));
-    return () => window.clearTimeout(timer);
   }, [expandedKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The watcher's reports: the directories this tree has listed are read
+  // again, and the view's entries when one of them, or the directory holding
+  // it, changed. A directory just created reports itself rather than the one
+  // holding it, so a listed parent that does not show it yet is read too. Out
+  // of sight — behind another panel's tab — the directories are only noted,
+  // and read once when the tree is back in front.
+  const relist = (dirs: Iterable<string>) => {
+    const listed = (dir: string) => (dir === "" && kind === "explorer") || listings.has(dir);
+    let touched = false;
+    for (const dir of dirs) {
+      if (listed(dir)) load(dir);
+      const parent = dirOf(dir);
+      if (dir && listed(parent) && !listings.get(parent)?.some((e) => e.path === dir)) load(parent);
+      if (roots?.some((e) => e === dir || dirOf(e) === dir)) touched = true;
+    }
+    if (filter && allFiles !== null) refetchFiles(1000);
+    if (touched) loadView();
+  };
+  const onDirs = useRef(relist);
+  onDirs.current = relist;
+  const live = useLive();
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const stale = useRef(new Set<string>());
   useEffect(() => {
     const unlisten = events.onDirChanged((change) => {
       if (change.workspaceId !== ws.id) return;
-      change.dirs.forEach((dir) => { if (dir === "" || listings.has(dir)) load(dir); });
-      if (filter) setAllFiles(null);
-      loadView();
+      if (liveRef.current) onDirs.current(change.dirs);
+      else change.dirs.forEach((d) => stale.current.add(d));
     });
     return () => { void unlisten.then((u) => u()); };
-  }, [ws.id, listings, load, filter, loadView]);
+  }, [ws.id]);
+  useEffect(() => {
+    if (!live || stale.current.size === 0) return;
+    const dirs = [...stale.current];
+    stale.current.clear();
+    onDirs.current(dirs);
+  }, [live]);
 
-  // The filter needs every path; it is fetched once per filter session.
+  // The filter needs every path; it is fetched as a filter session starts.
   useEffect(() => {
     if (filter && allFiles === null) api.listFiles(ws.id).then(setAllFiles).catch(report);
   }, [filter, allFiles, ws.id]);
 
-  const toggle = (path: string) => {
-    void api.setExpanded(ws.id, path, !ws.expanded.includes(path));
-  };
+  /**
+   * The directories opened since the tree last drew — from a click, the
+   * breadcrumb, a paste or a new folder: their branches alone unfold, never
+   * the ones drawn open as the tree is built.
+   */
+  const opened = built.current ? ws.expanded.filter((d) => !wasExpanded.current.includes(d)) : [];
+  const toggle = (path: string) => void api.setExpanded(ws.id, path, !ws.expanded.includes(path));
 
   /** Whether a path shown in the panel is a directory. */
   const isDir = (path: string): boolean =>
@@ -166,14 +284,15 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
 
   /**
    * Asking the clipboard costs a round trip to whichever application owns it,
-   * so this is asked when the panel appears and again as a menu opens, rather
-   * than on every render. A stale answer costs at worst a Paste entry that
-   * finds nothing — the paste itself asks again.
+   * so this is asked when the first tree appears and again as a menu opens,
+   * rather than on every render or every rebuild. A stale answer costs at
+   * worst a Paste entry that finds nothing — the paste itself asks again.
    */
-  const askClipboard = useCallback(() => {
-    api.clipboardFiles().then((c) => setHasFiles(c.paths.length > 0)).catch(() => setHasFiles(false));
-  }, []);
-  useEffect(askClipboard, [askClipboard]);
+  const holdsFiles = (has: boolean) => { clipboardHasFiles = has; setHasFiles(has); };
+  const askClipboard = () => {
+    api.clipboardFiles().then((c) => holdsFiles(c.paths.length > 0)).catch(() => holdsFiles(false));
+  };
+  useEffect(() => { if (clipboardHasFiles === null) askClipboard(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const openMenu = (m: Menu) => {
     setMenu(m);
     askClipboard();
@@ -204,7 +323,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
    */
   const copy = (cut: boolean) => {
     const paths = targets();
-    if (paths.length) void api.setClipboardFiles(paths.map((p) => `${ws.path}/${p}`), cut).then(() => setHasFiles(true)).catch(report);
+    if (paths.length) void api.setClipboardFiles(paths.map((p) => `${ws.path}/${p}`), cut).then(() => holdsFiles(true)).catch(report);
   };
 
   const paste = async () => {
@@ -221,7 +340,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
       }
     }
     // The files are no longer where the cut says they are.
-    if (cut) { await api.clearClipboardFiles().catch(() => {}); setHasFiles(false); }
+    if (cut) { await api.clearClipboardFiles().catch(() => {}); holdsFiles(false); }
     if (dir && !ws.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true).catch(() => {});
     // The folder was not watched while collapsed; its listing is read again.
     load(dir);
@@ -323,7 +442,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   /** A directory's children, revealed and hidden by their own height (§11.3). */
   const branch = (path: string, open: boolean, children: React.ReactNode): React.ReactNode =>
     open || collapsing.has(path) ? (
-      <div className={`tree-branch${open ? " open" : ""}`}><div>{children}</div></div>
+      <div className={`tree-branch${open ? " open" : ""}${opened.includes(path) ? " unfold" : ""}`}><div>{children}</div></div>
     ) : null;
 
   const render = (dir: string, depth: number): React.ReactNode => {
@@ -418,6 +537,13 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   };
   order.current = [];
 
+  const scroller = useKeptScroll<HTMLElement>(`${kept}:scroll`, view ? viewEntries !== null : listings.has(""));
+  const refilter = (value: string) => {
+    setFilter(value);
+    // The file list is read once per filter session; the next one reads it afresh.
+    if (!value) setAllFiles(null);
+  };
+
   const creation = creationDir();
   const create = (kind: "new-file" | "new-folder") => { if (creation !== null) setDialog({ kind, dir: creation }); };
 
@@ -456,10 +582,11 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
             className="tree-filter"
             placeholder="Filter files"
             value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Escape") setFilter(""); }}
+            onChange={(e) => refilter(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape") refilter(""); }}
           />
           <nav
+            ref={scroller}
             className="tree"
             tabIndex={0}
             onKeyDown={onKey}

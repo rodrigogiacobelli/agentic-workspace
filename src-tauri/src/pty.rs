@@ -11,7 +11,7 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::{AppHandle, Manager};
 
@@ -35,6 +35,19 @@ const CHUNK: usize = 64 * 1024;
 /// VSCode's `TerminalDataBufferer`, whose `throttleBy` is the same 5 ms
 /// (`src/vs/platform/terminal/common/terminalDataBuffering.ts`).
 const FLUSH_WINDOW: Duration = Duration::from_millis(5);
+
+/// The window for a terminal that is not on screen. Its view, if it has one,
+/// is a hidden tab or a background workspace's, and nobody reads its output as
+/// it arrives: a busy agent's hundreds of messages a second become four, each
+/// one a webview script evaluation the GTK main thread runs. The terminal that
+/// comes on screen is woken and flushes at once.
+const BACKGROUND_WINDOW: Duration = Duration::from_millis(250);
+
+/// A window ends early once this much is waiting. Nothing is owed an
+/// acknowledgement until it is sent, so without this the watermark could not
+/// hold back a flood inside a long window, and the backlog would grow here
+/// rather than in the kernel.
+const FLUSH_EARLY: usize = 64 * 1024;
 
 /// Flow control, from VSCode's `FlowControlConstants`
 /// (`src/vs/platform/terminal/common/terminal.ts`). The view acknowledges what
@@ -78,7 +91,9 @@ pub struct Live {
 struct Stream {
     out: Mutex<Output>,
     /// Raised when the first byte of a window arrives: it starts the flusher's
-    /// clock. Nothing re-arms it until that window has been flushed.
+    /// clock. Nothing re-arms it until that window has been flushed. Also
+    /// raised to end a window early: past `FLUSH_EARLY`, on coming on screen,
+    /// and on hangup.
     armed: Condvar,
     /// Raised when the view has caught up enough for the reader to go on.
     drained: Condvar,
@@ -95,6 +110,9 @@ struct Output {
     unacked: usize,
     /// The pseudoterminal has hung up; both threads are to stop.
     closed: bool,
+    /// The Terminal window shows this one: its output leaves on the short
+    /// window. Follows `AppState::foreground`.
+    on_screen: bool,
 }
 
 impl Live {
@@ -157,7 +175,7 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
     let mut reader = pair.master.try_clone_reader().context("opening the output reader")?;
     let writer = pair.master.take_writer().context("opening the input writer")?;
     let stream = Arc::new(Stream {
-        out: Mutex::new(Output { buffer: Vec::new(), sink: None, pending: Vec::new(), unacked: 0, closed: false }),
+        out: Mutex::new(Output { buffer: Vec::new(), sink: None, pending: Vec::new(), unacked: 0, closed: false, on_screen: false }),
         armed: Condvar::new(),
         drained: Condvar::new(),
     });
@@ -178,10 +196,11 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
                 let mut out = pump.out.lock();
                 out.buffer.extend_from_slice(chunk);
                 trim(&mut out.buffer);
-                // The first byte of a window starts the flusher's clock.
-                let first = out.pending.is_empty();
+                // The first byte of a window starts the flusher's clock; the
+                // one that fills it ends the window.
+                let before = out.pending.len();
                 out.pending.extend_from_slice(chunk);
-                if first {
+                if before == 0 || (before < FLUSH_EARLY && out.pending.len() >= FLUSH_EARLY) {
                     pump.armed.notify_one();
                 }
                 // Past the high mark, stop reading until the view catches up.
@@ -214,12 +233,18 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
                 if out.closed && out.pending.is_empty() {
                     return;
                 }
-            }
-            // The window. Everything the program writes inside it leaves as
-            // one message; the lock is not held while it runs.
-            std::thread::sleep(FLUSH_WINDOW);
-            {
-                let mut out = drain.out.lock();
+                // The window. Everything the program writes inside it leaves
+                // as one message; the lock is released while it waits. Its
+                // length is read again on every wake, so a terminal coming on
+                // screen cuts a background window short.
+                let start = Instant::now();
+                loop {
+                    let deadline = start + if out.on_screen { FLUSH_WINDOW } else { BACKGROUND_WINDOW };
+                    if out.closed || out.pending.len() >= FLUSH_EARLY || Instant::now() >= deadline {
+                        break;
+                    }
+                    drain.armed.wait_until(&mut out, deadline);
+                }
                 let payload = std::mem::take(&mut out.pending);
                 // Only what a view actually received is owed an
                 // acknowledgement; with no view attached there is no backlog.
@@ -255,10 +280,12 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
     Ok(Live { master: pair.master, writer, killer, pid, stream })
 }
 
-/// Drops the oldest bytes past the cap, cutting at a line start so a replay
-/// begins on a sane byte.
+/// Drops the oldest bytes once the tail is an eighth past the cap, cutting
+/// back to the cap at a line start so a replay begins on a sane byte. The
+/// slack is what makes this cheap: the cut moves the whole buffer, and without
+/// it a terminal at the cap would move two megabytes on every read.
 fn trim(buffer: &mut Vec<u8>) {
-    if buffer.len() <= BUFFER_MAX {
+    if buffer.len() <= BUFFER_MAX + BUFFER_MAX / 8 {
         return;
     }
     let excess = buffer.len() - BUFFER_MAX;
@@ -290,6 +317,12 @@ fn on_exit(app: &AppHandle, id: &str) {
 /// Starts a shell for every tab of the workspace that has none. A workspace is
 /// spawned when first shown, so launch does not scale with the workspace count.
 pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Result<()> {
+    // One caller at a time: a switch runs off the main thread, and two callers
+    // would each find a tab without a shell and each start one. The second
+    // would replace the first, whose shell, hung up, would then take the tab
+    // with it as it exited.
+    static SPAWNING: Mutex<()> = Mutex::new(());
+    let _one = SPAWNING.lock();
     let state = app.state::<AppState>();
     let (root, tabs): (PathBuf, Vec<TerminalTab>) = {
         let session = state.session.lock();
@@ -306,10 +339,45 @@ pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Result<()> {
             continue;
         }
         let cwd = if tab.cwd.is_dir() { tab.cwd.clone() } else { root.clone() };
-        let live = spawn(app.clone(), tab.id.clone(), &cwd, 80, 24)?;
-        state.ptys.lock().insert(tab.id, live);
+        let mut live = spawn(app.clone(), tab.id.clone(), &cwd, 80, 24)?;
+        // A tab closed, or its workspace removed, while the shell started has
+        // nothing left to hang that shell up. Both take `ptys` under the
+        // session, so under the two of them here the tab either is still
+        // there or has already been taken out.
+        let session = state.session.lock();
+        let mut ptys = state.ptys.lock();
+        if session.workspace_of_terminal_mut_ref(&tab.id).is_none() {
+            live.hangup();
+            continue;
+        }
+        // Read under `ptys`, which `show` needs too, so a persist that moves
+        // the screen to this tab meanwhile either finds it here or has
+        // already moved `foreground`.
+        let on_screen = state.foreground.lock().as_deref() == Some(tab.id.as_str());
+        live.stream.out.lock().on_screen = on_screen;
+        ptys.insert(tab.id, live);
     }
     Ok(())
+}
+
+/// Gives the short flush window to the terminal `foreground` names and the
+/// long one to every other, and wakes the one on screen so what it gathered
+/// on the long window reaches the view at once. `foreground` is read here,
+/// under `ptys`, so persists racing leave the flags matching whichever of them
+/// wrote it last.
+pub fn show(state: &AppState) {
+    let ptys = state.ptys.lock();
+    let foreground = state.foreground.lock().clone();
+    for (id, live) in ptys.iter() {
+        let on_screen = foreground.as_deref() == Some(id.as_str());
+        let mut out = live.stream.out.lock();
+        if out.on_screen != on_screen {
+            out.on_screen = on_screen;
+            if on_screen {
+                live.stream.armed.notify_one();
+            }
+        }
+    }
 }
 
 /// Hangs up every session. Run on every exit path so no shell outlives the app.

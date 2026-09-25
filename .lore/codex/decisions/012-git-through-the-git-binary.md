@@ -44,7 +44,13 @@ formats for logs. Hunks are staged by piping a one-hunk patch to
 Every invocation sets `GIT_OPTIONAL_LOCKS=0`. A `git status` otherwise takes
 and drops `index.lock` inside the git directory the watcher watches, the
 watcher reports the change, and the refresh it starts runs `git status` again,
-five times a second for every repository. A stash is named by its commit, not
+five times a second for every repository. A shell prompt or an agent runs
+`git status` without that setting, so the watcher also drops every `*.lock`
+path inside a git directory: a real change to the index, `HEAD` or a ref ends
+in a rename to its final name, which it still reports. The workspace summary
+behind the selector and the status bar reads `rev-parse` and `for-each-ref`
+with `%(upstream:track)`, never `status`, so refreshing it walks no working
+tree. A stash is named by its commit, not
 its `stash@{N}` position: `git_stash_apply` and `git_stash_drop` look the
 position up again in `stash list`, and refuse a stash that is gone, since a
 stash pushed or dropped from a terminal renumbers the ones below it.

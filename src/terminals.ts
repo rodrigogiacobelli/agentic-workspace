@@ -5,7 +5,8 @@
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import { WebglAddon } from "@xterm/addon-webgl";
+import type { WebglAddon } from "@xterm/addon-webgl";
+import "@xterm/xterm/css/xterm.css";
 import { Channel } from "@tauri-apps/api/core";
 import { api, toBytes, type OutputChunk } from "./api";
 import { actionFor, TERMINAL_ACTIONS } from "./hotkeys";
@@ -22,7 +23,7 @@ export interface Instance {
 }
 
 const registry = new Map<string, Instance>();
-const titleListeners = new Set<() => void>();
+const titleListeners = new Set<(id: string) => void>();
 
 export interface LinkTarget {
   path: string;
@@ -77,7 +78,8 @@ function linkProvider(id: string): import("@xterm/xterm").ILinkProvider {
   };
 }
 
-export function onTitles(cb: () => void): () => void {
+/** Called with the terminal whose title changed, so a view can ignore terminals it does not show. */
+export function onTitles(cb: (id: string) => void): () => void {
   titleListeners.add(cb);
   return () => titleListeners.delete(cb);
 }
@@ -98,22 +100,41 @@ settings.subscribe((s) => {
   }
 });
 
+/** The tab each container was last asked to show. */
+const wanted = new WeakMap<HTMLElement, string>();
+
 /** Shows the terminal in `container`, creating and attaching it on first use. */
-export async function mount(id: string, container: HTMLElement): Promise<Instance> {
+export async function mount(id: string, container: HTMLElement): Promise<void> {
+  wanted.set(container, id);
   let inst = registry.get(id);
   if (!inst) {
     // Settled before the terminal is opened, so it never draws a frame with
-    // one renderer and the rest with another.
-    const accelerated = await gpuAccelerated();
+    // one renderer and the rest with another. The WebGL renderer's module is
+    // fetched only by a terminal that draws with it.
+    const webgl = useWebgl(settings.get()?.terminalGpu, await gpuAccelerated())
+      ? (await import("@xterm/addon-webgl").catch(() => null))?.WebglAddon
+      : undefined;
+    // The container moved on to another tab while this one waited; this tab
+    // is created when it is next shown.
+    if (wanted.get(container) !== id) return;
+    // Another mount of the same tab may have created it while this one waited.
+    if (registry.has(id)) return mount(id, container);
     inst = create(id);
     registry.set(id, inst);
     container.replaceChildren(inst.el);
     inst.term.open(inst.el);
-    if (useWebgl(settings.get()?.terminalGpu, accelerated)) loadWebgl(inst.term);
+    if (webgl) loadWebgl(inst.term, webgl);
     inst.fit.fit();
     inst.term.focus();
-    await attach(id, inst);
-    return inst;
+    try {
+      await attach(id, inst);
+    } catch (e) {
+      // A shell not running yet: kept, the tab would show a terminal nothing
+      // feeds. Dropped, the next mount creates and attaches it again.
+      if (registry.get(id) === inst) dispose(id);
+      throw e;
+    }
+    return;
   }
   if (inst.el.parentElement !== container) container.replaceChildren(inst.el);
   // Re-fitting resizes the PTY, so a program inside sees the window it is
@@ -121,7 +142,6 @@ export async function mount(id: string, container: HTMLElement): Promise<Instanc
   inst.fit.fit();
   inst.term.scrollToBottom();
   inst.term.focus();
-  return inst;
 }
 
 export function unmount(id: string): void {
@@ -172,8 +192,10 @@ function create(id: string): Instance {
     term.onBinary((data) => void api.terminalWrite(id, data).catch(() => {})),
     term.onResize(({ cols, rows }) => void api.terminalResize(id, cols, rows).catch(() => {})),
     term.onTitleChange((title) => {
+      // Shells and agents re-send the same title at every prompt or spinner frame.
+      if (title === inst.title) return;
       inst.title = title;
-      titleListeners.forEach((cb) => cb());
+      titleListeners.forEach((cb) => cb(id));
     }),
   );
   return inst;
@@ -206,9 +228,9 @@ function useWebgl(setting: string | undefined, accelerated: boolean): boolean {
   return accelerated;
 }
 
-function loadWebgl(term: Terminal): void {
+function loadWebgl(term: Terminal, Addon: typeof WebglAddon): void {
   try {
-    const webgl = new WebglAddon();
+    const webgl = new Addon();
     webgl.onContextLoss(() => {
       webglBroken = true;
       webgl.dispose();

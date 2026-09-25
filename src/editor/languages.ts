@@ -25,11 +25,14 @@ export const LANGUAGES: { id: LanguageId; name: string }[] = [
 
 const tomlLanguage = StreamLanguage.define(toml);
 
-/** Fenced code blocks use the same set, selected by the fence's info string. */
+/**
+ * Fenced code blocks use the same set, selected by the fence's info string.
+ * Each grammar is built the first time a fence asks for it, not at import.
+ */
 const fenceLanguages: LanguageDescription[] = [
-  LanguageDescription.of({ name: "html", alias: ["htm", "xml", "svg"], support: html({ autoCloseTags: false }) }),
-  LanguageDescription.of({ name: "json", alias: ["jsonc", "json5"], support: json() }),
-  LanguageDescription.of({ name: "yaml", alias: ["yml"], support: yaml() }),
+  LanguageDescription.of({ name: "html", alias: ["htm", "xml", "svg"], load: async () => html({ autoCloseTags: false }) }),
+  LanguageDescription.of({ name: "json", alias: ["jsonc", "json5"], load: async () => json() }),
+  LanguageDescription.of({ name: "yaml", alias: ["yml"], load: async () => yaml() }),
   LanguageDescription.of({ name: "toml", support: new (class { language = tomlLanguage; extension: Extension = tomlLanguage; })() as unknown as LanguageSupport }),
   LanguageDescription.of({ name: "markdown", alias: ["md"], load: async () => markdown({ base: markdownLanguage }) }),
 ];

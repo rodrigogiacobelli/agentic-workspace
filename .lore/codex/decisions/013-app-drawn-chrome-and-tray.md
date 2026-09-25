@@ -76,7 +76,8 @@ entry per workspace with a dot against any background workspace wanting
 attention, and **Quit** (TRAY-03, TRAY-04, TRAY-06). `tray::icon`
 paints an orange dot into the corner of the application icon while a background
 workspace wants attention (TRAY-05). Quit and the last-window close both route
-through the Workspace window, which owns the unsaved-buffer prompt.
+through the Workspace window, which owns the unsaved-buffer prompt; it is the
+only window that listens for `quit-requested`.
 
 libappindicator's menu-only event model means the tray icon is built with
 `show_menu_on_left_click(true)`: a left click opens the menu, and its first
@@ -131,7 +132,9 @@ position is requested and left to KWin (PLT-11), and
   closed.
 - The tray menu is rebuilt from the session whenever it is published, so
   `tray::refresh` compares a signature first and skips a rebuild that would
-  change nothing, rather than replacing an open menu under the pointer.
+  change nothing, rather than replacing an open menu under the pointer. It
+  sets the icon only when the attention dot comes or goes, since GTK decodes
+  each icon it is handed in a sandboxed image loader.
 
 ## Constraints imposed
 

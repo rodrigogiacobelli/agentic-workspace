@@ -1,12 +1,14 @@
 //! The two agent signals: an attention badge when a background terminal
 //! prints, and a desktop notification when a busy background terminal goes
 //! quiet. Notifications go through `notify-send`, whose `--action` support
-//! is what lets a click switch to the terminal that raised it.
+//! is what lets a click switch to the terminal that raised it. The loop that
+//! watches for quiet also follows the directory of the shell on screen.
 
 use crate::session;
 use crate::state::AppState;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -59,11 +61,27 @@ pub fn forget(state: &AppState, terminal_id: &str) {
     state.attention.lock().remove(terminal_id);
 }
 
-/// Runs for the life of the application, checking once a second for a busy
-/// background terminal that has gone quiet.
+/// How often `quiet_loop` looks, and so how long a `cd` takes to reach the
+/// windows.
+const TICK: Duration = Duration::from_millis(250);
+
+/// Runs for the life of the application: follows the directory of the shell
+/// on screen, and checks for a busy background terminal that has gone quiet.
 pub fn quiet_loop(app: AppHandle) {
+    let mut since = Instant::now();
+    let mut seen = None;
+    let mut ticks = 0u32;
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(TICK);
+        let now = Instant::now();
+        follow_directory(&app, since, &mut seen);
+        since = now;
+        // A quiet threshold is whole seconds, at least five: once a second is
+        // grain enough, and the scan clones the settings.
+        ticks = ticks.wrapping_add(1);
+        if !ticks.is_multiple_of(4) {
+            continue;
+        }
         let state = app.state::<AppState>();
         let settings = state.settings.lock().clone();
         let threshold = Duration::from_secs(settings.quiet_threshold_s.max(QUIET_FLOOR_S) as u64);
@@ -108,6 +126,30 @@ pub fn quiet_loop(app: AppHandle) {
                 .spawn(move || notify(app, terminal_id, ws_id, ws_name, tab_name, seconds, replace))
                 .ok();
         }
+    }
+}
+
+/// Publishes when the shell on screen has changed directory: the Terminal
+/// window resolves a relative link against it, and its status bar and tab
+/// show it. A `cd` has no event to observe, but it always prints a prompt, so
+/// the directory is read on the tick after output, never on the hot path.
+/// `seen` is the terminal and directory the last read found. Another terminal
+/// come on screen counts as a move as well: nothing here knows what the
+/// windows were last sent for it, and a publish that finds nothing moved
+/// sends nothing.
+fn follow_directory(app: &AppHandle, since: Instant, seen: &mut Option<(String, PathBuf)>) {
+    let state = app.state::<AppState>();
+    let Some(id) = state.foreground.lock().clone() else { return };
+    let printed = state.activities.lock().get(&id).and_then(|a| a.last_output).is_some_and(|t| t >= since);
+    if !printed {
+        return;
+    }
+    let Some(pid) = state.ptys.lock().get(&id).and_then(|live| live.pid) else { return };
+    let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else { return };
+    let current = Some((id, cwd));
+    if *seen != current {
+        *seen = current;
+        session::publish(app);
     }
 }
 

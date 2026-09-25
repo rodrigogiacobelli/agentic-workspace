@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Live, useLive } from "../live";
+import { Live, keep, peek } from "../live";
 import { report } from "../notice";
 import type { AreaId, EditorGroup, EditorTab, LayoutGroup, PanelId, WorkArea, Workspace } from "../types";
 import { DiffView } from "./DiffView";
@@ -81,6 +81,15 @@ interface AreaProps {
 export function EditorArea({ ws, area, panels, onOpenInEditor }: AreaProps) {
   const state = areaOf(ws, area);
   const host = groupOrder(state)[0];
+  // Set once the area's groups are built: a group mounting before then is the
+  // area coming back on screen, one mounting after is a group split off.
+  // Children's effects run first, so theirs see this still false, and strict
+  // mode's second mount sees it false again.
+  const settled = useRef(false);
+  useLayoutEffect(() => {
+    settled.current = true;
+    return () => { settled.current = false; };
+  }, []);
   return (
     <section className="editor-area">
       <SplitTree<LayoutGroup>
@@ -96,6 +105,7 @@ export function EditorArea({ ws, area, panels, onOpenInEditor }: AreaProps) {
               group={group}
               active={group.id === state.activeGroup || state.groups.length === 1}
               panels={group.id === host ? panels : null}
+              settled={settled}
               onOpenInEditor={onOpenInEditor}
             />
           ) : null;
@@ -106,12 +116,14 @@ export function EditorArea({ ws, area, panels, onOpenInEditor }: AreaProps) {
   );
 }
 
-function GroupView({ ws, area, group, active, panels, onOpenInEditor }: {
+function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }: {
   ws: Workspace;
   area: AreaId;
   group: EditorGroup;
   active: boolean;
   panels: WorkPanels | null;
+  /** Whether the area had been built before this render; see `EditorArea`. */
+  settled: React.RefObject<boolean>;
   onOpenInEditor: (path: string) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -121,8 +133,8 @@ function GroupView({ ws, area, group, active, panels, onOpenInEditor }: {
   const activeId = group.activeEditor;
   const tab = group.editors.find((t) => t.id === activeId);
   const shownPanel = panels?.active ?? null;
-  const live = useLive();
-  // A panel shown once stays mounted behind the files, as a region's tabs do.
+  // A panel shown once stays mounted behind the files, idling, as a region's
+  // tabs do.
   const [seen, setSeen] = useState<PanelId[]>([]);
   useEffect(() => { if (shownPanel) setSeen((s) => (s.includes(shownPanel) ? s : [...s, shownPanel])); }, [shownPanel]);
   // A tab that becomes active by any path — opened, cycled to, left in front
@@ -149,22 +161,38 @@ function GroupView({ ws, area, group, active, panels, onOpenInEditor }: {
     { ignore: (target) => !!target.closest(".tab-bar") },
   );
 
-  // Dirty marks and banners follow the documents only while the group is on
-  // screen; coming back re-renders it anyway.
-  useEffect(() => (live ? editors.subscribe(() => bump((n) => n + 1)) : undefined), [live]);
+  // Dirty marks and banners follow the documents.
+  useEffect(() => editors.subscribe(() => bump((n) => n + 1)), []);
 
   // Mounts when the active tab changes or its document was dropped from the
   // registry — never on every session update, which would refocus the editor
-  // while something else is being typed into.
+  // while something else is being typed into. Both run in the layout phase: a
+  // rebuilt group paints with its document already in it, and a group going
+  // away takes its document off before React detaches it, while the document
+  // can still read where it was scrolled.
+  //
+  // Focus goes to a document brought forward: a tab picked here, a group
+  // split off, a group built for the first time this session — at launch, or
+  // on a workspace's first visit — or a tab opened while the group was away,
+  // a file opened from Source Control. A group rebuilt with the tab it had in
+  // front, its workspace or its mode coming back, leaves focus where it is.
+  // What it had in front is read once, as it is built.
+  const frontKey = `${ws.id}:group:${group.id}:front`;
+  const [frontBefore] = useState(() => peek<string | null>(frontKey));
   const mounted = activeId ? !!editors.get(activeId) : false;
-  useEffect(() => {
-    if (shownRef.current && shownRef.current !== activeId) editors.unmount(shownRef.current);
-    shownRef.current = tab && !tab.diff ? activeId : null;
+  useLayoutEffect(() => {
     const container = host.current;
-    if (tab && !tab.diff && container) void editors.mount(ws, tab, container).catch(report);
+    if (shownRef.current && shownRef.current !== activeId && container) editors.unmount(shownRef.current, container);
+    shownRef.current = tab && !tab.diff ? activeId : null;
+    const focus = settled.current || frontBefore !== activeId;
+    keep(frontKey, activeId);
+    if (tab && !tab.diff && container) void editors.mount(ws, tab, container, focus).catch(report);
   }, [activeId, ws.id, mounted]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => () => { if (shownRef.current) editors.unmount(shownRef.current); }, []);
+  useLayoutEffect(() => {
+    const container = host.current;
+    return () => { if (shownRef.current && container) editors.unmount(shownRef.current, container); };
+  }, []);
 
   const dropOnTab = (e: React.DragEvent, index: number | null) => {
     const id = e.dataTransfer.getData(TAB_MIME);
@@ -262,31 +290,34 @@ function GroupView({ ws, area, group, active, panels, onOpenInEditor }: {
         <div key={id} className="work-panel" hidden={id !== shownPanel}>
           {/* The tab says the panel's name only in words; drawn as a glyph, the panel carries it. */}
           <div className="panel-title">{panelInfo(id)?.label}</div>
-          <Live.Provider value={live && id === shownPanel}>{panels.render(id)}</Live.Provider>
+          <Live.Provider value={id === shownPanel}>{panels.render(id)}</Live.Provider>
         </div>
       ))}
       <div className="group-body" hidden={!!shownPanel}>
-        {tab?.diff ? (
-          <DiffView key={tab.id} ws={ws} tab={tab} onClose={() => void closeTab(ws, tab.id)} onOpenInEditor={() => onOpenInEditor(tab.path)} />
-        ) : (
-          <>
-            {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
-            {doc && <Banner doc={doc} />}
-            <div className="editor-host" ref={host} hidden={!!media || area === "review"}>
-              {group.editors.length === 0 && area === "editor" && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
-            </div>
-            {group.editors.length === 0 && area === "review" && (
-              <div className="empty">Pick a change in Commit, or a file of a commit in History, to see its diff here.</div>
-            )}
-            {media && tab && <MediaView ws={ws} path={tab.path} kind={media} />}
-            {entry && "binary" in entry && tab && (
-              <div className="binary-notice">
-                <p>{tab.path} is not a text file.</p>
-                <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
+        {/* Behind a panel shown over the group, a diff idles as a panel behind a tab does. */}
+        <Live.Provider value={!shownPanel}>
+          {tab?.diff ? (
+            <DiffView key={tab.id} ws={ws} tab={tab} onClose={() => void closeTab(ws, tab.id)} onOpenInEditor={() => onOpenInEditor(tab.path)} />
+          ) : (
+            <>
+              {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
+              {doc && <Banner doc={doc} />}
+              <div className="editor-host" ref={host} hidden={!!media || area === "review"}>
+                {group.editors.length === 0 && area === "editor" && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
               </div>
-            )}
-          </>
-        )}
+              {group.editors.length === 0 && area === "review" && (
+                <div className="empty">Pick a change in Commit, or a file of a commit in History, to see its diff here.</div>
+              )}
+              {media && tab && <MediaView ws={ws} path={tab.path} kind={media} />}
+              {entry && "binary" in entry && tab && (
+                <div className="binary-notice">
+                  <p>{tab.path} is not a text file.</p>
+                  <button onClick={() => void api.openExternally(ws.id, tab.path).catch(report)}>Open with the default application</button>
+                </div>
+              )}
+            </>
+          )}
+        </Live.Provider>
       </div>
       {zone.overlay}
     </div>

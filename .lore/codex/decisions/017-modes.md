@@ -4,18 +4,17 @@ title: 'ADR-017: Modes own their panels, their working area and their dock tree'
 summary: Why the Workspace window shows one of two modes — Editor or Source Control —
   with Terminal as a third mode drawn in its own window; why each mode owns its panels,
   its working area and its dock tree; why a diff is a tab of Source Control's working
-  area and never of the Editor's; why modes and workspaces stay mounted once shown;
-  and why the status bar belongs to the application.
+  area and never of the Editor's; and why the status bar belongs to the application.
 related:
 - 001-two-os-windows
 - 013-app-drawn-chrome-and-tray
 - 014-one-layout-tree
 - 012-git-through-the-git-binary
+- 018-mount-what-is-on-screen
 - standards-code
 binds:
 - src/modes.ts
 - src/repo.ts
-- src/live.ts
 - src/components/dock.ts
 - src/components/WorkspaceWindow.tsx
 - src/components/Switcher.tsx
@@ -115,26 +114,21 @@ area's first group, in front of the files or diffs, and shown it takes that
 group's body until a file or diff tab is picked, or a file or diff is opened —
 from a panel, quick open, a link or a terminal — which comes to the front.
 
-**Mounted once, kept.** `WorkspaceWindow` builds a workspace's view the first
-time the workspace is shown, and a mode's tree the first time the mode is
-shown, and keeps both mounted; a region, and the work leaf, keep each panel
-they have shown mounted behind the one in front. The views not on screen carry
-`.is-hidden`: `content-visibility: hidden` skips their rendering and
-`visibility: hidden` covers a webview without it, while layout, scroll
-positions and editor state are kept. They also idle. `Live` in `src/live.ts`
-tells a view whether it is on screen — its workspace shown, its mode shown, its
-tab in front — and `useChanged` re-reads a panel or a diff on a change only
-while it is; one out of sight marks itself stale and re-reads once when it
-comes back. The Outline and the editor groups stop following the documents
-while out of sight. The watcher watches the active workspace's tree only, so
-`session::activate` calls `watch::catch_up`, which emits a `dir-changed` for
-the workspace's root and expanded directories and a `git-changed`, whichever
-way the workspace came to the screen.
+**One mode on screen.** The Workspace window mounts the active workspace in
+its mode and nothing else; a switch of mode or workspace rebuilds the view,
+which comes back as the reader left it (`018-mount-what-is-on-screen`). A
+region, and the work leaf, keep each panel they have shown mounted behind the
+one in front. `Live` in `src/live.ts` tells such a panel whether it is in
+front, and `useChanged` re-reads a panel or a diff on a change only while it
+is; one behind marks itself stale and re-reads once when it comes forward.
 
 **One repository store.** `src/repo.ts` holds each workspace's `RepoInfo`,
 status list and stashes. The workspace on screen re-reads 300 ms after the
 first change the watcher reports, and that read takes every change reported
-while it waits; one in the background is marked stale and re-read when shown.
+while it waits: the status list alone for a changed file, everything for a
+change in the git directory. One in the background is marked stale and re-read
+when shown. A read that brings back what is held tells nobody, and one that
+changes something tells only that workspace's readers.
 `git_remote` reports a fetch, pull or push itself, since the refs it moves are
 not watched. Commit, the Explorer's decorations and the status bar read the
 same copy.
@@ -143,7 +137,9 @@ same copy.
 the body in both windows. The mode on screen fills its left: the cursor, the
 markdown mode, blame and the language in the Editor; the changed, staged,
 conflict and stash counts in Source Control; the shell, its directory and the
-tab count in Terminal. The workspace name and the branch with its ahead and
+tab count in Terminal. Each window's half supplies those facts —
+`src/components/WorkspaceFacts.tsx` and `TerminalFacts` in
+`src/components/TerminalWindow.tsx` — so the bar itself loads neither half. The workspace name and the branch with its ahead and
 behind counts hold the right end, and the branch picks Source Control.
 
 ## Rationale
@@ -156,8 +152,6 @@ behind counts hold the right end, and the branch picks Source Control.
 - The mode belongs to the workspace because a review left in one project is
   still waiting when the reader comes back to it; panel placement stays the
   application's because it is furniture.
-- Mounting once makes a mode or workspace switch a paint: the documents, their
-  cursors and every list's scroll are where the reader left them.
 - A status bar outside every mode keeps the branch on screen while writing and
   in the Terminal window, where the branch matters as much.
 
@@ -166,7 +160,6 @@ behind counts hold the right end, and the branch picks Source Control.
 | Option | Why rejected |
 |---|---|
 | **One dock tree shared by both modes** | One tree to store, and the regions sized for four editor panels are wrong for five git panels; a panel from one mode would sit in the other's layout. |
-| **Rebuild the mode on each switch** | Cheaper in memory, and every switch pays a CodeMirror rebuild and loses scroll and cursor. |
 | **The branch in the title row** | The no-change answer, and it crowds the row that now carries the mode selector; the status bar holds it in both windows. |
 | **Terminal as a pill outside the selector** | Marks the other window as different, and hides the model: Terminal is a mode that lives elsewhere, and the selector says so. |
 | **Stashes and Remote as their own tabs** | Seven tabs fit no strip; a stash is made from the change list and a fetch's output belongs beside the branches it moved. |
@@ -178,13 +171,10 @@ behind counts hold the right end, and the branch picks Source Control.
 - A new mode is an entry in `MODES`, its panels in `PANELS`, a default tree
   and — if it has a working area — an `Area`.
 - A diff and a document never compete for one tab strip.
-- Switching mode or workspace rebuilds nothing.
 
 **Harder:**
-- Every workspace shown once stays in memory, with its mounted editors and
-  lists, until it is removed.
-- A view that reads data on a change has to go through `useChanged`, or it
-  keeps working while out of sight.
+- A panel that reads data on a change has to go through `useChanged`, or it
+  keeps working while behind another tab.
 - Every command over tabs resolves an area first, and the ids of tabs and
   groups have to stay unique across both areas.
 - A region is a size container (`container-type: inline-size`), which makes it
@@ -200,5 +190,3 @@ behind counts hold the right end, and the branch picks Source Control.
   another mode, and a drop of a panel from another mode is ignored.
 - **The work leaf is never removed and never becomes a tab**; it holds panels,
   and emptied regions collapse around it.
-- **A view once shown is only hidden, never unmounted**, until its workspace
-  is removed.

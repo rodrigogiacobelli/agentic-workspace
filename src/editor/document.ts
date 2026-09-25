@@ -1,7 +1,7 @@
 // One open file: a source view that owns the document and its history, and a
 // rendered view over the same document created on demand. See ADR-011.
 
-import { Annotation, Compartment, EditorState, Text, type Extension } from "@codemirror/state";
+import { Annotation, Compartment, EditorState, Text, type Extension, type StateEffect } from "@codemirror/state";
 import {
   EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection,
   dropCursor, highlightActiveLine, gutter, GutterMarker, scrollPastEnd,
@@ -119,6 +119,17 @@ export class Doc {
   restored = false;
   private draftTimer: number | null = null;
   private root: HTMLDivElement | null = null;
+  /**
+   * Where the document owes its reader a scroll, per view: where it was when
+   * the document was last taken off screen, the tab's saved line, or a jump.
+   * Each mount asks for it again, and CodeMirror holds it until it measures
+   * the view laid out. It is paid when the view next scrolls with a height:
+   * a document mounted behind a panel, or taken off again at once — React's
+   * strict mode does that — still owes it.
+   */
+  private owed = new Map<EditorView, StateEffect<unknown>>();
+  /** Where each view last was while laid out; hidden behind a panel, a scroller reads 0. */
+  private lastScroll = new Map<EditorView, StateEffect<unknown>>();
   private listeners = new Set<() => void>();
   private mergeComp = new Compartment();
   /** The typing helpers read the file's name for its comment token, so they
@@ -133,7 +144,7 @@ export class Doc {
   private existsTimer: number | null = null;
   /** Where a split's last sync left the other pane, so its echo is known. */
   private echoScroll: { view: EditorView; top: number } | null = null;
-  /** Views whose scroll already feeds `scheduleViewState`. */
+  /** Views whose scroll is already followed. */
   private viewStateBound = new Set<EditorView>();
   private disposed = false;
 
@@ -250,6 +261,16 @@ export class Doc {
       other?.dispatch({ changes: u.changes, annotations: forwarded.of(true) });
     }
     if (u.docChanged) {
+      // A scroll kept for later names a place in the text, and an edit that
+      // lands while the view is off screen — an agent's, through checkDisk —
+      // moves that place.
+      for (const kept of [this.owed, this.lastScroll]) {
+        const at = kept.get(origin);
+        if (!at) continue;
+        const moved = at.map(u.changes);
+        if (moved) kept.set(origin, moved);
+        else kept.delete(origin);
+      }
       const dirty = !this.source.state.doc.eq(this.saved);
       if (dirty !== this.dirty) this.dirty = dirty;
       const fromDisk = u.transactions.some((tr) => tr.annotation(external));
@@ -275,23 +296,27 @@ export class Doc {
     return this.source;
   }
 
-  mount(container: HTMLElement, initialLine: number): void {
+  mount(container: HTMLElement, initialLine: number, focus = true): void {
     if (!this.root) {
       this.root = document.createElement("div");
       this.root.className = "editor";
       this.layout();
-      if (initialLine > 1) {
+      if (initialLine > 1 && !this.owed.size) {
         const view = this.active();
         const line = view.state.doc.line(Math.min(initialLine, view.state.doc.lines));
-        view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: "start" }) });
+        this.owed.set(view, EditorView.scrollIntoView(line.from, { y: "start" }));
       }
     }
-    // Focus moves to the document only when it is newly shown; a re-mount of
-    // what is already on screen must not take it from an input elsewhere, and
-    // a preview opened by a click in the file tree leaves the tree its keys.
+    // Focus moves to the document only when it is newly shown, and only when
+    // the caller says so; a re-mount of what is already on screen must not
+    // take it from an input elsewhere, and a preview opened by a click in the
+    // file tree leaves the tree its keys.
     if (this.root.parentElement !== container) {
+      // A tab moved to another group carries its scroll along.
+      if (this.root.isConnected) this.rememberScroll();
       container.replaceChildren(this.root);
-      if (!document.activeElement?.closest(".tree")) this.active().focus();
+      for (const [view, at] of this.owed) view.dispatch({ effects: at });
+      if (focus && !document.activeElement?.closest(".tree")) this.active().focus();
     }
   }
 
@@ -299,8 +324,29 @@ export class Doc {
     this.active().focus();
   }
 
-  unmount(): void {
-    this.root?.remove();
+  /** Takes the document off `container`, unless it has moved on to another. */
+  unmount(container: HTMLElement): void {
+    if (!this.root || this.root.parentElement !== container) return;
+    this.rememberScroll();
+    this.root.remove();
+  }
+
+  /**
+   * A detached scroller forgets its offset, so each view on screen records
+   * where it is for the next mount to put back. The snapshot names a line,
+   * not a pixel, so the document comes back at the same line in a group of
+   * another width. It is read while still laid out: detached, or hidden, a
+   * scroller reads 0, and a view hidden behind a panel gives where it last
+   * was instead. A scroll still owed stands.
+   */
+  private rememberScroll(): void {
+    const owed = new Map<EditorView, StateEffect<unknown>>();
+    for (const view of [this.source, this.rich]) {
+      if (!view || !this.root?.contains(view.dom)) continue;
+      const at = this.owed.get(view) ?? (view.scrollDOM.clientHeight > 0 ? view.scrollSnapshot() : this.lastScroll.get(view));
+      if (at) owed.set(view, at);
+    }
+    this.owed = owed;
   }
 
   private layout(): void {
@@ -342,11 +388,19 @@ export class Doc {
     // The last layout's pane may be gone, and its landing position with it.
     this.echoScroll = null;
     // One listener for the life of each view: `layout` runs again on every
-    // mode change, and a fresh listener each time would pile up.
-    const view = this.active();
-    if (!this.viewStateBound.has(view)) {
+    // mode change, and a fresh listener each time would pile up. A view
+    // scrolled with a height is laid out: where it is now is where the reader
+    // left it, and any scroll it owed has been paid.
+    for (const view of [this.source, this.rich]) {
+      if (!view || this.viewStateBound.has(view)) continue;
       this.viewStateBound.add(view);
-      view.scrollDOM.addEventListener("scroll", () => this.scheduleViewState());
+      view.scrollDOM.addEventListener("scroll", () => {
+        if (view.scrollDOM.clientHeight > 0) {
+          this.lastScroll.set(view, view.scrollSnapshot());
+          this.owed.delete(view);
+        }
+        this.scheduleViewState();
+      });
     }
   }
 
@@ -634,7 +688,11 @@ export class Doc {
 
   jumpTo(pos: number): void {
     const view = this.active();
-    view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: "start", yMargin: 8 }) });
+    const at = EditorView.scrollIntoView(pos, { y: "start", yMargin: 8 });
+    view.dispatch({ selection: { anchor: pos }, effects: at });
+    // A place asked for outranks where the document was left, and is owed
+    // until the view is laid out to take it.
+    this.owed = new Map([[view, at]]);
     view.focus();
   }
 

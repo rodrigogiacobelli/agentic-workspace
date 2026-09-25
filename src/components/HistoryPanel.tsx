@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { api } from "../api";
-import { useChanged, useLive } from "../live";
+import { keep, useChanged, useKept, useKeptScroll, useLive } from "../live";
 import { report } from "../notice";
 import * as repo from "../repo";
 import type { CommitDetail, DiffSpec, LogEntry, Workspace } from "../types";
@@ -13,6 +13,19 @@ interface Props {
 }
 
 const PAGE = 50;
+
+/** Where a commit asked for by name waits for the workspace's History to open it. */
+const pendingKey = (workspaceId: string) => `${workspaceId}:history:show`;
+
+/**
+ * Opens a commit in the workspace's History. A History on screen, or held
+ * behind another tab, opens it at once; otherwise it waits under a kept key
+ * and the History built next opens it.
+ */
+export function showCommit(workspaceId: string, hash: string): void {
+  keep(pendingKey(workspaceId), hash);
+  window.dispatchEvent(new CustomEvent("show-commit", { detail: { workspaceId, hash } }));
+}
 
 // The graph's geometry. ROW_H is `.history-row`'s height in styles.css: each
 // row draws its own slice of the graph, and the lanes only meet from one row
@@ -121,22 +134,51 @@ function authorColour(name: string): string {
   return COLOURS[Math.abs(h) % COLOURS.length];
 }
 
-/** The commit log as a graph, a page at a time; a commit opens in place to list its files. */
+/** A page of rows and the query that read it; a new filter keeps the old rows on screen until its own land. */
+interface Rows {
+  /** The filter and branch scope the rows answer, as `query` spells them. */
+  query: string;
+  entries: LogEntry[];
+  /** The last page came back short: there is nothing further to ask for. */
+  done: boolean;
+}
+
+const NO_ROWS: Rows = { query: "", entries: [], done: false };
+
+/** The commit open in place, and its files once `git show` answers. */
+interface Open {
+  hash: string;
+  detail: CommitDetail | null;
+}
+
+/**
+ * The commit log as a graph, a page at a time; a commit opens in place to
+ * list its files. Its rows, filter, open commit and scroll are kept, so a
+ * History rebuilt when its workspace or mode comes back paints as it was
+ * left and reads the log again behind it.
+ */
 export function HistoryPanel({ ws, onDiff }: Props) {
   const { info } = repo.useRepo(ws.id);
   const isRepo = info?.isRepo === true;
-  const [entries, setEntries] = useState<LogEntry[]>([]);
-  const [filter, setFilter] = useState("");
-  const [all, setAll] = useState(false);
-  const [done, setDone] = useState(false);
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [details, setDetails] = useState<Map<string, CommitDetail>>(new Map());
-  const list = useRef<HTMLDivElement>(null);
+  const [filter, setFilter] = useKept(`${ws.id}:history:filter`, "");
+  const [all, setAll] = useKept(`${ws.id}:history:all`, false);
+  const query = JSON.stringify([filter, all]);
+  const [rows, setRows] = useKept<Rows>(`${ws.id}:history:rows`, NO_ROWS);
+  const { entries, done } = rows;
+  /** Rows loaded for the query on screen, which a re-read asks for again. */
+  const loaded = rows.query === query ? entries.length : 0;
+  const [open, setOpen] = useKept<Open | null>(`${ws.id}:history:open`, null);
+  const [pending, setPending] = useKept<string | null>(pendingKey(ws.id), null);
+  const list = useRef<HTMLDivElement | null>(null);
+  const keptScroll = useKeptScroll<HTMLDivElement>(`${ws.id}:history:scroll`, entries.length > 0);
+  const listRef = useCallback((el: HTMLDivElement | null) => {
+    list.current = el;
+    const undo = keptScroll(el);
+    return () => { list.current = null; undo?.(); };
+  }, [keptScroll]);
   /** The last read asked for; one that lands after a newer one was asked for is dropped. */
   const latest = useRef(0);
   const reading = useRef(false);
-  /** Rows loaded so far, which the watcher's re-read asks for again. */
-  const loaded = useRef(0);
 
   const read = useCallback(async (skip: number, limit: number) => {
     const id = ++latest.current;
@@ -144,34 +186,44 @@ export function HistoryPanel({ ws, onDiff }: Props) {
     try {
       const page = await api.gitLog(ws.id, skip, limit, filter || null, all);
       if (id !== latest.current) return;
-      loaded.current = skip + page.length;
-      setEntries((prev) => [...prev.slice(0, skip), ...page]);
-      setDone(page.length < limit);
+      const last = page.length < limit;
+      setRows((prev) => {
+        const ours = prev.query === query;
+        // A re-read that found what is listed already keeps the rows, and nothing is drawn again.
+        if (ours && prev.done === last && prev.entries.length === skip + page.length
+          && JSON.stringify(prev.entries.slice(skip)) === JSON.stringify(page)) return prev;
+        return { query, entries: [...(ours ? prev.entries.slice(0, skip) : []), ...page], done: last };
+      });
     } catch (e) {
       if (id !== latest.current) return;
       report(e);
       // Stop paging: every scroll would otherwise ask again and fail again.
-      setDone(true);
+      setRows((prev) => ({ ...prev, done: true }));
     } finally {
       if (id === latest.current) reading.current = false;
     }
-  }, [ws.id, filter, all]);
+  }, [ws.id, filter, all, query, setRows]);
 
-  useEffect(() => { if (isRepo) void read(0, PAGE); }, [read, isRepo]);
   // Every row already loaded is read again, not only the first page, so the
-  // list keeps its length and the scroll position holds (the spirit of DIF-12).
-  useChanged(ws.id, () => { if (isRepo) void read(0, Math.max(PAGE, loaded.current)); });
+  // list keeps its length and the scroll position holds (the spirit of DIF-12)
+  // — on a change, and when the list is rebuilt from what it kept.
+  const loadedRef = useRef(loaded);
+  loadedRef.current = loaded;
+  useEffect(() => { if (isRepo) void read(0, Math.max(PAGE, loadedRef.current)); }, [read, isRepo]);
+  useChanged(ws.id, () => { if (isRepo) void read(0, Math.max(PAGE, loaded)); });
 
   // A page that does not fill the list gives it nothing to scroll, and the
   // scroll is what asks for the next one; so an unfilled list asks now.
   // Only on screen: a hidden list measures zero, which would read as always
-  // at the bottom and page through the whole history.
+  // at the bottom and page through the whole history. Only for the query on
+  // screen: the rows of the last one, still shown while the new one reads,
+  // are no place to page from.
   const live = useLive();
   const more = useCallback(() => {
     const el = list.current;
-    if (!live || !el || el.clientHeight === 0) return;
-    if (!done && !reading.current && entries.length > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 40) void read(entries.length, PAGE);
-  }, [live, done, entries.length, read]);
+    if (!live || !el || el.clientHeight === 0 || done || reading.current || loaded === 0) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 40) void read(loaded, PAGE);
+  }, [live, done, loaded, read]);
   useEffect(more, [more]);
   useEffect(() => {
     const el = list.current;
@@ -181,29 +233,38 @@ export function HistoryPanel({ ws, onDiff }: Props) {
     return () => observer.disconnect();
   }, [more, isRepo]);
 
-  const open = useCallback((hash: string) => {
-    setExpanded(hash);
-    if (!details.has(hash)) {
-      api.gitShow(ws.id, hash)
-        .then((d) => setDetails((m) => new Map(m).set(hash, d)))
-        .catch((e) => { report(e); setExpanded((h) => (h === hash ? null : h)); });
-    }
-  }, [ws.id, details]);
-  const toggle = (hash: string) => { if (expanded === hash) setExpanded(null); else open(hash); };
+  const openCommit = useCallback((hash: string) => {
+    setOpen({ hash, detail: null });
+    api.gitShow(ws.id, hash)
+      .then((detail) => setOpen((o) => (o?.hash === hash ? { hash, detail } : o)))
+      .catch((e) => { report(e); setOpen((o) => (o?.hash === hash ? null : o)); });
+  }, [ws.id, setOpen]);
+  const toggle = (hash: string) => { if (open?.hash === hash) setOpen(null); else openCommit(hash); };
 
-  // Blame asks for a commit by name. Every workspace's History is mounted at
-  // once, so only the one on screen answers; the others would ask their own
-  // repositories for a commit they may not have.
+  // Blame asks for a commit by name (`showCommit`): at once when this History
+  // is mounted, or on its first render when it is built for the asking.
+  /** A commit asked for by name, scrolled to once the rows are drawn. */
+  const reveal = useRef<string | null>(null);
+  const show = useCallback((hash: string) => {
+    setPending(null);
+    reveal.current = hash;
+    openCommit(hash);
+  }, [setPending, openCommit]);
+  useEffect(() => { if (pending) show(pending); }, [pending, show]);
   useEffect(() => {
     const onShow = (e: Event) => {
-      if (!list.current?.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return;
-      const hash = (e as CustomEvent<string>).detail;
-      open(hash);
-      window.setTimeout(() => list.current?.querySelector(`[data-commit="${hash}"]`)?.scrollIntoView({ block: "nearest" }), 50);
+      const { workspaceId, hash } = (e as CustomEvent<{ workspaceId: string; hash: string }>).detail;
+      if (workspaceId === ws.id) show(hash);
     };
     window.addEventListener("show-commit", onShow);
     return () => window.removeEventListener("show-commit", onShow);
-  }, [open]);
+  }, [ws.id, show]);
+  useEffect(() => {
+    const hash = reveal.current;
+    if (!hash || entries.length === 0) return;
+    reveal.current = null;
+    list.current?.querySelector(`[data-commit="${hash}"]`)?.scrollIntoView({ block: "nearest" });
+  });
 
   // Recomputed over the whole list, so a page appended below carries on the lanes above it.
   const graph = useMemo(() => graphLayout(entries), [entries]);
@@ -227,15 +288,11 @@ export function HistoryPanel({ ws, onDiff }: Props) {
         <span className="history-when">When</span>
         <span className="history-hash">Hash</span>
       </div>
-      <div
-        ref={list}
-        className="panel-list"
-        onScroll={more}
-      >
+      <div ref={listRef} className="panel-list" onScroll={more}>
         {graph.rows.map((row, i) => {
           const c = entries[i];
-          const isOpen = expanded === c.hash;
-          const detail = details.get(c.hash);
+          const isOpen = open?.hash === c.hash;
+          const detail = isOpen ? open.detail : null;
           return (
             <div key={c.hash} data-commit={c.hash}>
               <div className={`history-row${isOpen ? " selected" : ""}`} onClick={() => toggle(c.hash)} title={`${c.author} · ${c.date}\n\n${c.message}`}>

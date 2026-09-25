@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
-import { useChanged } from "../live";
+import { useChanged, useKept, useKeptScroll } from "../live";
 import { report } from "../notice";
 import * as repo from "../repo";
 import type { Session, Workspace, WorktreeEntry } from "../types";
@@ -24,14 +24,19 @@ export async function addWorktree(ws: Workspace, path: string, branch: string, c
   if (openIt) await api.addWorkspace(path, worktreeName(ws, branch), true).catch(report);
 }
 
-/** Every worktree of the repository, with open, switch, create, delete and prune. */
+/**
+ * Every worktree of the repository, with open, switch, create, delete and
+ * prune. The list is kept, so the panel rebuilt when it comes back paints it
+ * at once and reads it again behind it.
+ */
 export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Session }) {
   const { info } = repo.useRepo(ws.id);
   const isRepo = info?.isRepo === true;
-  const [list, setList] = useState<WorktreeEntry[] | null>(null);
+  const [list, setList] = useKept<WorktreeEntry[] | null>(`${ws.id}:worktrees:list`, null);
   const [step, setStep] = useState<Step | null>(null);
+  const scroller = useKeptScroll<HTMLDivElement>(`${ws.id}:worktrees:scroll`, list !== null);
 
-  const load = useCallback(() => api.gitWorktrees(ws.id).then(setList).catch(report), [ws.id]);
+  const load = useCallback(() => api.gitWorktrees(ws.id).then(setList).catch(report), [ws.id, setList]);
   useEffect(() => { if (isRepo) void load(); }, [isRepo, load]);
   // An agent may add a worktree from a terminal; the watcher says so.
   useChanged(ws.id, () => { if (isRepo) void load(); });
@@ -95,7 +100,7 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
         <button onClick={() => setStep({ kind: "path" })}>＋ New worktree…</button>
         <button onClick={() => void prune()} title="Remove the entries of worktrees whose directories are gone (BR-11)">Prune</button>
       </div>
-      <div className="panel-list">
+      <div ref={scroller} className="panel-list">
         {!list && <div className="tree-loading loading">Loading…</div>}
         {list?.map((wt) => {
           const open = workspaceAt(wt.path);

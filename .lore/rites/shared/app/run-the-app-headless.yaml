@@ -1,0 +1,51 @@
+id: run-the-app-headless
+title: Run the application headless against the owner's workspaces
+summary: Start a build in a nested virtual KWin on a private D-Bus, seeded with a copy of the owner's session, with WebKit's remote inspector open, and report the process ids and inspector port.
+do: |
+  This runs beside the owner's own instance and never draws on their screen.
+
+  1. Pick the binary. A release binary (`pnpm tauri build --no-bundle`, run
+     under `nice -n 10`) embeds its frontend and is the one to measure. A debug
+     binary loads its frontend from port 1420, so serve `pnpm dev` (live edits)
+     or `pnpm vite preview --port 1420 --strictPort` over `dist/` first. A
+     plain `cargo build --release` leaves out Tauri's `custom-protocol` feature
+     and also loads port 1420.
+  2. Copy the owner's state into a scratch data directory under `working/`:
+     `session.json`, `settings.json`, `themes/` and `drafts/` from
+     `~/.local/share/dev.agenticworkspace.app/` into
+     `<scratch>/xdg/<APP_ID>/`, where APP_ID is `dev.agenticworkspace.app` for a
+     release build and `dev.agenticworkspace.app.dev` for a debug one.
+  3. To count the git processes the application starts, put a `git` script
+     first on its PATH that appends the time and its arguments to a log and
+     then execs `/usr/bin/git`.
+  4. Launch:
+
+         XDG_DATA_HOME=<scratch>/xdg XDG_CACHE_HOME=<scratch>/cache \
+         WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:<port> \
+         dbus-run-session -- kwin_wayland --virtual --no-lockscreen \
+           --no-global-shortcuts --socket wl-headless-<label> \
+           --width 1920 --height 1080 --exit-with-session <binary>
+
+     The private bus keeps the single-instance name, the tray and the hotkey
+     portal away from the owner's session.
+  5. Find the application's pid by `readlink /proc/<pid>/exe`, never with
+     `pgrep -f` or `pkill -f`: a pattern also matches the calling shell and
+     kills it. A binary rebuilt while it runs reads `<path> (deleted)`. Its
+     children are the network process, one WebKitWebProcess per window, and
+     the shells.
+  6. `http://127.0.0.1:<port>/` lists the two pages: 1 is the Workspace
+     window, 2 the Terminal window. A client speaks WebKit's inspector protocol
+     over `ws://127.0.0.1:<port>/socket/1/<page>/WebPage`, wrapping each call in
+     `Target.sendMessageToTarget` to the target id from `Target.targetCreated`.
+     `Runtime.evaluate` has no `awaitPromise`: evaluate, then call
+     `Runtime.awaitPromise` on the returned object id. Backend commands are
+     `window.__TAURI_INTERNALS__.invoke(<command>, <args>)`, for example
+     `switch_workspace` with `{id}` and `set_mode` with `{workspaceId, mode}`.
+     `Heap.gc` forces a collection and `Memory.startTracking` reports the
+     JavaScript heap apart from the rest.
+
+  Report the application pid, the inspector port and the log path. Stop the
+  instance by killing that pid; the nested KWin exits with it. Then kill every
+  process whose `/proc/<pid>/environ` carries that run's `XDG_DATA_HOME`:
+  the services the private bus started — the desktop portal, `ksecretd`, the
+  accessibility bus — outlive it, one set per launch.

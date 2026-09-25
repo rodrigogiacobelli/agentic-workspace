@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import { useKept, useKeptScroll } from "../live";
 import { report } from "../notice";
 import * as repo from "../repo";
 import type { DiffSpec, Stash, StatusEntry, Workspace } from "../types";
@@ -29,14 +30,20 @@ export function PathLabel({ path }: { path: string }) {
   );
 }
 
-/** What the working tree holds against HEAD, the stashes beside it, and the box that commits. */
+/**
+ * What the working tree holds against HEAD, the stashes beside it, and the
+ * box that commits. The message, the amend switch, the folded sections and an
+ * operation still running are kept, so the panel rebuilt when its workspace or
+ * mode comes back shows them as they were left.
+ */
 export function CommitPanel({ ws, onDiff, onOpenFile }: Props) {
   const { info, status, stashes } = repo.useRepo(ws.id);
-  const [message, setMessage] = useState("");
-  const [amend, setAmend] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [message, setMessage] = useKept(`${ws.id}:commit:message`, "");
+  const [amend, setAmend] = useKept(`${ws.id}:commit:amend`, false);
+  const [busy, setBusy] = useKept<string | null>(`${ws.id}:commit:busy`, null);
+  const [collapsed, setCollapsed] = useKept<Set<string>>(`${ws.id}:commit:collapsed`, new Set());
   const [naming, setNaming] = useState(false);
+  const scroller = useKeptScroll<HTMLDivElement>(`${ws.id}:commit:scroll`, info !== null);
 
   if (!info) return <div className="tree-loading loading">Loading…</div>;
   if (!info.isRepo) {
@@ -165,7 +172,7 @@ export function CommitPanel({ ws, onDiff, onOpenFile }: Props) {
     <div className="panel">
       {info.isWorktree && <div className="panel-note">Worktree of {info.mainWorktree}</div>}
       {info.state && <div className="panel-note danger">{info.state[0].toUpperCase() + info.state.slice(1)} in progress</div>}
-      <div className="panel-list">
+      <div ref={scroller} className="panel-list">
         {files("Conflicts", conflicted, "conflicted")}
         {files("Staged", staged, "staged", { label: "Unstage all", run: () => void run("unstage", () => api.gitUnstageAll(ws.id)) })}
         {files("Changes", changed, "changed", { label: "Stage all", run: () => void run("stage", () => api.gitStageAll(ws.id)) })}

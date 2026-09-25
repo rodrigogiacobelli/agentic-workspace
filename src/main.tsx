@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { App } from "./App";
 import type { WindowRole } from "./types";
-import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 import { installScrollbars } from "./scrollbars";
 import { installTooltips } from "./tooltip";

@@ -98,7 +98,7 @@ pub struct View {
     pub entries: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitSummary {
     pub is_repo: bool,
@@ -124,7 +124,7 @@ pub struct GitSummary {
 
 /// A sibling worktree of a workspace's repository: somewhere to switch to,
 /// whether or not a workspace has been opened on it yet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
     /// Absolute, as git reports it.
@@ -469,9 +469,11 @@ pub struct AppState {
     /// Terminal ids that printed while out of view.
     pub attention: Mutex<std::collections::HashSet<String>>,
     /// The terminal tab on screen: the active workspace's active terminal,
-    /// refreshed by `session::persist`. A chunk of output reads this instead
-    /// of the session, whose lock is held across the whole of `persist`
-    /// (PERF-04).
+    /// which is the one the Terminal window shows, refreshed by
+    /// `session::persist`. A chunk of output reads this instead of the
+    /// session, whose lock is held across the whole of `persist` (PERF-04),
+    /// and it picks the terminal whose output leaves on the short window.
+    /// Locked after `ptys` when both are held, never before it.
     pub foreground: Mutex<Option<String>>,
     pub activities: crate::agent::Activities,
     /// Repository summaries keyed by workspace id, refreshed on git changes.
@@ -486,6 +488,10 @@ pub struct AppState {
     /// Per-window geometry, restored when a window is shown again.
     pub windows: Mutex<windows::Store>,
     pub tray: tray::Tray,
+    /// The session snapshot last sent to the windows, as sent. Held from the
+    /// snapshot to the emit, so two publishes racing cannot deliver the older
+    /// one last.
+    pub published: Mutex<String>,
     pub data_dir: PathBuf,
     /// Messages for the user that have no command to return through, such as
     /// a state store that could not be read at launch.

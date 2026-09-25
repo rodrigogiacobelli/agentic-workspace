@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, events } from "../api";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
-import { Live, useLive } from "../live";
+import { Live, retainKept } from "../live";
 import { pick } from "../modes";
 import { report } from "../notice";
 import * as repo from "../repo";
@@ -14,7 +14,7 @@ import { CommitPanel } from "./CommitPanel";
 import { dropPanel, hidePanel, leafKey, normalizeAll, panelInfo, placePanel, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
 import { EditorArea, activeGroupOf, areaOf, closeTab, groupOrder } from "./EditorArea";
 import { FileTree } from "./FileTree";
-import { HistoryPanel } from "./HistoryPanel";
+import { HistoryPanel, showCommit } from "./HistoryPanel";
 import { Icon } from "./icons";
 import { ContextMenu } from "./Menu";
 import { Outline } from "./Outline";
@@ -30,7 +30,6 @@ interface Props {
   openSettings: () => void;
 }
 
-const DOCKED: DockedMode[] = ["editor", "scm"];
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /** The working area a docked mode shows: the Editor's files, or Source Control's diffs. */
@@ -83,17 +82,14 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return openInEditor(w, path, preview);
   }, [front]);
 
-  // A workspace's views are built the first time it is shown and kept from
-  // then on; the one on screen follows the watcher (decision 6).
-  const [mounted, setMounted] = useState<string[]>(() => (session.active ? [session.active] : []));
-  useEffect(() => {
-    const id = session.active;
-    if (id) setMounted((m) => (m.includes(id) ? m : [...m, id]));
-    repo.show(id);
-  }, [session.active]);
+  // The repository store follows the workspace on screen.
+  useEffect(() => { repo.show(session.active); }, [session.active]);
 
+  // What a closed tab or a removed workspace left open or kept goes with it.
   useEffect(() => {
-    editors.retain(editors.allTabIds(session.workspaces));
+    const tabs = editors.allTabIds(session.workspaces);
+    editors.retain(tabs);
+    retainKept(new Set(session.workspaces.map((w) => w.id)), tabs);
     editors.follow(session.workspaces);
   }, [session]);
 
@@ -103,9 +99,9 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
       openFile: (rel) => { if (ws) void openFile(ws, rel, true).catch(report); },
       notice: (m) => report(m),
       showCommit: (hash) => {
+        if (!ws) return;
         focusPanel("history");
-        // History may only now be mounting with its mode; the event waits for it.
-        window.setTimeout(() => window.dispatchEvent(new CustomEvent("show-commit", { detail: hash })), 300);
+        showCommit(ws.id, hash);
       },
     });
   }, [ws, focusPanel, openFile]);
@@ -131,12 +127,13 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   // document, wherever over the editor they were dropped (FIX-10).
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      const activeId = ws && ws.mode === "editor" ? editors.activeEditorId(ws) : null;
+      const w = wsRef.current;
+      const activeId = w && w.mode === "editor" ? editors.activeEditorId(w) : null;
       if (event.payload.type !== "drop" || !activeId) return;
       void editors.doc(activeId)?.insertPaths(event.payload.paths);
     });
     return () => { void unlisten.then((u) => u()); };
-  }, [ws]);
+  }, []);
 
   const openQuickOpen = async () => {
     if (!ws) return;
@@ -198,26 +195,22 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return () => window.removeEventListener("keydown", onKey, true);
   });
 
-  const alive = mounted
-    .map((id) => session.workspaces.find((w) => w.id === id))
-    .filter((w): w is Workspace => !!w);
-
   return (
     <main className="workspace-main">
-      {alive.map((w) => (
+      {ws ? (
         <WorkspaceView
-          key={w.id}
-          ws={w}
+          key={ws.id}
+          ws={ws}
           session={session}
-          visible={w.id === session.active}
           layouts={layouts}
           update={update}
           front={front}
           openFile={openFile}
           selection={selection.current}
         />
-      ))}
-      {!ws && <div className="empty">Add a folder to start.</div>}
+      ) : (
+        <div className="empty">Add a folder to start.</div>
+      )}
       {quickOpen && ws && (
         <Palette
           title="Open file"
@@ -233,7 +226,6 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
 interface ViewProps {
   ws: Workspace;
   session: Session;
-  visible: boolean;
   layouts: PanelLayouts;
   update: (mode: DockedMode, next: PanelLayout) => void;
   front: (mode: DockedMode) => void;
@@ -242,15 +234,15 @@ interface ViewProps {
 }
 
 /**
- * One workspace's docked modes. A mode is built the first time it is shown
- * and stays mounted, so switching mode — or workspace — paints rather than
- * rebuilds, and a mode comes back with its tabs, its scroll and its cursor
- * where they were. A hidden view skips rendering (`content-visibility`).
+ * The workspace on screen, in the mode it is in. Only that workspace and that
+ * mode are mounted: switching either builds the view again, and it comes back
+ * as it was left. The documents, their cursors and their undo history live in
+ * the editor registry; the lists, drafts and scroll offsets of the panels and
+ * diffs are kept in `src/live.ts`, so a rebuilt view paints from them at once
+ * and re-reads after.
  */
-function WorkspaceView({ ws, session, visible, layouts, update, front, openFile, selection }: ViewProps) {
-  const [shown, setShown] = useState<DockedMode[]>([ws.mode]);
-  useEffect(() => { setShown((s) => (s.includes(ws.mode) ? s : [...s, ws.mode])); }, [ws.mode]);
-  const [selected, setSelected] = useState<string | null>(null);
+function WorkspaceView({ ws, session, layouts, update, front, openFile, selection }: ViewProps) {
+  const [selected, setSelected] = useState<string | null>(() => selection.get(ws.id) ?? null);
   const select = (path: string | null) => { selection.set(ws.id, path); setSelected(path); };
   const { status } = repo.useRepo(ws.id);
 
@@ -293,31 +285,27 @@ function WorkspaceView({ ws, session, visible, layouts, update, front, openFile,
     }
   };
 
+  const mode = ws.mode;
+  const layout = layouts[mode];
+  const set = (next: PanelLayout) => update(mode, next);
   return (
-    <div className={`workspace-view${visible ? "" : " is-hidden"}`}>
-      {DOCKED.filter((m) => shown.includes(m)).map((mode) => {
-        const layout = layouts[mode];
-        const set = (next: PanelLayout) => update(mode, next);
-        return (
-          <div key={mode} className={`mode-view${mode === ws.mode ? "" : " is-hidden"}`}>
-            <Live.Provider value={visible && mode === ws.mode}>
-            <SplitTree<DockLeaf>
-              node={layout.root}
-              path={[]}
-              keyOf={leafKey}
-              renderLeaf={(leaf) =>
-                leaf.kind === "work" ? (
-                  <WorkLeafView ws={ws} mode={mode} leaf={leaf} layout={layout} update={set} unstaged={repo.unstagedCount(status)} openFile={openFile} render={renderPanel} />
-                ) : (
-                  <RegionView workspaceId={ws.id} mode={mode} region={leaf} layout={layout} update={set} unstaged={repo.unstagedCount(status)} render={renderPanel} />
-                )
-              }
-              onResize={(path, sizes) => set(resizeSplit(layout, path, sizes))}
-            />
-            </Live.Provider>
-          </div>
-        );
-      })}
+    <div className="workspace-view">
+      {/* Keyed by the mode: the two trees share region ids, and one must not inherit the other's panels. */}
+      <div key={mode} className="mode-view">
+        <SplitTree<DockLeaf>
+          node={layout.root}
+          path={[]}
+          keyOf={leafKey}
+          renderLeaf={(leaf) =>
+            leaf.kind === "work" ? (
+              <WorkLeafView ws={ws} mode={mode} leaf={leaf} layout={layout} update={set} unstaged={repo.unstagedCount(status)} openFile={openFile} render={renderPanel} />
+            ) : (
+              <RegionView workspaceId={ws.id} mode={mode} region={leaf} layout={layout} update={set} unstaged={repo.unstagedCount(status)} render={renderPanel} />
+            )
+          }
+          onResize={(path, sizes) => set(resizeSplit(layout, path, sizes))}
+        />
+      </div>
     </div>
   );
 }
@@ -355,7 +343,11 @@ function WorkLeafView({ ws, mode, leaf, layout, update, unstaged, openFile, rend
         panels={{
           ids: leaf.panels,
           active: leaf.active,
-          onPick: (id) => update(setActivePanel(layout, "work", id)),
+          // A panel's tab asks it for the keyboard, as a region's tab does.
+          onPick: (id) => {
+            update(setActivePanel(layout, "work", id));
+            if (id) window.dispatchEvent(new CustomEvent("panel-focus", { detail: { workspaceId: ws.id, id } }));
+          },
           onHide: (id) => update(hidePanel(layout, id)),
           unstaged,
           render,
@@ -396,9 +388,9 @@ function RegionView({ workspaceId, mode, region, layout, update, unstaged, rende
     update(placePanel(layout, panel, region.id, index));
   };
   const active = panelInfo(region.active);
-  // A tab shown once stays mounted behind the others, so a fetch still
-  // running or a list scrolled halfway survives a look at another tab.
-  const live = useLive();
+  // A tab shown once stays mounted behind the others, idling, for as long as
+  // its mode is on screen: a look at another tab and back rebuilds nothing.
+  // Once the mode goes, each panel comes back from what it kept.
   const [seen, setSeen] = useState<PanelId[]>([region.active]);
   useEffect(() => { setSeen((s) => (s.includes(region.active) ? s : [...s, region.active])); }, [region.active]);
   return (
@@ -443,7 +435,7 @@ function RegionView({ workspaceId, mode, region, layout, update, unstaged, rende
       <div className="panel-title">{active?.label}</div>
       {region.panels.filter((id) => id === region.active || seen.includes(id)).map((id) => (
         <div key={id} className="panel-slot" hidden={id !== region.active}>
-          <Live.Provider value={live && id === region.active}>{render(id)}</Live.Provider>
+          <Live.Provider value={id === region.active}>{render(id)}</Live.Provider>
         </div>
       ))}
       {zone.overlay}
