@@ -8,6 +8,8 @@ related:
 - 010-react-frontend
 - 004-central-settings-store
 - 017-modes
+- 015-views-and-citations
+- standards-linux-desktop
 - standards-code
 binds:
 - src-tauri/src/state.rs
@@ -15,6 +17,7 @@ binds:
 - src/components/SplitTree.tsx
 - src/components/dock.ts
 - src/components/EditorArea.tsx
+- src/dropRoute.ts
 ---
 
 # ADR-014: One layout tree serves the editor groups and the panels
@@ -86,6 +89,30 @@ collapse around it (DOCK-06), and it is never removed and never becomes a tab
 in a region. A panel dropped on its centre, or on its tab strip, becomes one of
 its tabs (`017-modes`).
 
+**A tree drag goes through the drop router.** A row dragged out of the
+Explorer or a custom view carries `text/uri-list` only when it is one entry,
+so that another application can take the file (TREE-15); a multi-selection
+carries none. WebKitGTK hides every custom MIME type from the drop side of a
+drag holding a `file://` URI, and wry takes such a drop and reports it as
+Tauri's native drop, after `dragend` and `dragleave` have reached the page
+(`standards-linux-desktop`). So `src/dropRoute.ts` records the drag at
+`dragstart` (`startTreeDrag`), and a target reads it from `treeDrag()`, never
+from `dataTransfer`. In its `dragover` a target calls `offerDrop` with a
+closure that captures everything the drop needs — zone, directory, point, and
+whether a Markdown centre inserts — and the first offer in an event wins, so a
+row beats the tree around it. `takeDrop` runs the last offer once, from a DOM
+`drop` or from the native drop of a session that began in this page, with
+Ctrl as GDK's keymap reports it (`windows::drop_modifiers`); `onDropEnd` tells
+every target to clear its marks. `nativeSession` tells a native session begun
+in this page from one another application started, whose files are copied in
+or inserted instead. MIME checks remain for drags that never carry a URI:
+editor tabs, panels, terminal tabs and workspaces. `useDropZone` takes tree
+drags through its `tree` option: an edge splits the group and opens the first
+file there, the centre opens it — except over a Markdown document in the
+Editor, where the centre writes a reference to each dragged entry at the drop
+point and draws no centre overlay, the document's drop cursor showing where
+it lands (`015-views-and-citations`).
+
 **Preview tabs.** `EditorTab.preview` marks a tab opened by a single click.
 `place_tab` puts a preview tab in the group's existing preview slot rather than
 appending, so a group holds one (ED-29, ED-30, ED-34). `pin_editor` clears the
@@ -151,3 +178,6 @@ permanent.
   travel with it between groups.
 - **A group holds at most one preview tab**, and a tab that moves between
   groups arrives permanent.
+- **A tree drag's target decides in its dragover.** Nothing reads component
+  state or `dataTransfer` at drop time; the drop runs the offer the last
+  dragover made.

@@ -129,12 +129,24 @@ interface RowMenuProps {
   minWidth?: number;
   /** Where the list sits under the control: at its left edge, or centred on it. */
   align?: "start" | "center";
+  /**
+   * The top-level rows are dragged into a new order: a drop puts the dragged
+   * row before the one it lands on, or last when it lands on the footer
+   * (`before` is null). `mime` names the drag, so a row accepts only its own
+   * list's.
+   */
+  reorder?: { mime: string; onMove: (id: string, before: string | null) => void };
 }
 
+/** Where a drag over the footer lands: after every row. */
+const END = Symbol("end");
+
 /** A selector whose rows carry their own rename and remove actions on the right. */
-export function RowMenu({ label, title, className, rows, footer, empty, minWidth = 280, align = "start" }: RowMenuProps) {
+export function RowMenu({ label, title, className, rows, footer, empty, minWidth = 280, align = "start", reorder }: RowMenuProps) {
   const [open, setOpen] = useState<{ x: number; y: number; width: number } | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /** The row a drag is over, which the dragged row would land before, or the end. */
+  const [over, setOver] = useState<string | typeof END | null>(null);
   const button = useRef<HTMLButtonElement>(null);
   const toggle = () => {
     if (open) { setOpen(null); return; }
@@ -149,15 +161,62 @@ export function RowMenu({ label, title, className, rows, footer, empty, minWidth
       return next;
     });
 
+  /**
+   * What makes an element take the dragged row: before the row `before`, or
+   * last when it is null. The drop is accepted on `dragenter` as well as
+   * `dragover`: WebKit fires only the enter on the motion that crosses into
+   * an element, and a refused enter refuses a release on that motion. It
+   * leaves `relatedTarget` null on drag events, so a leave into the element's
+   * own children is told apart by what is under the pointer.
+   */
+  const target = (before: string | null) => {
+    if (!reorder) return undefined;
+    const key = before ?? END;
+    const accept = (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes(reorder.mime)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      setOver(key);
+    };
+    return {
+      onDragEnter: accept,
+      onDragOver: accept,
+      onDragLeave: (e: React.DragEvent) => {
+        if (!e.currentTarget.contains(document.elementFromPoint(e.clientX, e.clientY))) setOver((o) => (o === key ? null : o));
+      },
+      // A drop moves the row and nothing more: no click follows a drag, and
+      // the list stays open on the new order.
+      onDrop: (e: React.DragEvent) => {
+        e.preventDefault();
+        setOver(null);
+        const id = e.dataTransfer.getData(reorder.mime);
+        if (id && id !== before) reorder.onMove(id, before);
+      },
+    };
+  };
+
   const renderRow = (r: Row, nested: boolean): ReactNode => {
     // A row that holds the current selection opens itself: the one thing the
     // list has to show is where you already are.
     const isOpen = expanded.has(r.id) || !!r.children?.some((c) => c.selected);
+    // A nested row belongs to the row above it and moves with it, so it
+    // neither drags nor takes a drop. The data is set because WebKitGTK
+    // starts no drag whose data transfer is empty.
+    const drag = reorder && !nested ? {
+      draggable: true,
+      onDragStart: (e: React.DragEvent) => { e.dataTransfer.setData(reorder.mime, r.id); e.dataTransfer.effectAllowed = "move"; },
+      onDragEnd: () => setOver(null),
+      ...target(r.id),
+    } : undefined;
     return (
       <Fragment key={r.id}>
         {/* No `title`: the row already prints its path, and a tooltip repeating
             it lands over the rows underneath. */}
-        <div className={`row${r.selected ? " selected" : ""}${nested ? " row-nested" : ""}`} onClick={() => { setOpen(null); r.onPick(); }}>
+        <div
+          className={`row${r.selected ? " selected" : ""}${nested ? " row-nested" : ""}${drag && over === r.id ? " drop-before" : ""}`}
+          onClick={() => { setOpen(null); r.onPick(); }}
+          {...drag}
+        >
           {!!r.children?.length && (
             <button
               className={`row-disclose${isOpen ? " open" : ""}`}
@@ -195,8 +254,8 @@ export function RowMenu({ label, title, className, rows, footer, empty, minWidth
             {rows.length === 0 && empty && <div className="palette-empty">{empty}</div>}
             {footer && (
               <>
-                <hr />
-                <button className="row-footer" onClick={() => { setOpen(null); footer.onClick(); }}>{footer.label}</button>
+                <hr className={over === END ? "drop-at" : undefined} />
+                <button className="row-footer" onClick={() => { setOpen(null); footer.onClick(); }} {...target(null)}>{footer.label}</button>
               </>
             )}
           </div>

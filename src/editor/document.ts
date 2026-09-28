@@ -104,6 +104,19 @@ export function resolveLink(notePath: string, href: string): string {
   return normalize([...dir.split("/"), ...clean.split("/")]);
 }
 
+/**
+ * The link from a note in `fromDir` to the workspace path `to`, both from the
+ * workspace root: the inverse of `resolveLink`, and the path `assets.rs`'s
+ * `relative_link` gives a stored asset.
+ */
+function relativeLink(fromDir: string, to: string): string {
+  const from = fromDir.split("/").filter((s) => s && s !== ".");
+  const target = to.split("/").filter((s) => s && s !== ".");
+  let common = 0;
+  while (common < from.length && common < target.length && from[common] === target[common]) common++;
+  return [...from.slice(common).map(() => ".."), ...target.slice(common)].join("/");
+}
+
 export class Doc {
   readonly source: EditorView;
   rich: EditorView | null = null;
@@ -812,6 +825,38 @@ export class Doc {
     view.focus();
   }
 
+  /**
+   * Writes a reference to each workspace path where it was dropped, at (x, y)
+   * in whichever view is there (TREE-16): `@path` under the citation setting,
+   * else a link from this note, as a pasted file is written. A folder's path
+   * ends in `/`. Several go one per line, with a space before them when the
+   * point is not after whitespace, as a citation's rule has it, and one after
+   * them when the point is inside a word.
+   */
+  insertReference(paths: string[], x: number, y: number): void {
+    const under = document.elementFromPoint(x, y)?.closest<HTMLElement>(".cm-editor");
+    const found = under ? EditorView.findFromDOM(under) : null;
+    const view = found && (found === this.source || found === this.rich) ? found : this.active();
+    let pos = view.posAtCoords({ x, y }, false);
+    const before = pos > view.state.doc.lineAt(pos).from ? view.state.doc.sliceString(pos - 1, pos) : "";
+    const dir = this.path.includes("/") ? this.path.slice(0, this.path.lastIndexOf("/")) : "";
+    paths.forEach((path, i) => {
+      const gap = i > 0 ? "\n" : before && !/\s/.test(before) ? " " : "";
+      if (gap) {
+        view.dispatch({ changes: { from: pos, insert: gap } });
+        pos += gap.length;
+      }
+      const folder = path.endsWith("/");
+      const link = relativeLink(dir, path);
+      const name = path.split("/").filter(Boolean).pop() ?? path;
+      pos = this.insertLink(view, pos, { path, link: folder ? `${link || "."}/` : link, bytes: 0 }, name);
+    });
+    // A citation runs to the next whitespace.
+    const after = view.state.doc.sliceString(pos, pos + 1);
+    if (after && !/\s/.test(after)) view.dispatch({ changes: { from: pos, insert: " " }, selection: { anchor: pos } });
+    view.focus();
+  }
+
   // --- Assets ---------------------------------------------------------------
 
   private onPaste(e: ClipboardEvent, view: EditorView): boolean {
@@ -855,11 +900,15 @@ export class Doc {
 
   /** The stored asset as text: a note-relative markdown link, or a root-relative citation (CITE-03). */
   private insertLink(view: EditorView, pos: number, stored: StoredAsset, name: string): number {
-    const label = name.replace(/\.[^.]+$/, "");
-    const kind = mediaKind(stored.link);
+    // A folder keeps its whole name, and a leading dot starts no extension.
+    const label = stored.link.endsWith("/") ? name : name.replace(/(.)\.[^.]+$/, "$1");
+    // A space would end the link. It is encoded here, once, so a pasted file,
+    // one dropped from the file manager and one dragged from a tree agree.
+    const link = stored.link.replace(/ /g, "%20");
+    const kind = mediaKind(link);
     const insert = settings.get()?.assetLinks === "citation"
       ? `@${stored.path}`
-      : kind === "file" ? `[${label}](${stored.link})` : `![${label}](${stored.link})`;
+      : kind === "file" ? `[${label}](${link})` : `![${label}](${link})`;
     view.dispatch({ changes: { from: pos, insert }, selection: { anchor: pos + insert.length } });
     return pos + insert.length;
   }

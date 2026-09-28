@@ -73,7 +73,12 @@ disappears while the process lives on in the tray (TRAY-01, TRAY-07).
 **Show Agentic Workspace** from an installed build, **Show Agentic Workspace
 (dev)** from a development one — then one checked entry per window, one checked
 entry per workspace with a dot against any background workspace wanting
-attention, and **Quit** (TRAY-03, TRAY-04, TRAY-06). `tray::icon`
+attention, and **Quit** (TRAY-03, TRAY-04, TRAY-06). The workspaces are listed
+as the switcher lists them: each workspace that is not a linked worktree, in
+session order, followed by the open worktrees of its repository
+(`Workspace.worktree_of`), each prefixed `⑂ `. Dragging a top-level row in
+the switcher reorders the workspaces, its worktrees moving with it, and
+`reorder_workspaces` stores that order in the session (WS-11). `tray::icon`
 paints an orange dot into the corner of the application icon while a background
 workspace wants attention (TRAY-05). Quit and the last-window close both route
 through the Workspace window, which owns the unsaved-buffer prompt; it is the

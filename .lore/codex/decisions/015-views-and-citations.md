@@ -11,6 +11,7 @@ related:
 binds:
 - src/editor/citation.ts
 - src/components/FileTree.tsx
+- src/editor/document.ts
 ---
 
 # ADR-015: Views are flat shortcuts and citations are root-relative
@@ -78,9 +79,15 @@ so moving the cursor into it shows the `@path` that is in the file (CITE-09).
 
 **One application-wide setting decides what paste and drop write.**
 `asset_links` in the settings is `markdown` or `citation` (CITE-03). It decides
-the text `Doc.insertLink` writes after an asset is stored, and nothing else:
-`save_asset` and `import_asset` put the file in the workspace's clipboard
-folder either way (CITE-04). *Quote to AI* in Explorer or Custom writes a citation
+the text `Doc.insertLink` writes, and nothing else: after an asset is stored,
+where `save_asset` and `import_asset` put the file in the workspace's
+clipboard folder either way (CITE-04); and for an Explorer or view entry
+dropped on the centre of a Markdown document (TREE-16), where
+`Doc.insertReference` writes, at the drop point, `@docs/spec.md` — `@docs/`
+for a folder — under `citation`, and a link relative to the note —
+`[spec](docs/spec.md)`, `[docs](docs/)` — under `markdown`, one per line for
+several entries. A dropped entry is already in the workspace, so nothing is
+copied. *Quote to AI* in Explorer or Custom writes a citation
 whatever the setting says, for a tree row or a view row alike (CITE-05,
 CITE-12), one per line in tree order for a `Ctrl`-click selection of several
 (CITE-13).
@@ -140,4 +147,7 @@ CITE-12), one per line in tree order for a `Ctrl`-click selection of several
   no parent segment, no other workspace.
 - **The link setting never moves a file.** A stored asset lands in the
   workspace's clipboard folder whichever form the document gets.
+- **Every citation the application writes is `@path`**, never the older
+  `@/path`: *Quote to AI*, a pasted or dropped asset, and a dropped tree entry
+  alike.
 - **Quote to AI writes a citation**, whatever `asset_links` says.

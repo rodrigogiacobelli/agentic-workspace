@@ -418,6 +418,15 @@ pub fn remove_workspace(app: AppHandle, state: tauri::State<AppState>, id: Strin
     result
 }
 
+/// Reorders the workspace list (WS-11). The frontend names every id, each
+/// top-level row followed by its worktrees, so the switcher's grouping and
+/// the session's order stay one order.
+#[tauri::command]
+pub fn reorder_workspaces(app: AppHandle, state: tauri::State<AppState>, ids: Vec<String>) {
+    reorder(&mut state.session.lock().workspaces, &ids, |w| &w.id);
+    publish(&app);
+}
+
 #[tauri::command]
 pub fn rename_workspace(app: AppHandle, state: tauri::State<AppState>, id: String, name: String) -> Result<(), String> {
     let name = name.trim().to_string();

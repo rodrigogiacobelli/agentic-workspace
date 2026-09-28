@@ -12,6 +12,9 @@ import { Prompt } from "./Prompt";
 
 export { report };
 
+/** A workspace row being dragged in the switcher; the data is its id. */
+const WS_MIME = "application/x-agentic-workspace";
+
 interface Props {
   session: Session;
   role: WindowRole;
@@ -80,63 +83,64 @@ export function Switcher({ session, role, onSettings }: Props) {
   });
 
   /**
-   * One row per workspace, with a repository's main worktree disclosing the
-   * others git lists beside it. The list is git's own and is refreshed with
-   * the branch, so a worktree added or removed outside the application
-   * appears and goes without being added or removed here.
+   * One row per workspace, a repository's disclosing its worktrees: first the
+   * open ones, in the session's order — the backend's `worktreeOf` says
+   * which are its, and the tray groups by the same field — then the others git
+   * lists beside it. That list is git's own and is refreshed with the branch,
+   * so a worktree added or removed outside the application appears and goes
+   * without being added or removed here.
    *
-   * Only a repository's own root discloses — git's `is_worktree` says which
-   * one that is. Letting a linked worktree disclose too would have two of
-   * them nesting each other, and the whole list would disappear.
+   * Only a repository's own root lists unopened worktrees — git's
+   * `is_worktree` says which one that is. Letting a linked worktree list them
+   * too would have it offer its own repository as one of its worktrees.
    */
   const workspaceOn = (path: string) => session.workspaces.find((w) => w.path === path);
   const isMainWorktree = (w: Workspace) => w.git?.isRepo === true && !w.git.isWorktree;
-  const nested = new Set(
-    session.workspaces
-      .filter(isMainWorktree)
-      .flatMap((w) => (w.git?.worktrees ?? []).map((t) => workspaceOn(t.path)?.id))
-      .filter((id): id is string => !!id),
-  );
-  const rows: Row[] = session.workspaces
-    .filter((w) => !nested.has(w.id))
-    .map((w) => {
-      if (!isMainWorktree(w)) return row(w);
-      return row(
-        w,
-        (w.git?.worktrees ?? []).map((t) => {
-          const already = workspaceOn(t.path);
-          const branch = t.branch ? ` · ${t.branch}` : "";
-          return already
-            ? {
-                // Naming labels the workspace, which is this row's to do.
-                // Removing is not: under its repository a worktree is git's,
-                // and Source Control's Worktrees panel is where it is deleted —
-                // with the warning about running processes that BR-10 wants.
-                ...row(already),
-                onRemove: undefined,
-                id: `${w.id}:${t.path}`,
-                name: `⑂ ${already.name}${branch}${already.available ? "" : " (unavailable)"}`,
-              }
-            : {
-                id: `${w.id}:${t.path}`,
-                name: `⑂ ${t.name}${branch}`,
-                detail: t.path,
-                onPick: () => void api.addWorkspace(t.path, undefined, true).catch(report),
-                // A worktree nothing is open on has no name of its own yet —
-                // the row shows git's. Naming it is what opens it, so the row
-                // offers the same control as one already open: the row itself
-                // opens it under the directory's name, this under a chosen
-                // one (BR-08).
-                renameLabel: "Open as workspace…",
-                onRename: () => setPrompt({
-                  title: "Open this worktree as…",
-                  initial: t.name,
-                  submit: (name) => void api.addWorkspace(t.path, name, true).catch(report),
-                }),
-              };
+  const tops = session.workspaces.filter((w) => !w.worktreeOf);
+  const worktreesOf = (id: string) => session.workspaces.filter((w) => w.worktreeOf === id);
+  const rows: Row[] = tops.map((w) => row(w, [
+    ...worktreesOf(w.id).map((c): Row => ({
+      // Naming labels the workspace, which is this row's to do. Removing is
+      // not: under its repository a worktree is git's, and Source Control's
+      // Worktrees panel is where it is deleted — with the warning about
+      // running processes that BR-10 wants.
+      ...row(c),
+      onRemove: undefined,
+      id: `${w.id}:${c.path}`,
+      name: `⑂ ${c.name}${c.git?.branch && !c.git.detached ? ` · ${c.git.branch}` : ""}${c.available ? "" : " (unavailable)"}`,
+    })),
+    ...(isMainWorktree(w) ? w.git?.worktrees ?? [] : [])
+      .filter((t) => !workspaceOn(t.path))
+      .map((t): Row => ({
+        id: `${w.id}:${t.path}`,
+        name: `⑂ ${t.name}${t.branch ? ` · ${t.branch}` : ""}`,
+        detail: t.path,
+        onPick: () => void api.addWorkspace(t.path, undefined, true).catch(report),
+        // A worktree nothing is open on has no name of its own yet — the row
+        // shows git's. Naming it is what opens it, so the row offers the same
+        // control as one already open: the row itself opens it under the
+        // directory's name, this under a chosen one (BR-08).
+        renameLabel: "Open as workspace…",
+        onRename: () => setPrompt({
+          title: "Open this worktree as…",
+          initial: t.name,
+          submit: (name) => void api.addWorkspace(t.path, name, true).catch(report),
         }),
-      );
-    });
+      })),
+  ]));
+
+  /**
+   * Puts a top-level row before another, or last (WS-11). The whole order
+   * goes to the backend, each workspace followed by its open worktrees: an id
+   * left out would be moved to the end, and the tray lists the same order.
+   */
+  const move = (id: string, before: string | null) => {
+    const order = tops.map((w) => w.id).filter((t) => t !== id);
+    const at = before === null ? order.length : order.indexOf(before);
+    if (at < 0 || !tops.some((w) => w.id === id)) return;
+    order.splice(at, 0, id);
+    void api.reorderWorkspaces(order.flatMap((t) => [t, ...worktreesOf(t).map((c) => c.id)])).catch(report);
+  };
 
   return (
     <>
@@ -158,6 +162,7 @@ export function Switcher({ session, role, onSettings }: Props) {
             title={active?.path}
             minWidth={340}
             rows={rows}
+            reorder={{ mime: WS_MIME, onMove: move }}
             footer={{ label: "＋ Add folder…", onClick: () => void addFolder() }}
             empty="No workspaces yet"
           />

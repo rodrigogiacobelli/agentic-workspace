@@ -8,8 +8,9 @@ without losing the one you just switched away from.
 > editor, git with worktrees, the two agent signals, app-drawn window chrome
 > over a tray-resident process, draggable editor splits and panels, custom
 > views, path citations, the typing helpers, the Editor, Source Control and
-> Terminal modes, an SSH key and commit identity per workspace, and change
-> marks in the editor run. `.lore/codex/` holds the decisions behind it.
+> Terminal modes, an SSH key and commit identity per workspace, drag and drop
+> in the Explorer, and change marks in the editor run. `.lore/codex/` holds the
+> decisions behind it.
 
 ---
 
@@ -125,7 +126,10 @@ rendered one included.
 *Worktrees* and *Tags*. Diffs open side by side or inline in its working area,
 with hunk staging; blame stays in the Editor. Worktrees matter because a project
 here is often *itself* a worktree of another one — and creating one offers to
-open it as a new workspace.
+open it as a new workspace, while removing one offers to delete its branch and
+says how many commits only that branch holds. In the switcher and the tray a
+worktree sits under its repository; drag a repository's row to reorder the
+list, and its worktrees move with it.
 
 **A key and an identity per workspace.** Settings → *Credentials* lists the
 SSH keys you add from `~/.ssh` and the commit identities you define; a
@@ -227,6 +231,8 @@ under KDE, and the four failures that stop it before a window appears.
 | `Ctrl+\` / `Ctrl+Alt+\` | workspace | Split the working area / move the tab to the next group |
 | `Ctrl+,` | both | Settings |
 | `Ctrl+Alt+Shift+C` | workspace | Copy the selected path, relative to the workspace |
+| `Ctrl+Z` | Explorer | Undo the last move made by dragging or by cut and paste |
+| `Ctrl` while dropping | Explorer | Copy the dragged files instead of moving them |
 
 A panel hotkey selects and focuses that panel wherever you have docked it,
 switches to its mode, and brings it back if you closed it.
@@ -270,7 +276,14 @@ row renames a workspace; the path underneath does not change.
 
 Double-click a terminal tab to rename it; drag tabs to reorder them; right-click
 one to restart its shell. Right-click in the file tree for file operations, for
-*Quote to AI*, and for *Send to* a view; deleting moves to the trash through GIO.
+*Quote to AI*, for *Send to* a view, and on a folder for *Open terminal here*;
+deleting moves to the trash through GIO.
+
+Drag files and folders in the Explorer onto a folder to move them; a name
+already taken asks whether to replace it, keep both or cancel. Drop files from
+your file manager onto a folder to copy them in, drag a single file out to
+another application, or drop an entry on the middle of a Markdown document to
+write a link or an `@` citation to it where it lands.
 
 Settings open as a column of pages — General, Editor, Terminal, Panels, Agent
 signals, Credentials, and one for the active workspace — and reopen on the page

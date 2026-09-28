@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 const FILE: &str = "windows.json";
@@ -187,6 +188,46 @@ pub fn show_window_menu(window: WebviewWindow, x: f64, y: f64) -> Result<(), Str
     } else {
         Err("the compositor did not open a window menu".into())
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropModifiers {
+    pub ctrl: bool,
+}
+
+/// Whether Ctrl is down now, from GDK's keymap. GDK is called on the main
+/// thread only.
+fn ctrl_down() -> Result<bool, String> {
+    let display = gtk::gdk::Display::default().ok_or("no display")?;
+    let keymap = gtk::gdk::Keymap::for_display(&display).ok_or("no keymap for the display")?;
+    Ok(keymap.modifier_state() & gtk::gdk::ModifierType::CONTROL_MASK.bits() != 0)
+}
+
+/// Records whether Ctrl was down at a drop the webview handed to Tauri
+/// rather than to the page. The page hears of it later, over an event, by
+/// which time the key may be up. Called from the window event handler, on the
+/// main thread.
+pub fn capture_drop(app: &AppHandle) {
+    if let Ok(ctrl) = ctrl_down() {
+        *app.state::<AppState>().dropped.lock() = Some((ctrl, Instant::now()));
+    }
+}
+
+/// Whether a drop in the tree copies rather than moves (TREE-11). For a
+/// `native` drop, one Tauri took, Ctrl's state captured at it, taken once and
+/// only if under two seconds old; else, and for a DOM drop, Ctrl's state now.
+/// A drag event's `ctrlKey` is stale in WebKitGTK, and under X11 a Ctrl
+/// pressed mid-drag never reaches the page; GDK's keymap follows the physical
+/// key under both backends. Sync, so that GDK is called on the main thread.
+#[tauri::command]
+pub fn drop_modifiers(state: tauri::State<AppState>, native: bool) -> Result<DropModifiers, String> {
+    let captured = if native { state.dropped.lock().take() } else { None };
+    let ctrl = match captured.filter(|(_, at)| at.elapsed() < Duration::from_secs(2)) {
+        Some((ctrl, _)) => ctrl,
+        None => ctrl_down()?,
+    };
+    Ok(DropModifiers { ctrl })
 }
 
 pub fn save(app: &AppHandle) {

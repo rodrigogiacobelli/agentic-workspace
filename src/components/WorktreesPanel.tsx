@@ -2,13 +2,23 @@ import { useCallback, useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { useChanged, useKept, useKeptScroll } from "../live";
-import { report } from "../notice";
+import { notify, report } from "../notice";
 import * as repo from "../repo";
-import type { Session, Workspace, WorktreeEntry } from "../types";
+import type { Session, Unmerged, Workspace, WorktreeEntry } from "../types";
+import { Confirm } from "./Confirm";
 import { Icon } from "./icons";
 import { Prompt } from "./Prompt";
 
 type Step = { kind: "path" } | { kind: "branch"; path: string };
+
+/** A worktree removal waiting on its confirmation, with what was found before asking. */
+interface Removal {
+  wt: WorktreeEntry;
+  force: boolean;
+  message: string;
+  /** The branch the confirmation offers to delete too, and the commits it counted as lost with it. */
+  branch: { name: string; unique: Unmerged; detail?: string } | null;
+}
 
 /** `lore (wt: refactor)`: the parent project's own name, never a worktree's, then the branch (BR-08). */
 const worktreeName = (ws: Workspace, label: string) => `${ws.name.replace(/ \(wt: .*\)$/, "")} (wt: ${label})`;
@@ -34,6 +44,7 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
   const isRepo = info?.isRepo === true;
   const [list, setList] = useKept<WorktreeEntry[] | null>(`${ws.id}:worktrees:list`, null);
   const [step, setStep] = useState<Step | null>(null);
+  const [removal, setRemoval] = useState<Removal | null>(null);
   const scroller = useKeptScroll<HTMLDivElement>(`${ws.id}:worktrees:scroll`, list !== null);
 
   const load = useCallback(() => api.gitWorktrees(ws.id).then(setList).catch(report), [ws.id, setList]);
@@ -51,8 +62,6 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
   const openAsWorkspace = (wt: WorktreeEntry) =>
     void api.addWorkspace(wt.path, worktreeName(ws, wt.branch ?? wt.head ?? "detached"), true).catch(report);
 
-  // The workspace, its processes and the worktree go together, and git's
-  // refusal is surfaced rather than overridden (BR-10).
   const remove = async (wt: WorktreeEntry) => {
     const open = workspaceAt(wt.path);
     const dirty = await api.gitWorktreeDirty(wt.path).catch(() => []);
@@ -61,13 +70,41 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
       parts.push(`The workspace "${open.name}" is open in it${open.terminals.length ? ` with ${open.terminals.length} running terminal${open.terminals.length === 1 ? "" : "s"}` : ""}; it will be removed and its processes terminated.`);
     }
     if (dirty.length) parts.push(`It has ${dirty.length} uncommitted change${dirty.length === 1 ? "" : "s"}:\n${dirty.slice(0, 10).join("\n")}${dirty.length > 10 ? "\n…" : ""}`);
-    const yes = await ask(`Delete the worktree at ${wt.path}?\n\n${parts.join("\n\n")}`.trim(), {
-      title: "Delete worktree", kind: "warning", okLabel: "Delete", cancelLabel: "Keep",
+    // The branch goes too only if nothing else has it checked out — git would
+    // refuse — and only once git has said what deleting it loses: a count it
+    // could not give leaves the branch out of the question (GIT-22).
+    const name = wt.branch && !list?.some((o) => o.path !== wt.path && o.branch === wt.branch) ? wt.branch : null;
+    const unique = name ? await api.gitUnmergedCommits(ws.id, name).catch(() => null) : null;
+    setRemoval({
+      wt,
+      force: dirty.length > 0,
+      message: `Delete the worktree at ${wt.path}?\n\n${parts.join("\n\n")}`.trim(),
+      branch: name && unique
+        ? { name, unique, detail: unique.count > 0 ? `${name} has ${unique.count} commit${unique.count === 1 ? "" : "s"} no other branch holds. Deleting it loses them.` : undefined }
+        : null,
     });
-    if (!yes) return;
+  };
+
+  // The workspace, its processes and the worktree go together, and git's
+  // refusal is surfaced rather than overridden (BR-10). The workspace is the
+  // one open on the worktree now: the Terminal window's switcher can open or
+  // remove one while the question is up. The branch is deleted only once the
+  // worktree is gone, and forced, but only over the commits the confirmation
+  // counted: a shell in the worktree kept running while it was asked, and a
+  // commit made meanwhile keeps the branch.
+  const removeConfirmed = async ({ wt, force, branch }: Removal, withBranch: boolean) => {
     try {
+      const open = workspaceAt(wt.path);
       if (open) await api.removeWorkspace(open.id);
-      await api.gitRemoveWorktree(ws.id, wt.path, dirty.length > 0);
+      await api.gitRemoveWorktree(ws.id, wt.path, force);
+      if (withBranch && branch) {
+        const now = await api.gitUnmergedCommits(ws.id, branch.name).catch(() => null);
+        if (now && now.count <= branch.unique.count && now.commits.every((c) => branch.unique.commits.includes(c))) {
+          await api.gitDeleteBranch(ws.id, branch.name, true);
+        } else {
+          report(`The branch ${branch.name} is kept: ${now ? "it holds commits made after the confirmation" : "git could not count its commits again"}.`);
+        }
+      }
     } catch (e) {
       report(e);
     }
@@ -78,7 +115,7 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
     const would = await api.gitPruneWorktrees(ws.id, true).catch((e) => { report(e); return null; });
     if (!would) return;
     if (would.length === 0) {
-      window.dispatchEvent(new CustomEvent("app-notice", { detail: "Nothing to prune." }));
+      notify("Nothing to prune.");
       return;
     }
     const yes = await ask(`Prune these worktree entries?\n\n${would.join("\n")}`, { title: "Prune worktrees", okLabel: "Prune", cancelLabel: "Keep" });
@@ -138,6 +175,17 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
       )}
       {step?.kind === "branch" && (
         <Prompt title="Branch (existing, or a new one to create)" onClose={() => setStep(null)} onSubmit={(branch) => void create(step.path, branch)} />
+      )}
+      {removal && (
+        <Confirm
+          key={removal.wt.path}
+          title="Delete worktree"
+          message={removal.message}
+          checkbox={removal.branch ? { label: `Also delete branch ${removal.branch.name}`, detail: removal.branch.detail } : undefined}
+          ok="Delete"
+          cancel="Keep"
+          onClose={(ok, checked) => { setRemoval(null); if (ok) void removeConfirmed(removal, checked); }}
+        />
       )}
     </div>
   );

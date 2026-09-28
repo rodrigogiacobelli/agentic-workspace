@@ -498,12 +498,7 @@ pub fn git_apply_hunk(state: tauri::State<AppState>, workspace_id: String, patch
 pub fn git_discard(state: tauri::State<AppState>, workspace_id: String, path: String, untracked: bool) -> Result<(), String> {
     let repo = repo_of(&state, &workspace_id).map_err(err)?;
     if untracked {
-        let abs = repo.root.join(&path);
-        let output = Command::new("gio").arg("trash").arg(&abs).output().map_err(|e| e.to_string())?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-        return Ok(());
+        return tree::trash(&repo.root.join(&path)).map_err(err);
     }
     repo.git(&["checkout", "--", &path]).map(|_| ()).map_err(err)
 }
@@ -835,17 +830,36 @@ pub fn git_delete_branch(state: tauri::State<AppState>, workspace_id: String, na
     repo.git(&["branch", if force { "-D" } else { "-d" }, &name]).map_err(err)
 }
 
-/// Commits on `name` that no other branch holds, for a delete confirmation.
+/// What a branch holds that no other branch does: how many commits, and the
+/// first twenty of them as `<short hash> <subject>`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unmerged {
+    pub count: usize,
+    pub commits: Vec<String>,
+}
+
+/// Commits on `name` that no other branch holds, local or remote, for a
+/// delete confirmation.
 #[tauri::command(async)]
-pub fn git_unmerged_commits(state: tauri::State<AppState>, workspace_id: String, name: String) -> Result<Vec<String>, String> {
+pub fn git_unmerged_commits(state: tauri::State<AppState>, workspace_id: String, name: String) -> Result<Unmerged, String> {
     let repo = repo_of(&state, &workspace_id).map_err(err)?;
-    let out = repo.git(&["log", "--format=%h %s", "--max-count=20", &name, "--not", "--all", "--"]).unwrap_or_default();
-    let out = if out.trim().is_empty() {
-        repo.git(&["log", "--format=%h %s", "--max-count=20", &format!("HEAD..{name}")]).unwrap_or_default()
-    } else {
-        out
-    };
-    Ok(out.lines().map(str::to_string).collect())
+    unmerged(&repo.root, &name).map_err(err)
+}
+
+/// `--exclude` takes the pattern `--branches` matches against, which is the
+/// bare name: `refs/heads/<name>` excludes nothing, the branch then hides its
+/// own commits, and the answer is always none.
+fn unmerged(root: &Path, name: &str) -> Result<Unmerged> {
+    // The full ref, and `--` after it: a bare name loses to a same-named tag
+    // and is ambiguous beside a same-named path. The exclude stays bare,
+    // because `--branches` matches it against short names.
+    let rev = format!("refs/heads/{name}");
+    let exclude = format!("--exclude={name}");
+    let count = git(root, &["rev-list", "--count", &rev, "--not", &exclude, "--branches", "--remotes", "--"])?;
+    let count = count.trim().parse().with_context(|| format!("counting the commits only {name} holds"))?;
+    let log = git(root, &["log", "--format=%h%x20%s", "--max-count=20", &rev, "--not", &exclude, "--branches", "--remotes", "--"])?;
+    Ok(Unmerged { count, commits: log.lines().map(str::to_string).collect() })
 }
 
 // --- Stashes ----------------------------------------------------------------
@@ -1154,7 +1168,7 @@ fn other_credentials(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{decorations, other_credentials, RefName};
+    use super::{decorations, git, other_credentials, unmerged, RefName};
 
     fn r(name: &str, kind: &str) -> RefName {
         RefName { name: name.into(), kind: kind.into() }
@@ -1182,6 +1196,51 @@ mod tests {
         }
         for url in ["git@github.com:x/y.git", "github.com:x/y", "ssh://git@h:22/y", "git+ssh://h/y", "/srv/y.git", "../y.git", "./a:b", "file:///srv/y", "git://h/y", ""] {
             assert!(!other_credentials(url), "{url}");
+        }
+    }
+
+    /// Needs git and writes a scratch repository under the temporary directory.
+    #[test]
+    #[ignore]
+    fn a_branch_counts_only_the_commits_no_other_branch_holds() {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch = Scratch(std::env::temp_dir().join(format!("agentic-workspace-unmerged-{}", std::process::id())));
+        let root = scratch.0.clone();
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| git(&root, args).unwrap();
+        let commit = |message: &str| {
+            run(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "--no-verify", "-m", message])
+        };
+        run(&["init", "-q", "-b", "main"]);
+        commit("base");
+        run(&["checkout", "-q", "-b", "feature/x"]);
+        commit("shared");
+        // `other` holds the first commit on feature/x, so only the two after
+        // it are feature/x's alone.
+        run(&["branch", "other"]);
+        commit("one");
+        commit("two");
+        let result = unmerged(&root, "feature/x").unwrap();
+        assert_eq!(result.count, 2);
+        assert_eq!(result.commits.len(), 2);
+        assert!(result.commits[0].ends_with(" two") && result.commits[1].ends_with(" one"));
+        // A branch beside a same-named directory, and one behind a same-named
+        // tag on main, each still count their own commit.
+        run(&["checkout", "-q", "main"]);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "a").unwrap();
+        run(&["add", "docs"]);
+        commit("docs dir");
+        run(&["tag", "v2"]);
+        for name in ["docs", "v2"] {
+            run(&["checkout", "-q", "-b", name, "main"]);
+            commit(name);
+            assert_eq!(unmerged(&root, name).unwrap().count, 1, "{name}");
         }
     }
 }

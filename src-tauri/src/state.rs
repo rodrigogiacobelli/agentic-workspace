@@ -505,6 +505,9 @@ pub struct AppState {
     /// Messages for the user that have no command to return through, such as
     /// a state store that could not be read at launch.
     pub notices: Mutex<Vec<String>>,
+    /// Whether Ctrl was down at the last drop the webview handed to Tauri,
+    /// and when: see `windows::drop_modifiers`.
+    pub dropped: Mutex<Option<(bool, std::time::Instant)>>,
     /// The application's own git processes while they run, pid to workspace
     /// id and whether the main thread started it: how the askpass relay tells
     /// a prompt from Source Control apart from one of any other process, and

@@ -87,12 +87,19 @@ export function BranchesPanel({ ws, session }: { ws: Workspace; session: Session
     changed();
   };
 
+  // Forced whenever git could say which commits only this branch holds: the
+  // prompt lists them, and a count of none means other refs hold every one,
+  // so `-D` loses nothing. When git could not say, the plain delete leaves it
+  // to refuse an unmerged branch.
   const remove = async (name: string) => {
-    const unmerged = await api.gitUnmergedCommits(ws.id, name).catch(() => []);
-    const detail = unmerged.length ? `\n\nThese commits would be lost:\n${unmerged.join("\n")}` : "";
-    const yes = await ask(`Delete branch ${name}?${detail}`, { title: "Delete branch", kind: "warning", okLabel: unmerged.length ? "Force delete" : "Delete", cancelLabel: "Keep" });
+    const unmerged = await api.gitUnmergedCommits(ws.id, name).catch(() => null);
+    const count = unmerged?.count ?? 0;
+    const commits = unmerged?.commits ?? [];
+    const more = count > commits.length ? `\n…and ${count - commits.length} more` : "";
+    const detail = count > 0 ? `\n\nThese commits would be lost:\n${commits.join("\n")}${more}` : "";
+    const yes = await ask(`Delete branch ${name}?${detail}`, { title: "Delete branch", kind: "warning", okLabel: count > 0 ? "Force delete" : "Delete", cancelLabel: "Keep" });
     if (!yes) return;
-    await api.gitDeleteBranch(ws.id, name, unmerged.length > 0).catch(report);
+    await api.gitDeleteBranch(ws.id, name, unmerged !== null).catch(report);
     changed();
   };
 

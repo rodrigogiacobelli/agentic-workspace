@@ -52,7 +52,7 @@ way.
 
 The one height reveal is a directory's children in the file tree, played for
 a directory opened while the tree is on screen — from the tree, a
-breadcrumb's *Reveal in Explorer*, a paste or a new folder — and never
+breadcrumb's *Reveal in Explorer*, a paste, a drop or a new folder — and never
 for the open directories of a
 tree built when its workspace or mode comes back (`.tree-branch.open.unfold`). The grid
 wrapper that carries it clips its child downwards only, with
@@ -66,9 +66,9 @@ rendered surface leaves it the moment its condition turns false. `useDismiss`
 in `src/motion.ts` keeps it for the length of its exit and then calls the
 parent's close, reading the duration from the token so reduced motion shortens
 that too. `ContextMenu`, `Palette`, `Prompt`, `SettingsDialog` with its tab
-pages, `CredentialPrompt`, the terminal's search bar and each toast — the
-error notice and the information notice that leaves on its own after 3.5
-seconds — take their dismissal from it.
+pages, `CredentialPrompt`, `Confirm`, the terminal's search bar and each
+toast — the error notice and the information notice that leaves on its own
+after 3.5 seconds — take their dismissal from it.
 
 Three things the hook settles that a timer alone does not. A surface shown
 again while its exit is still playing has been reused, so its pending close is

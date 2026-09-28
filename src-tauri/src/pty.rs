@@ -449,15 +449,22 @@ fn with_live<T>(state: &AppState, id: &str, f: impl FnOnce(&mut Live) -> Result<
     f(live).map_err(|e| format!("{e:#}"))
 }
 
+/// Opens a terminal tab in the workspace's root, or in `cwd`, a directory
+/// relative to it (TREE-17).
 #[tauri::command]
-pub fn terminal_open(app: AppHandle, state: tauri::State<AppState>, workspace_id: String) -> Result<String, String> {
+pub fn terminal_open(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, cwd: Option<String>) -> Result<String, String> {
     let id = crate::state::new_id();
+    let dir = cwd
+        .map(|rel| crate::tree::resolve(&state, &workspace_id, &rel).map(|(_, abs)| abs))
+        .transpose()
+        .map_err(|e| format!("{e:#}"))?;
     {
         let mut session = state.session.lock();
         let ws = session
             .workspace_mut(&workspace_id)
             .ok_or_else(|| format!("no workspace {workspace_id}"))?;
-        ws.terminals.push(TerminalTab { id: id.clone(), name: None, cwd: ws.path.clone(), attention: false });
+        let cwd = dir.unwrap_or_else(|| ws.path.clone());
+        ws.terminals.push(TerminalTab { id: id.clone(), name: None, cwd, attention: false });
         ws.active_terminal = Some(id.clone());
     }
     ensure_live(&app, &workspace_id).map_err(|e| format!("{e:#}"))?;

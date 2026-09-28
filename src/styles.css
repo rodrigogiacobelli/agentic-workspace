@@ -204,6 +204,14 @@ button.row-disclose:hover { color: var(--fg); background: transparent; }
 .row-actions button { display: flex; align-items: center; justify-content: center; width: 22px; height: 20px; padding: 0; color: var(--fg-dim); }
 .row-actions button:hover { color: var(--fg); background: var(--bg); }
 .row-footer { text-align: left; }
+
+
+/* A dragged workspace lands before the row it is dropped on (WS-11), marked as
+   a tree row is. A still frame: `box-shadow` is not animated. */
+.row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+/* Dropped on the footer, it lands last: the rule over the footer takes the
+   same 2 px line, the pixel above drawn by a shadow so nothing moves. */
+.menu hr.drop-at { border-top-color: var(--accent); box-shadow: 0 -1px 0 var(--accent); }
 .win-controls { display: flex; align-self: stretch; margin-left: 4px; }
 .win-controls button { width: 40px; height: 30px; padding: 0; border-radius: 0; color: var(--fg-dim); font-size: 12px; }
 .win-controls button:hover { color: var(--fg); }
@@ -460,6 +468,13 @@ main { flex: 1; display: flex; min-height: 0; }
 .tree-row:hover { background: var(--bg-hover); }
 .tree-row.selected { background: var(--selection); }
 .tree-row.ignored { color: var(--fg-faint); }
+
+
+/* The folder a dragged entry would land in (TREE-10, TREE-14): its row, or
+   the whole Explorer for the root. Tinted as a drop zone is; the rings are
+   still frames, as a drop zone's border is. */
+.tree-row.drop-into { background: color-mix(in srgb, var(--accent) 22%, transparent); box-shadow: inset 0 0 0 1px var(--accent); }
+.tree.drop-into, .tree.drop-into:focus-visible { background: color-mix(in srgb, var(--accent) 10%, transparent); outline: 2px solid var(--accent); outline-offset: -2px; }
 .tree-chevron { width: 12px; color: var(--fg-dim); font-size: 11px; text-align: center; flex: none; }
 .tree-loading { padding: 8px; color: var(--fg-dim); }
 
@@ -960,6 +975,21 @@ main { flex: 1; display: flex; min-height: 0; }
 .credential-prompt input { width: 100%; margin: 4px 0; }
 .credential-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .credential-actions button { border-color: var(--border); padding: 3px 14px; }
+
+/* The app's own confirmation: a question, at most one choice, two answers. */
+.dialog.confirm { width: min(460px, 92vw); padding: 12px 16px 14px; }
+.dialog.confirm:focus-visible { outline: none; }
+.confirm-message { margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.confirm-check { display: flex; align-items: center; gap: 8px; margin-top: 14px; cursor: pointer; }
+.confirm-check input { margin: 0; accent-color: var(--accent); }
+/* Text fields drop the ring and show focus their own way; a checkbox has no
+   other way. */
+.confirm-check input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Under the label, not under the box. */
+.confirm-detail { margin: 4px 0 0 21px; color: var(--danger); font-size: 12px; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 16px; }
+.confirm-actions button { border: 1px solid var(--border); }
+.confirm-actions .confirm-ok { border-color: var(--accent); }
 .outline .tree-row { padding-top: 3px; padding-bottom: 3px; }
 
 /* ==========================================================================

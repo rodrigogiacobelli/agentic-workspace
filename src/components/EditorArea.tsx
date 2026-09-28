@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import { firstFile, offerDrop, treeDrag } from "../dropRoute";
 import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -11,7 +12,7 @@ import { DiffView } from "./DiffView";
 import { panelInfo } from "./dock";
 import { Icon } from "./icons";
 import { ContextMenu } from "./Menu";
-import { FILE_MIME, PANEL_MIME, SplitTree, TAB_MIME, useDropZone } from "./SplitTree";
+import { PANEL_MIME, SplitTree, TAB_MIME, useDropZone } from "./SplitTree";
 import { TabOverflow, useTabStrip } from "./tabs";
 
 /** A working area's groups: the Editor's sit on the workspace itself, Source Control's under `review`. */
@@ -149,20 +150,34 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
     lastActive.current = activeId;
   }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps
   const strip = useTabStrip(shownPanel ?? activeId, group.editors.length + (panels?.ids.length ?? 0));
-  // Files open in the Editor only; Source Control's area takes tabs, not files.
-  const accepts = (types: readonly string[]) => types.includes(TAB_MIME) || (area === "editor" && types.includes(FILE_MIME));
+  const entry = tab && !tab.diff ? editors.get(tab.id) : undefined;
+  const doc = entry && "doc" in entry ? entry.doc : undefined;
+  const media = entry && "media" in entry ? entry.media : null;
 
-  // A tab or a file dropped on the group: the centre joins it, an edge
-  // splits it (ED-36, ED-37, ED-41). The tab strip handles its own drops.
+  // A tab dropped on the group: the centre joins it, an edge splits it
+  // (ED-36, ED-37). A file dragged from a tree opens the same way (ED-41),
+  // except on the centre of a Markdown document, where a reference to it is
+  // written at the drop point (TREE-16, D7). Files open in the Editor only;
+  // Source Control's area takes tabs. The tab strip handles its own drops.
   const zone = useDropZone(
-    accepts,
+    (types) => types.includes(TAB_MIME),
     (z, e) => {
       const editor = e.dataTransfer.getData(TAB_MIME);
-      const path = e.dataTransfer.getData(FILE_MIME);
-      if (z === "center" && editor && group.editors.some((t) => t.id === editor)) return;
-      void api.dropEditor(ws.id, editor ? { editor } : { path }, group.id, z, null).catch(report);
+      if (!editor || (z === "center" && group.editors.some((t) => t.id === editor))) return;
+      void api.dropEditor(ws.id, { editor }, group.id, z, null).catch(report);
     },
-    { ignore: (target) => !!target.closest(".tab-bar") },
+    {
+      // A tree docked in the group keeps its own drags: a spot it refuses
+      // takes nothing, rather than opening the file here.
+      ignore: (target) => !!target.closest(".tab-bar") || (!!treeDrag() && !!target.closest(".sidebar-body")),
+      tree: area === "editor" ? {
+        insertsAtCentre: () => !shownPanel && !!doc?.isMarkdown,
+        onDrop: (z, x, y, drag, inserts) => {
+          if (inserts) doc?.insertReference(drag.paths.map((p) => (drag.dirs.has(p) ? `${p}/` : p)), x, y);
+          else void api.dropEditor(ws.id, { path: firstFile(drag) }, group.id, z, null).catch(report);
+        },
+      } : undefined,
+    },
   );
 
   // Dirty marks and banners follow the documents.
@@ -200,13 +215,10 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
 
   const dropOnTab = (e: React.DragEvent, index: number | null) => {
     const id = e.dataTransfer.getData(TAB_MIME);
-    const path = area === "editor" ? e.dataTransfer.getData(FILE_MIME) : "";
-    if (!id && !path) return;
+    if (!id) return;
     e.preventDefault();
     e.stopPropagation();
-    if (path) {
-      void api.dropEditor(ws.id, { path }, group.id, "center", index).catch(report);
-    } else if (group.editors.some((t) => t.id === id)) {
+    if (group.editors.some((t) => t.id === id)) {
       if (index === null) return;
       const ids = group.editors.map((t) => t.id);
       const from = ids.indexOf(id);
@@ -217,15 +229,18 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
       void api.moveEditor(ws.id, id, group.id, index).catch(report);
     }
   };
-  const acceptsTab = (e: React.DragEvent) => { if (accepts(e.dataTransfer.types)) e.preventDefault(); };
+  // A file dragged from a tree onto the strip opens at that position; the
+  // router runs the offer at the drop.
+  const acceptsTab = (e: React.DragEvent, index: number | null) => {
+    const drag = area === "editor" ? treeDrag() : null;
+    const file = drag && !drag.missing ? firstFile(drag) : undefined;
+    if (file) offerDrop(e, () => void api.dropEditor(ws.id, { path: file }, group.id, "center", index).catch(report));
+    else if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault();
+  };
   const pickTab = (id: string) => {
     if (shownPanel) panels?.onPick(null);
     void api.setActiveEditor(ws.id, id);
   };
-
-  const entry = tab && !tab.diff ? editors.get(tab.id) : undefined;
-  const doc = entry && "doc" in entry ? entry.doc : undefined;
-  const media = entry && "media" in entry ? entry.media : null;
 
   return (
     <div
@@ -235,7 +250,7 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
       onMouseDownCapture={() => { if (areaOf(ws, area).activeGroup !== group.id) void api.setActiveGroup(ws.id, group.id); }}
     >
       <div className="tab-bar">
-        <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={acceptsTab} onDrop={(e) => dropOnTab(e, null)}>
+        <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={(e) => acceptsTab(e, null)} onDrop={(e) => dropOnTab(e, null)}>
           {panels?.ids.map((id) => {
             const info = panelInfo(id);
             return (
@@ -263,7 +278,7 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
               className={`tab${t.id === activeId && !shownPanel ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
               draggable
               onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
-              onDragOver={acceptsTab}
+              onDragOver={(e) => acceptsTab(e, i)}
               onDrop={(e) => dropOnTab(e, i)}
               onClick={() => pickTab(t.id)}
               onDoubleClick={() => { if (t.preview) void api.pinEditor(ws.id, t.id); }}

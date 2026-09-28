@@ -9,17 +9,19 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   the scheduling class an auto-nice daemon hands down, the identity a development
   build carries so it runs beside an installed one, the X11 backend an AppImage
   runs on, the environment every child process is cleaned of, what WebKitGTK
-  does to Shift+Tab, the AppImage strip flag and the Cargo version floor. Each
-  fails silently when broken.
+  does to a drag and to Shift+Tab, the AppImage strip flag and the Cargo version
+  floor. Each fails silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
   - standards-motion
   - 001-two-os-windows
   - standards-code
   - operations-running-agentic-workspace
+  - 014-one-layout-tree
   - 019-credentials-through-the-secret-service
 binds:
   - src-tauri/src/desktop.rs
+  - src/dropRoute.ts
 ---
 
 # Linux desktop standard
@@ -273,8 +275,30 @@ variables and the bundle's entries from those search paths — the hook's own
 leading `/usr/share` in `XDG_DATA_DIRS` included — when `APPDIR` is set, and
 removes `WEBKIT_DISABLE_DMABUF_RENDERER` whenever the application set it
 itself. Every child the application starts goes through it: shells, git,
-ssh and ssh-keygen, and `rg`. The binary needs none of those variables to
+ssh and ssh-keygen, `gio` and `rg`. The binary needs none of those variables to
 run again as a helper, since its RUNPATH finds every bundled library.
+
+## WebKitGTK rewrites a drag
+
+Measured on WebKitGTK 2.52 under both backends:
+
+- **A drag carrying a `file://` URI hides every custom MIME type.** Once
+  `text/uri-list` holds a file URI, the drop side sees only `text/uri-list`
+  and `text/html`, and `getData` of a custom type returns an empty string.
+- **A multi-line `text/uri-list` collapses to one URL.** Only a single entry
+  can be dragged out to another application.
+- **wry takes such a drop.** No DOM `drop` fires; Tauri reports a native drop,
+  and the page has already received `dragend` and `dragleave` by then.
+- **A drop happens only where the last `dragover` accepted it**, or over
+  editable content; anywhere else GTK cancels it. Under X11 a `dropEffect`
+  outside the source's `effectAllowed` cancels it too.
+- **`ctrlKey` in a drag event is stale**, and under X11 a Ctrl pressed
+  mid-drag never reaches the page. GDK's keymap follows the physical key under
+  both backends, so `windows::drop_modifiers` reads Ctrl there: captured when
+  Tauri takes a native drop, read live for a DOM drop.
+
+`src/dropRoute.ts` is built on these facts, and `014-one-layout-tree` holds
+how a drop target uses it.
 
 ## WebKitGTK reports Shift+Tab with key "Unidentified"
 

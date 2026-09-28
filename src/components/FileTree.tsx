@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
-import { useKept, useKeptScroll, useLive } from "../live";
+import { offerDrop, onDropEnd, startTreeDrag, treeDrag, type DropAction, type TreeDrag } from "../dropRoute";
+import * as editors from "../editors";
+import { keep, peek, useKept, useKeptScroll, useLive } from "../live";
 import type { Entry, StatusEntry, View, Workspace } from "../types";
 import { fileIcon, Icon } from "./icons";
 import { ContextMenu, RowMenu, SubMenu } from "./Menu";
@@ -55,7 +57,19 @@ type Dialog =
   | { kind: "new-view"; then?: string }
   | { kind: "rename-view"; view: View };
 
-const ENTRY_MIME = "application/x-agentic-view-entry";
+/** A move made in the tree, which Ctrl+Z makes back (TREE-13). */
+interface Move {
+  from: string;
+  to: string;
+}
+
+/** How many batches of moves Ctrl+Z can walk back through. */
+const UNDO_DEPTH = 20;
+
+/** A file URI as another application reads one: every segment percent-encoded. */
+function fileUri(abs: string): string {
+  return `file://${abs.split("/").map(encodeURIComponent).join("/")}`;
+}
 
 function dirOf(path: string): string {
   const i = path.lastIndexOf("/");
@@ -100,6 +114,21 @@ let revealing: { workspaceId: string; path: string } | null = null;
 window.addEventListener("tree-reveal", (e) => { revealing = (e as CustomEvent<{ workspaceId: string; path: string }>).detail; });
 
 /**
+ * A drag from another application is seen only through Tauri, which says
+ * where it is: `el` is the row or tree background under it, carrying the
+ * folder it stands for, or null once it is nowhere. The tree holding it
+ * marks that folder (TREE-14).
+ */
+export function externalOver(el: Element | null): void {
+  window.dispatchEvent(new CustomEvent("tree-drop-over", { detail: el }));
+}
+
+/** Files from another application dropped on `el`: the tree holding it copies them into its folder (TREE-14). */
+export function externalDrop(el: Element, paths: string[]): void {
+  window.dispatchEvent(new CustomEvent("tree-drop-in", { detail: { el, paths } }));
+}
+
+/**
  * Explorer: the tree rooted at the workspace, read one directory at a time.
  * Custom: one of the workspace's views — its entries at the root whatever
  * their depth, each expanding to its real children (VIEW-03, VIEW-04).
@@ -122,7 +151,15 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   const [multi, setMulti] = useKept<Set<string>>(`${kept}:multi`, new Set());
   /** Every row drawn in this render, in tree order. */
   const order = useRef<string[]>([]);
+  /**
+   * Where a tree drag over this tree would land, marked: the folder it goes
+   * into (`""` the root), or the view entry it goes before (VIEW-12). Every
+   * dragover this tree accepts marks again, and any other takes the mark off.
+   */
+  const [dropDir, setDropDir] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
+  /** The dragover that last marked a target here. */
+  const marked = useRef<Event | null>(null);
   /** Whether the desktop clipboard holds files, so Paste is offered or not. */
   const [hasFiles, setHasFiles] = useState(clipboardHasFiles === true);
   /** Directories still drawn while their collapse plays out. */
@@ -132,9 +169,9 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   const view = kind === "custom" ? (ws.views.find((v) => v.id === ws.activeView) ?? ws.views[0] ?? null) : null;
   const entriesKey = view?.entries.join("\n") ?? "";
   const roots = view?.entries ?? null;
-  /** What callbacks outliving a render read: the expansion and the view's entries as of the last one. */
-  const latest = useRef({ expanded: ws.expanded, roots });
-  latest.current = { expanded: ws.expanded, roots };
+  /** What callbacks outliving a render read: the workspace, its expansion and the view's entries as of the last one. */
+  const latest = useRef({ ws, expanded: ws.expanded, roots });
+  latest.current = { ws, expanded: ws.expanded, roots };
 
   // A listing that comes back as it was changes nothing and draws nothing; one
   // for a directory folded while it was read is dropped.
@@ -280,8 +317,32 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   const opened = built.current ? ws.expanded.filter((d) => !wasExpanded.current.includes(d)) : [];
   const toggle = (path: string) => void api.setExpanded(ws.id, path, !ws.expanded.includes(path));
 
-  /** Whether a path shown in the panel is a directory. */
+  // Filtered view: matching files and their ancestors, every directory open.
+  const filtered = useMemo(() => {
+    if (!filter || !allFiles) return null;
+    const needle = filter.toLowerCase();
+    const roots = view?.entries ?? null;
+    const matches = allFiles
+      .filter((p) => p.toLowerCase().includes(needle))
+      .filter((p) => !roots || roots.some((r) => p === r || p.startsWith(`${r}/`)))
+      .slice(0, 2000);
+    const children = new Map<string, Map<string, boolean>>();
+    for (const file of matches) {
+      const parts = file.split("/");
+      let dir = "";
+      parts.forEach((part, i) => {
+        const isLast = i === parts.length - 1;
+        if (!children.has(dir)) children.set(dir, new Map());
+        children.get(dir)!.set(part, !isLast);
+        dir = join(dir, part);
+      });
+    }
+    return children;
+  }, [filter, allFiles, view?.entries]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Whether a path shown in the panel is a directory. A filtered tree draws folders it never listed. */
   const isDir = (path: string): boolean =>
+    filtered?.get(dirOf(path))?.get(path.slice(path.lastIndexOf("/") + 1)) === true ||
     viewEntries?.find((e) => e.path === path)?.isDir || [...listings.values()].some((l) => l.some((e) => e.path === path && e.isDir));
 
   /** Where a new file or folder goes: inside the selected folder, beside the selected file, else the root. */
@@ -334,25 +395,103 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     if (paths.length) void api.setClipboardFiles(paths.map((p) => `${ws.path}/${p}`), cut).then(() => holdsFiles(true)).catch(report);
   };
 
+  /**
+   * Before a Replace, the tabs open on what is replaced or on anything in it:
+   * a clean one is closed, and one with unsaved changes stops the Replace,
+   * since its buffer would outlive its file. A tab not opened this session
+   * keeps its unsaved changes as a draft, which would be laid over whatever
+   * lands at its path the next time it opens.
+   */
+  const closeTabsUnder = async (dest: string): Promise<boolean> => {
+    const w = latest.current.ws;
+    const tabs = [...w.groups, ...w.review.groups].flatMap((g) => g.editors).filter((t) => t.path === dest || t.path.startsWith(`${dest}/`));
+    const drafted = await Promise.all(tabs.map((t) => !editors.get(t.id) && api.readDraft(w.id, t.path).then((d) => d !== null, () => false)));
+    const dirty = tabs.find((t, i) => editors.isDirty(t.id) || drafted[i]);
+    if (dirty) {
+      report(`${dirty.path} has unsaved changes, so ${dest} was not replaced.`);
+      return false;
+    }
+    for (const t of tabs) await api.closeFile(w.id, t.id);
+    return true;
+  };
+
+  /**
+   * Puts one absolute path into `dir`, asking first when its name is taken
+   * there (TREE-12). Answers where it landed, null when it stayed where it
+   * was, or "stop" when the answer was to cancel the rest.
+   */
+  const place = async (from: string, dir: string, cut: boolean): Promise<string | null | "stop"> => {
+    const first = await api.pasteEntry(ws.id, from, dir, cut, "ask");
+    if (!first.exists) return first.path;
+    const dest = join(dir, from.slice(from.lastIndexOf("/") + 1));
+    // Pasted where it already is, a copy takes a free name beside itself, as Duplicate does.
+    if (from === `${ws.path}/${dest}`) return (await api.pasteEntry(ws.id, from, dir, cut, "keep")).path;
+    const answer = await message(`${dest} already exists. Replace it, sending the one there to the trash, or keep both?`, {
+      title: "Name taken",
+      kind: "warning",
+      buttons: { yes: "Replace", no: "Keep both", cancel: "Cancel" },
+    });
+    if (answer === "Keep both") return (await api.pasteEntry(ws.id, from, dir, cut, "keep")).path;
+    if (answer !== "Replace") return "stop";
+    if (!(await closeTabsUnder(dest))) return null;
+    return (await api.pasteEntry(ws.id, from, dir, cut, "replace")).path;
+  };
+
+  const undoKey = `${ws.id}:tree:undo`;
+
+  /**
+   * Copies, or moves when `cut`, absolute paths into the folder `dir`: the
+   * clipboard's paste, a drop from a tree and a drop from another
+   * application. The folder then opens and is read — a folded one is not
+   * watched — and the last entry to land is selected. The moves made inside
+   * the workspace are kept together for Ctrl+Z (TREE-13).
+   */
+  const transfer = async (paths: string[], dir: string, cut: boolean): Promise<void> => {
+    let last: string | null = null;
+    const moved: Move[] = [];
+    for (const from of paths) {
+      let to: string | null;
+      try {
+        const landed = await place(from, dir, cut);
+        if (landed === "stop") break;
+        to = landed;
+      } catch (e) {
+        report(e);
+        continue;
+      }
+      if (to === null) continue;
+      last = to;
+      const rel = from.startsWith(`${ws.path}/`) ? from.slice(ws.path.length + 1) : null;
+      if (cut && rel !== null && rel !== to) moved.push({ from: rel, to });
+    }
+    if (moved.length) keep(undoKey, [...(peek<Move[][]>(undoKey) ?? []), moved].slice(-UNDO_DEPTH));
+    if (dir && !latest.current.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true).catch(() => {});
+    load(dir);
+    if (last) {
+      setMulti(new Set());
+      onSelect(last);
+    }
+  };
+
+  /** Ctrl+Z: the last batch of moves goes back where it came from. A place taken since keeps what is there. */
+  const undoMoves = async () => {
+    const stack = peek<Move[][]>(undoKey) ?? [];
+    const batch = stack[stack.length - 1];
+    if (!batch) return;
+    keep(undoKey, stack.slice(0, -1));
+    for (const { from, to } of [...batch].reverse()) {
+      await api.renameEntry(ws.id, to, from).catch((e) => report(/already exists/.test(String(e)) ? `${from} is taken now, so ${to} stays where it is.` : e));
+    }
+  };
+
   const paste = async () => {
     const dir = creationDir();
     if (dir === null) return;
     const { paths, cut } = await api.clipboardFiles().catch((e) => { report(e); return { paths: [], cut: false }; });
     if (!paths.length) return;
-    let last: string | null = null;
-    for (const from of paths) {
-      try {
-        last = await api.pasteEntry(ws.id, from, dir, cut);
-      } catch (e) {
-        report(e);
-      }
-    }
+    await transfer(paths, dir, cut);
     // The files are no longer where the cut says they are.
     if (cut) { await api.clearClipboardFiles().catch(() => {}); holdsFiles(false); }
-    if (dir && !ws.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true).catch(() => {});
-    // The folder was not watched while collapsed; its listing is read again.
-    load(dir);
-    if (last) onSelect(last);
   };
 
   const entryOf = (path: string): Entry => ({ name: path.split("/").pop() ?? path, path, isDir: isDir(path), ignored: false });
@@ -363,6 +502,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "c") copy(false);
     else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "x") copy(true);
     else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "v") void paste();
+    else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "z") void undoMoves();
     else if (!e.ctrlKey && e.key === "Delete") void trash(targets());
     else if (!e.ctrlKey && e.key === "F2" && selected) setDialog({ kind: "rename", entry: entryOf(selected) });
     else if (!e.ctrlKey && e.key === "Enter" && selected) { if (isDir(selected)) toggle(selected); else onOpen(selected, false); }
@@ -401,13 +541,68 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     }
   };
 
-  // A view's root rows are reordered by dragging one above another (VIEW-12).
-  const reorderTo = (dragged: string, target: string) => {
-    if (!view || dragged === target) return;
-    const paths = view.entries.filter((p) => p !== dragged);
+  // A view's root rows are reordered by dragging onto another: they land
+  // before it, in the order they had (VIEW-12).
+  const reorderTo = (dragged: string[], target: string) => {
+    if (!view || dragged.includes(target)) return;
+    const paths = view.entries.filter((p) => !dragged.includes(p));
     const at = paths.indexOf(target);
-    paths.splice(at < 0 ? paths.length : at, 0, dragged);
+    paths.splice(at < 0 ? paths.length : at, 0, ...dragged);
     void api.viewReorder(ws.id, view.id, paths).catch(report);
+  };
+
+  // A tree drag is read from the router, never from its data (dropRoute.ts).
+  // A target that takes it offers the drop and marks itself; one that
+  // refuses leaves the drop to be cancelled there.
+  const aim = (ev: React.DragEvent, run: DropAction, into: string | null, before: string | null) => {
+    if (!offerDrop(ev, run)) return;
+    marked.current = ev.nativeEvent;
+    setDropDir(into);
+    setDragOver(before);
+  };
+  /** Into the folder `dir`: never a missing entry, never a folder into itself or anything under it, and what is already there stays out of it. */
+  const aimInto = (ev: React.DragEvent, drag: TreeDrag, dir: string) => {
+    const into = dir ? `${ws.path}/${dir}` : ws.path;
+    if (drag.missing || drag.abs.some((a) => into === a || into.startsWith(`${a}/`))) return;
+    const coming = drag.abs.filter((a) => a.slice(0, a.lastIndexOf("/")) !== into);
+    if (coming.length) aim(ev, ({ copy }) => void transfer(coming, dir, !copy), dir, null);
+  };
+  /**
+   * Where a drop on a row goes: a folder takes it, a file hands it to its
+   * folder. A file at a view's root sits in no folder the view shows, so it
+   * takes nothing (VIEW-06).
+   */
+  const dropDirOf = (e: Entry, viewRoot: boolean): string | null => (e.missing ? null : e.isDir ? e.path : viewRoot ? null : dirOf(e.path));
+  /** A view's own entries dragged onto another of them reorder the view; anything else goes into the row's folder. */
+  const aimRow = (ev: React.DragEvent, drag: TreeDrag, e: Entry, viewRoot: boolean) => {
+    if (viewRoot && view && drag.roots === view.id) {
+      if (!drag.paths.includes(e.path)) aim(ev, () => reorderTo(drag.paths, e.path), null, e.path);
+      return;
+    }
+    const dir = dropDirOf(e, viewRoot);
+    if (dir !== null) aimInto(ev, drag, dir);
+  };
+  const dragFrom = (ev: React.DragEvent, e: Entry) => {
+    // The whole multi-selection travels when the row is in it, in tree order.
+    const paths = multi.has(e.path) ? targets() : [e.path];
+    const abs = paths.map((p) => `${ws.path}/${p}`);
+    const missing = paths.some((p) => !!(p === e.path ? e.missing : viewEntries?.find((v) => v.path === p)?.missing));
+    // One entry carries its file for other applications (TREE-15). WebKit
+    // runs several URIs together into one, so a selection carries none.
+    const uri = paths.length === 1 && !missing;
+    startTreeDrag({
+      workspaceId: ws.id,
+      paths,
+      abs,
+      dirs: new Set(paths.filter((p) => (p === e.path ? e.isDir : isDir(p)))),
+      roots: view && paths.every((p) => view.entries.includes(p)) ? view.id : null,
+      missing,
+      uri,
+    });
+    // WebKitGTK starts no drag without data; nothing reads this back.
+    ev.dataTransfer.setData(FILE_MIME, paths.join("\n"));
+    if (uri) ev.dataTransfer.setData("text/uri-list", fileUri(abs[0]));
+    ev.dataTransfer.effectAllowed = "copyMove";
   };
 
   const row = (e: Entry, depth: number, expanded: boolean, onClick: () => void, viewRoot = false) => {
@@ -416,7 +611,8 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     return (
       <div
         data-path={e.path}
-        className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected === e.path || multi.has(e.path) ? " selected" : ""}${dragOver === e.path ? " drop-before" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
+        data-drop-dir={dropDirOf(e, viewRoot) ?? undefined}
+        className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected === e.path || multi.has(e.path) ? " selected" : ""}${dragOver === e.path ? " drop-before" : ""}${e.isDir && dropDir === e.path ? " drop-into" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={(ev) => {
           if (ev.ctrlKey) {
@@ -428,15 +624,10 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
           onClick();
         }}
         onDoubleClick={() => { if (!e.isDir && !e.missing) onOpen(e.path, false); }}
-        draggable={viewRoot || (!e.isDir && !e.missing)}
-        onDragStart={(ev) => {
-          if (!e.isDir && !e.missing) ev.dataTransfer.setData(FILE_MIME, e.path);
-          if (viewRoot) ev.dataTransfer.setData(ENTRY_MIME, e.path);
-          ev.dataTransfer.effectAllowed = "copyMove";
-        }}
-        onDragOver={(ev) => { if (viewRoot && ev.dataTransfer.types.includes(ENTRY_MIME)) { ev.preventDefault(); ev.stopPropagation(); setDragOver(e.path); } }}
-        onDragLeave={() => { if (dragOver === e.path) setDragOver(null); }}
-        onDrop={(ev) => { const dragged = ev.dataTransfer.getData(ENTRY_MIME); setDragOver(null); if (viewRoot && dragged) { ev.preventDefault(); ev.stopPropagation(); reorderTo(dragged, e.path); } }}
+        // A missing entry at a view's root still drags, to be reordered.
+        draggable={viewRoot || !e.missing}
+        onDragStart={(ev) => dragFrom(ev, e)}
+        onDragOver={(ev) => { const drag = treeDrag(); if (drag) aimRow(ev, drag, e, viewRoot); }}
         onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); if (!multi.has(e.path)) { setMulti(new Set()); onSelect(e.path); } openMenu({ x: ev.clientX, y: ev.clientY, entry: e, viewRoot }); }}
         title={e.missing ? `Missing: ${e.path}` : e.path}
       >
@@ -483,29 +674,6 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
       );
     });
   };
-
-  // Filtered view: matching files and their ancestors, every directory open.
-  const filtered = useMemo(() => {
-    if (!filter || !allFiles) return null;
-    const needle = filter.toLowerCase();
-    const roots = view?.entries ?? null;
-    const matches = allFiles
-      .filter((p) => p.toLowerCase().includes(needle))
-      .filter((p) => !roots || roots.some((r) => p === r || p.startsWith(`${r}/`)))
-      .slice(0, 2000);
-    const children = new Map<string, Map<string, boolean>>();
-    for (const file of matches) {
-      const parts = file.split("/");
-      let dir = "";
-      parts.forEach((part, i) => {
-        const isLast = i === parts.length - 1;
-        if (!children.has(dir)) children.set(dir, new Map());
-        children.get(dir)!.set(part, !isLast);
-        dir = join(dir, part);
-      });
-    }
-    return children;
-  }, [filter, allFiles, view?.entries]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const renderFiltered = (dir: string, depth: number): React.ReactNode => {
     const kids = filtered?.get(dir);
@@ -575,6 +743,34 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     window.addEventListener("tree-reveal", redraw);
     return () => window.removeEventListener("tree-reveal", redraw);
   }, [kind]);
+
+  // A dragover anywhere this tree did not accept takes its mark off, and so
+  // does the end of the drag. A drag from another application is followed
+  // through Tauri instead: the Workspace window says which row it is over,
+  // and what was dropped there.
+  useEffect(() => {
+    const unmark = () => { setDropDir(null); setDragOver(null); };
+    const over = (e: DragEvent) => { if (treeDrag() && marked.current !== e) unmark(); };
+    document.addEventListener("dragover", over);
+    const off = onDropEnd(unmark);
+    return () => { document.removeEventListener("dragover", over); off(); };
+  }, []);
+  useEffect(() => {
+    const folderOf = (el: Element | null) => (el && body.current?.contains(el) ? el.getAttribute("data-drop-dir") : null);
+    const over = (e: Event) => setDropDir(folderOf((e as CustomEvent<Element | null>).detail));
+    const dropIn = (e: Event) => {
+      const { el, paths } = (e as CustomEvent<{ el: Element; paths: string[] }>).detail;
+      const dir = folderOf(el);
+      // From outside a file is copied, never moved.
+      if (dir !== null) void transfer(paths, dir, false);
+    };
+    window.addEventListener("tree-drop-over", over);
+    window.addEventListener("tree-drop-in", dropIn);
+    return () => {
+      window.removeEventListener("tree-drop-over", over);
+      window.removeEventListener("tree-drop-in", dropIn);
+    };
+  });
   const refilter = (value: string) => {
     setFilter(value);
     // The file list is read once per filter session; the next one reads it afresh.
@@ -624,8 +820,11 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
           />
           <nav
             ref={scroller}
-            className="tree"
+            className={`tree${dropDir === "" ? " drop-into" : ""}`}
             tabIndex={0}
+            // The Explorer's background is its root; a view's is no folder at all (VIEW-06).
+            data-drop-dir={view ? undefined : ""}
+            onDragOver={(ev) => { const drag = treeDrag(); if (drag && !view && !(ev.target as Element).closest(".tree-row")) aimInto(ev, drag, ""); }}
             onKeyDown={onKey}
             onMouseDown={(e) => { if (e.target === e.currentTarget) onSelect(null); }}
             onContextMenu={(ev) => { ev.preventDefault(); openMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
@@ -689,6 +888,8 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
               <button onClick={() => { void api.copyText(menu.entry!.path); setMenu(null); }}>Copy relative path</button>
               <button onClick={() => { void api.copyText(`${ws.path}/${menu.entry!.path}`); setMenu(null); }}>Copy absolute path</button>
               <button onClick={() => { void api.revealEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Reveal in file manager</button>
+              {/* A new terminal of this workspace, started in the folder, with its window brought forward on it (TREE-17). */}
+              {menu.entry.isDir && <button onClick={() => { void api.terminalOpen(ws.id, menu.entry!.path).then(() => api.focusWindow("terminal")).catch(report); setMenu(null); }}>Open terminal here</button>}
             </>
           )}
         </ContextMenu>

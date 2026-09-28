@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, events } from "../api";
+import { installDropRoute, nativeSession, takeDrop } from "../dropRoute";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
 import { Live, retainKept } from "../live";
@@ -14,7 +15,7 @@ import { BranchesPanel } from "./BranchesPanel";
 import { CommitPanel } from "./CommitPanel";
 import { dropPanel, hidePanel, leafKey, normalizeAll, panelInfo, placePanel, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
 import { EditorArea, activeGroupOf, areaOf, closeTab, groupOrder } from "./EditorArea";
-import { FileTree } from "./FileTree";
+import { FileTree, externalDrop, externalOver } from "./FileTree";
 import { HistoryPanel, showCommit } from "./HistoryPanel";
 import { Icon } from "./icons";
 import { ContextMenu } from "./Menu";
@@ -127,14 +128,38 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return () => { void dirs.then((u) => u()); void git.then((u) => u()); };
   }, []);
 
-  // Files dropped from the file manager land at the caret of the active
-  // document, wherever over the editor they were dropped (FIX-10).
+  // A drag inside this window lands where its last dragover was offered a
+  // drop (dropRoute.ts).
+  useEffect(() => installDropRoute(), []);
+
+  // Tauri reports every drag that carries a file's URI: a tree row's, begun
+  // here, and one from another application. A drop of this page's own runs
+  // what the target under it offered, and nothing else. One from outside is
+  // copied into the Explorer folder it lands on (TREE-14); on a tree where no
+  // folder is, a view's file or its background, it is refused; anywhere else
+  // it lands at the caret of the active document, wherever over the editor it
+  // was dropped (FIX-10). Tauri calls the position physical; it is in CSS
+  // pixels, as `elementFromPoint` takes it.
   useEffect(() => {
-    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+    const unlisten = getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (nativeSession(payload.type) === "in-page") {
+        if (payload.type === "drop") void takeDrop(true);
+        return;
+      }
+      if (modalOpen()) { externalOver(null); return; }
+      const hit = payload.type === "leave" ? null : document.elementFromPoint(payload.position.x, payload.position.y);
+      const target = hit?.closest("[data-drop-dir]") ?? null;
+      externalOver(payload.type === "drop" ? null : target);
+      if (payload.type !== "drop") return;
+      // wry takes any URI for a path: a browser's link, a KIO sftp:// one.
+      const files = payload.paths.filter((p) => p.startsWith("/"));
+      if (files.length < payload.paths.length) report("Only files can be dropped here.");
+      if (!files.length) return;
+      if (target) { externalDrop(target, files); return; }
+      if (hit?.closest(".sidebar-body")) { report("Drop the files on a folder to copy them in."); return; }
       const w = wsRef.current;
       const activeId = w && w.mode === "editor" ? editors.activeEditorId(w) : null;
-      if (event.payload.type !== "drop" || !activeId) return;
-      void editors.doc(activeId)?.insertPaths(event.payload.paths);
+      if (activeId) void editors.doc(activeId)?.insertPaths(files);
     });
     return () => { void unlisten.then((u) => u()); };
   }, []);

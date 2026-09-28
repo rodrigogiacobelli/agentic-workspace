@@ -102,15 +102,18 @@ fn apply(app: &AppHandle) {
     let (workspaces, attention) = {
         let session = state.session.lock();
         let attention_set = state.attention.lock();
-        let list: Vec<(String, String, bool, bool)> = session
-            .workspaces
-            .iter()
-            .map(|w| {
-                let wants = w.terminals.iter().any(|t| attention_set.contains(&t.id));
-                (w.id.clone(), w.name.clone(), session.active.as_deref() == Some(&w.id), wants)
-            })
-            .collect();
-        let any = list.iter().any(|(_, _, active, wants)| *wants && !*active);
+        let row = |w: &crate::state::Workspace, nested: bool| {
+            let wants = w.terminals.iter().any(|t| attention_set.contains(&t.id));
+            (w.id.clone(), w.name.clone(), session.active.as_deref() == Some(&w.id), wants, nested)
+        };
+        // As the switcher lists them: each workspace that is not a linked
+        // worktree, followed by the open worktrees of its repository.
+        let mut list = Vec::new();
+        for top in session.workspaces.iter().filter(|w| w.worktree_of.is_none()) {
+            list.push(row(top, false));
+            list.extend(session.workspaces.iter().filter(|w| w.worktree_of.as_deref() == Some(&top.id)).map(|w| row(w, true)));
+        }
+        let any = list.iter().any(|(_, _, active, wants, _)| *wants && !*active);
         (list, any)
     };
     let visible: Vec<bool> = windows::LABELS.iter().map(|l| windows::is_visible(app, l)).collect();
@@ -137,7 +140,7 @@ fn apply(app: &AppHandle) {
     }
 }
 
-fn menu(app: &AppHandle, workspaces: &[(String, String, bool, bool)], visible: &[bool]) -> Result<Menu<tauri::Wry>> {
+fn menu(app: &AppHandle, workspaces: &[(String, String, bool, bool, bool)], visible: &[bool]) -> Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     menu.append(&MenuItem::with_id(app, "show", format!("Show {APP_NAME}"), true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -146,8 +149,9 @@ fn menu(app: &AppHandle, workspaces: &[(String, String, bool, bool)], visible: &
     }
     if !workspaces.is_empty() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
-        for (id, name, active, wants) in workspaces {
-            let text = if *wants && !*active { format!("● {name}") } else { name.clone() };
+        for (id, name, active, wants, nested) in workspaces {
+            let name = if *nested { format!("⑂ {name}") } else { name.clone() };
+            let text = if *wants && !*active { format!("● {name}") } else { name };
             menu.append(&CheckMenuItem::with_id(app, format!("ws:{id}"), text, true, *active, None::<&str>)?)?;
         }
     }

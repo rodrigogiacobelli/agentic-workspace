@@ -83,6 +83,7 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         published: Mutex::new(String::new()),
         data_dir,
         notices: Mutex::new(notices),
+        dropped: Mutex::new(None),
         git_children: Mutex::new(HashMap::new()),
         prompts: Mutex::new(askpass::Prompts::default()),
     });
@@ -257,6 +258,9 @@ pub fn run() {
             WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
                 windows::record(window.app_handle(), window.label());
             }
+            WindowEvent::DragDrop(tauri::DragDropEvent::Drop { .. }) => {
+                windows::capture_drop(window.app_handle());
+            }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
@@ -266,6 +270,7 @@ pub fn run() {
             session::switch_workspace,
             session::remove_workspace,
             session::rename_workspace,
+            session::reorder_workspaces,
             session::set_mode,
             session::set_expanded,
             session::open_file,
@@ -346,6 +351,7 @@ pub fn run() {
             git::git_delete_tag,
             session::focus_window,
             windows::show_window_menu,
+            windows::drop_modifiers,
             session::quit,
             pty::terminal_open,
             pty::terminal_close,

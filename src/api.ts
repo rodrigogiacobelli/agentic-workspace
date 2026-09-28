@@ -5,9 +5,9 @@ import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
-  AreaId, BlameLine, Branches, ClipboardFiles, CommitDetail, CredentialPrompt, CredentialStatus, DiffSpec, DirChanged, DockedMode,
+  AreaId, BlameLine, Branches, ClipboardFiles, CommitDetail, Conflict, CredentialPrompt, CredentialStatus, DiffSpec, DirChanged, DockedMode,
   Entry, HotkeyStatus, ImportedTheme, KeyFile, LogEntry, RepoInfo, SearchHit, Session, Settings, StaleTerminal, Stash, StatusEntry,
-  StoredAsset, Tag, WindowRole, WorktreeEntry,
+  StoredAsset, Tag, Transfer, Unmerged, WindowRole, WorktreeEntry,
 } from "./types";
 
 /** Terminal output arrives base64-encoded (see `pty::MAX_MESSAGE_BYTES`); the
@@ -33,6 +33,8 @@ export const api = {
   switchWorkspace: (id: string) => invoke<void>("switch_workspace", { id }),
   removeWorkspace: (id: string) => invoke<void>("remove_workspace", { id }),
   renameWorkspace: (id: string, name: string) => invoke<void>("rename_workspace", { id, name }),
+  /** Every workspace id, in the order the switcher and the tray list them. */
+  reorderWorkspaces: (ids: string[]) => invoke<void>("reorder_workspaces", { ids }),
   /** Which mode the Workspace window shows for a workspace. */
   setMode: (workspaceId: string, mode: DockedMode) => invoke<void>("set_mode", { workspaceId, mode }),
   setExpanded: (workspaceId: string, path: string, expanded: boolean) =>
@@ -126,7 +128,8 @@ export const api = {
     invoke<void>("open_externally", { workspaceId, path }),
   quit: () => invoke<void>("quit"),
 
-  terminalOpen: (workspaceId: string) => invoke<string>("terminal_open", { workspaceId }),
+  /** `cwd` is workspace-relative; null starts in the workspace's root. */
+  terminalOpen: (workspaceId: string, cwd: string | null = null) => invoke<string>("terminal_open", { workspaceId, cwd }),
   terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
   /** Starts the shell again in the same tab, from the same directory, with a fresh environment. */
   terminalRestart: (id: string) => invoke<void>("terminal_restart", { id }),
@@ -169,10 +172,11 @@ export const api = {
     invoke<string>("duplicate_entry", { workspaceId, path }),
   trashEntry: (workspaceId: string, path: string) =>
     invoke<void>("trash_entry", { workspaceId, path }),
-  /** Copies, or moves when `cut`, an absolute path into a workspace directory;
-   *  returns the new workspace-relative path. */
-  pasteEntry: (workspaceId: string, from: string, toDir: string, cut: boolean) =>
-    invoke<string>("paste_entry", { workspaceId, from, toDir, cut }),
+  /** Copies, or moves when `cut`, an absolute path into a workspace directory.
+   *  Under `ask` a taken name comes back as `exists`, with nothing done; under
+   *  null a copy takes a free name and a move onto a taken one fails. */
+  pasteEntry: (workspaceId: string, from: string, toDir: string, cut: boolean, conflict: Conflict | null = null) =>
+    invoke<Transfer>("paste_entry", { workspaceId, from, toDir, cut, conflict }),
   /** The desktop clipboard's file list, empty when it holds anything else. */
   clipboardFiles: () => invoke<ClipboardFiles>("clipboard_files"),
   setClipboardFiles: (paths: string[], cut: boolean) =>
@@ -180,6 +184,8 @@ export const api = {
   clearClipboardFiles: () => invoke<void>("clear_clipboard_files"),
   revealEntry: (workspaceId: string, path: string) =>
     invoke<void>("reveal_entry", { workspaceId, path }),
+  /** Whether Ctrl was held at the last drop: WebKitGTK's own `ctrlKey` in a drag is stale. */
+  dropModifiers: (native: boolean) => invoke<{ ctrl: boolean }>("drop_modifiers", { native }),
   searchProject: (workspaceId: string, query: string, includeIgnored: boolean) =>
     invoke<SearchHit[]>("search_project", { workspaceId, query, includeIgnored }),
   readFile: (workspaceId: string, path: string) =>
@@ -220,8 +226,9 @@ export const api = {
     invoke<string>("git_checkout", { workspaceId, name, stash }),
   gitDeleteBranch: (workspaceId: string, name: string, force: boolean) =>
     invoke<string>("git_delete_branch", { workspaceId, name, force }),
+  /** The commits no other branch or remote holds. */
   gitUnmergedCommits: (workspaceId: string, name: string) =>
-    invoke<string[]>("git_unmerged_commits", { workspaceId, name }),
+    invoke<Unmerged>("git_unmerged_commits", { workspaceId, name }),
   gitWorktrees: (workspaceId: string) => invoke<WorktreeEntry[]>("git_worktrees", { workspaceId }),
   gitAddWorktree: (workspaceId: string, path: string, branch: string, create: boolean) =>
     invoke<string>("git_add_worktree", { workspaceId, path, branch, create }),

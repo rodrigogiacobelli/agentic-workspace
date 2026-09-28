@@ -283,6 +283,23 @@ export interface StaleTerminal {
   label: string;
 }
 
+/** What a paste or a drop did: the new workspace-relative path, or, when the
+ *  name is taken and the conflict was `ask`, nothing yet and `exists`. */
+export interface Transfer {
+  path: string | null;
+  exists: boolean;
+}
+
+/** What a branch holds that no other branch does. */
+export interface Unmerged {
+  count: number;
+  /** `<short hash> <subject>`, at most twenty. */
+  commits: string[];
+}
+
+/** What a paste does when the name is taken: ask first, replace it, or keep both. */
+export type Conflict = "ask" | "replace" | "keep";
+
 export interface StoredAsset {
   path: string;
   link: string;

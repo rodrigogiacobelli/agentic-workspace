@@ -203,7 +203,7 @@ pub fn create_entry(state: tauri::State<AppState>, workspace_id: String, path: S
 pub fn rename_entry(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, from: String, to: String) -> Result<(), String> {
     let (_, src) = resolve(&state, &workspace_id, &from).map_err(|e| format!("{e:#}"))?;
     let (_, dst) = resolve(&state, &workspace_id, &to).map_err(|e| format!("{e:#}"))?;
-    if dst.exists() {
+    if taken(&dst) {
         return Err(format!("{to} already exists"));
     }
     std::fs::rename(&src, &dst)
@@ -239,25 +239,35 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        let target = dst.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_symlink() {
-            // A copy that followed the link would duplicate what it points at,
-            // and a cross-filesystem move would then delete the original link.
-            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, target)?;
-        } else if kind.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), target)?;
-        }
+        copy_entry(&entry.path(), &dst.join(entry.file_name()))?;
     }
     Ok(())
+}
+
+/// Copies a file, a directory with everything in it, or a symlink as a link.
+/// A copy that followed a link would duplicate what it points at, and a
+/// cross-filesystem move would then delete the original link.
+fn copy_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let kind = std::fs::symlink_metadata(src)?.file_type();
+    if kind.is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
+    } else if kind.is_dir() {
+        copy_dir(src, dst)
+    } else {
+        std::fs::copy(src, dst).map(|_| ())
+    }
+}
+
+/// Whether anything is at `path`, a dangling symlink included, which
+/// `exists` would call free and a rename would silently replace.
+fn taken(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 /// A name in `dir` that nothing has: the wanted one, else `<stem> copy<ext>`,
 /// `<stem> copy 2<ext>`, and so on.
 fn free_copy_name(root: &Path, dir: &str, name: &str) -> Result<String> {
-    if !root.join(join_rel(dir, name)).exists() {
+    if !taken(&root.join(join_rel(dir, name))) {
         return Ok(join_rel(dir, name));
     }
     let (stem, ext) = match name.rsplit_once('.') {
@@ -267,98 +277,152 @@ fn free_copy_name(root: &Path, dir: &str, name: &str) -> Result<String> {
     (1..1000)
         .map(|n| if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") })
         .map(|n| join_rel(dir, &n))
-        .find(|rel| !root.join(rel).exists())
+        .find(|rel| !taken(&root.join(rel)))
         .context("no free name for the copy")
 }
 
 /// Moves `src` to `dst` across filesystems, which `rename` cannot do: a
 /// clipboard cut may name a file on another mount.
 fn move_across(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let is_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
     match std::fs::rename(src, dst) {
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            let copied = if src.is_dir() { copy_dir(src, dst) } else { std::fs::copy(src, dst).map(|_| ()) };
-            if let Err(e) = copied {
+            if let Err(e) = copy_entry(src, dst) {
                 // Half a directory under a name the user did not ask for is
                 // worse than the failure itself.
-                let _ = if dst.is_dir() { std::fs::remove_dir_all(dst) } else { std::fs::remove_file(dst) };
+                let _ = if is_dir(dst) { std::fs::remove_dir_all(dst) } else { std::fs::remove_file(dst) };
                 return Err(e);
             }
-            if src.is_dir() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) }
+            if is_dir(src) { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) }
         }
         other => other,
     }
 }
 
-/// Pastes a copied or cut entry into a directory. A copy takes a free name;
-/// a cut is a move that refuses to overwrite.
+/// What a paste did: where the entry landed, or, when the name was taken and
+/// the caller asked first, nothing yet.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Transfer {
+    /// Relative to the workspace root; `None` when nothing moved.
+    pub path: Option<String>,
+    /// The destination name is taken and `ask` left everything as it was.
+    pub exists: bool,
+}
+
+/// Pastes a copied or cut entry into a directory, which is also what a drag
+/// in the tree and a drop from another application do.
 ///
 /// `from` is absolute, because the clipboard it comes from is the desktop's:
 /// the source may be anywhere the user can read, and only the destination is
 /// confined to the workspace.
-#[tauri::command]
-pub fn paste_entry(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, from: String, to_dir: String, cut: bool) -> Result<String, String> {
+///
+/// `conflict` says what a taken name does: `ask` changes nothing and answers
+/// `exists`, `replace` sends what is there to the trash first, `keep` takes a
+/// free name. Without it a copy takes a free name and a cut refuses.
+///
+/// Off the main thread: a copy may be large, a cross-mount move slow.
+#[tauri::command(async)]
+pub fn paste_entry(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+    workspace_id: String,
+    from: String,
+    to_dir: String,
+    cut: bool,
+    conflict: Option<String>,
+) -> Result<Transfer, String> {
     let (root, dst_dir) = resolve(&state, &workspace_id, &to_dir).map_err(|e| format!("{e:#}"))?;
-    if !Path::new(&from).is_absolute() {
+    let from_path = Path::new(&from);
+    if !from_path.is_absolute() {
         return Err(format!("{from} is not an absolute path"));
     }
-    // Resolved, not taken as given: the clipboard's path may be a symlink or
-    // carry `..`, and both the containment check below and the
-    // is-it-in-this-workspace question have to be asked of the real location.
-    let src = std::fs::canonicalize(&from).map_err(|e| format!("{from} is no longer there: {e}"))?;
-    let name = src
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| format!("{from} has no name"))?;
-    let to_dir = to_dir.trim_matches('/').to_string();
+    // The parent is resolved, not taken as given: the path may pass through
+    // a symlinked directory or carry `..`, and both the containment checks
+    // below and the is-it-in-this-workspace question have to be asked of the
+    // real location. The entry itself is not, so a symlink keeps its own name
+    // and is copied as a link.
+    let (Some(parent), Some(file_name)) = (from_path.parent(), from_path.file_name()) else {
+        return Err(format!("{from} has no name"));
+    };
+    let name = file_name.to_string_lossy().into_owned();
+    let gone = |e: std::io::Error| format!("{from} is no longer there: {e}");
+    let src = std::fs::canonicalize(parent).map_err(gone)?.join(file_name);
+    let src_is_dir = std::fs::symlink_metadata(&src).map_err(gone)?.is_dir();
+    let real_dir = std::fs::canonicalize(&dst_dir).map_err(|e| format!("{} is not there: {e}", dst_dir.display()))?;
     // Copying a directory into itself, or into anything under it, walks into
     // what it is writing and does not stop. The destination may be under an
     // external source just as easily as under one in the workspace, so this is
     // asked of the absolute paths.
-    if src.is_dir() && dst_dir.starts_with(&src) {
+    if src_is_dir && real_dir.starts_with(&src) {
         return Err(format!("{} cannot be pasted into itself", src.display()));
     }
     // What the source is called inside this workspace, when it is inside it:
     // the form the tree, the tabs and the views speak.
     let inside = src.strip_prefix(&root).ok().map(|rel| rel.to_string_lossy().into_owned());
+    let to_dir = to_dir.trim_matches('/').to_string();
+    let wanted = join_rel(&to_dir, &name);
+    let target = real_dir.join(file_name);
+    let landed = |path: String| Transfer { path: Some(path), exists: false };
+    // The entry is already where it is being put: moving it there does
+    // nothing, and replacing it would trash the source.
+    if target == src && (cut || conflict.as_deref() == Some("replace")) {
+        return Ok(landed(wanted));
+    }
+    let dest = match conflict.as_deref() {
+        None if cut => {
+            if taken(&target) {
+                return Err(format!("{wanted} already exists"));
+            }
+            wanted
+        }
+        None | Some("keep") => free_copy_name(&root, &to_dir, &name).map_err(|e| format!("{e:#}"))?,
+        Some("ask") if taken(&target) => return Ok(Transfer { path: None, exists: true }),
+        Some("ask") => wanted,
+        Some("replace") => {
+            if taken(&target) {
+                if src.starts_with(&target) {
+                    return Err(format!("{wanted} holds {from}, so it cannot be replaced by it"));
+                }
+                trash(&target).map_err(|e| format!("{e:#}"))?;
+            }
+            wanted
+        }
+        Some(other) => return Err(format!("no conflict rule {other}")),
+    };
+    let dst = root.join(&dest);
     if cut {
-        let dest = join_rel(&to_dir, &name);
-        if inside.as_deref() == Some(dest.as_str()) {
-            return Ok(dest);
-        }
-        let dst = root.join(&dest);
-        if dst.exists() {
-            return Err(format!("{dest} already exists"));
-        }
         move_across(&src, &dst).with_context(|| format!("moving {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
         // A cut inside the workspace is a move: what was open under the old
         // path follows it.
         if let Some(rel) = inside {
             crate::session::relocate(&app, &workspace_id, &rel, &dest);
         }
-        return Ok(dest);
+    } else {
+        copy_entry(&src, &dst).with_context(|| format!("copying {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
     }
-    let dest = free_copy_name(&root, &to_dir, &name).map_err(|e| format!("{e:#}"))?;
-    let dst = root.join(&dest);
-    let result = if src.is_dir() { copy_dir(&src, &dst) } else { std::fs::copy(&src, &dst).map(|_| ()) };
-    result.with_context(|| format!("copying {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
-    Ok(dest)
+    Ok(landed(dest))
 }
 
-/// Moves the entry to the desktop's trash through GIO, never `rm`.
+/// Moves an entry to the desktop's trash through GIO, never `rm`.
+pub fn trash(abs: &Path) -> Result<()> {
+    let mut cmd = Command::new("gio");
+    crate::desktop::clean_child_env(&mut cmd);
+    let output = cmd
+        .arg("trash")
+        .arg(abs)
+        .output()
+        .with_context(|| format!("running gio trash on {}", abs.display()))?;
+    if !output.status.success() {
+        anyhow::bail!("gio trash failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn trash_entry(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {
     let (_, abs) = resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
-    let output = Command::new("gio")
-        .arg("trash")
-        .arg(&abs)
-        .output()
-        .with_context(|| format!("running gio trash on {}", abs.display()))
-        .map_err(|e| format!("{e:#}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("gio trash failed: {}", String::from_utf8_lossy(&output.stderr).trim()))
-    }
+    trash(&abs).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
