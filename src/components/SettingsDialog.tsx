@@ -173,6 +173,7 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
               <span>Markdown opens in</span>
               <Dropdown value={current.markdownMode} options={[{ id: "source", label: "Source" }, { id: "split", label: "Split" }, { id: "rich", label: "Rich" }]} onChange={(id) => set({ markdownMode: id as "source" | "split" | "rich" })} />
             </label>
+            {toggle("Rich mode fills the tab width", current.richFullWidth, (v) => set({ richFullWidth: v }))}
             {toggle("Autosave", current.autosave, (v) => set({ autosave: v }))}
             {number("Autosave delay (ms)", current.autosaveDelayMs, (v) => set({ autosaveDelayMs: v }), 200, 60000, 100)}
             {number("Warn for assets above (MB)", current.assetWarnMb, (v) => set({ assetWarnMb: v }), 1, 1000)}

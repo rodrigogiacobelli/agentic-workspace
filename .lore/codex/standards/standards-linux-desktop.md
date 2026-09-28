@@ -9,8 +9,9 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   the scheduling class an auto-nice daemon hands down, the identity a development
   build carries so it runs beside an installed one, the X11 backend an AppImage
   runs on, the environment every child process is cleaned of, what WebKitGTK
-  does to a drag and to Shift+Tab, the AppImage strip flag and the Cargo version
-  floor. Each fails silently when broken.
+  does to a drag and to Shift+Tab, the hidden directories the asset protocol
+  refuses, the AppImage strip flag and the Cargo version floor. Each fails
+  silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
   - standards-motion
@@ -22,6 +23,7 @@ related:
 binds:
   - src-tauri/src/desktop.rs
   - src/dropRoute.ts
+  - src-tauri/tauri.conf.json
 ---
 
 # Linux desktop standard
@@ -306,6 +308,21 @@ A `keydown` for Shift+Tab carries `key: "Unidentified"` and `code: "Tab"`. A
 handler that matches `e.key === "Tab"` misses every Shift+Tab without any
 error, which in a focus trap lets the keyboard walk out of a modal backwards.
 Match `e.code` as well, as `src/modal.ts` does.
+
+## The asset protocol refuses hidden directories unless told otherwise
+
+Every image, audio and video the webview shows from a workspace loads through
+Tauri's `asset:` protocol, which checks the path against
+`app.security.assetProtocol.scope` in `tauri.conf.json`. On Unix that scope's
+glob requires a leading dot to be written literally, so `**` matches nothing
+beneath a component such as `.claude`, and a request under one is refused with
+a 403. The page sees only a failed load. A workspace under
+`.claude/worktrees/` then shows every asset as missing, in documents and in
+the image tab alike, while the same files render in a workspace elsewhere.
+
+The scope is therefore written as `{ "allow": ["**"], "requireLiteralLeadingDot": false }`.
+Left at the default, it also refuses an asset under `.github/` or `.lore/` in
+any workspace.
 
 ## The AppImage target needs `NO_STRIP=1`
 

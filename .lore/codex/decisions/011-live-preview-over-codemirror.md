@@ -47,7 +47,10 @@ The rendered view is a **CodeMirror 6 view over the same document** as the
 source view, with an extension that decorates the markdown syntax tree in
 place: syntax marks are hidden except around the cursor, headings and emphasis
 are styled, and images, audio, tables, task boxes, rules and frontmatter are
-replaced by widgets while the cursor is outside them.
+replaced by widgets while the cursor is outside them. Only a focused view
+reveals syntax, so the rendered side of a split draws every line while the
+source side is edited. An image, audio or video whose line holds the cursor
+stays drawn after its revealed source rather than disappearing into it.
 
 Split mode is two views over one document. Every change made in either view
 is forwarded to the other, and only the source view carries the undo history,

@@ -84,6 +84,7 @@ function apply(s: Settings): void {
   root.setProperty("--prose", s.proseFontFamily ? `"${s.proseFontFamily}", ${proseFallback}` : proseFallback);
   root.setProperty("--editor-size", `${s.editorFontSize}px`);
   root.setProperty("--prose-size", `${s.proseFontSize}px`);
+  root.setProperty("--prose-width", s.richFullWidth ? "none" : "820px");
   document.documentElement.dataset.theme = t.dark ? "dark" : "light";
   // One preference for the mode selector and every panel strip: each draws
   // both a word and a glyph, and the stylesheet shows the one chosen.

@@ -43,6 +43,8 @@ pub struct Settings {
     pub tab_display: String,
     /// The mode a markdown file opens in: `source`, `split` or `rich`.
     pub markdown_mode: String,
+    /// Rich mode fills the tab's width rather than a readable column.
+    pub rich_full_width: bool,
     /// The program a terminal tab runs. Empty means `$SHELL`, which is what
     /// the desktop's own terminal would start.
     pub terminal_shell: String,
@@ -143,6 +145,7 @@ impl Default for Settings {
             languages: HashMap::new(),
             tab_display: "labels".into(),
             markdown_mode: "source".into(),
+            rich_full_width: false,
             terminal_shell: String::new(),
             terminal_gpu: "auto".into(),
             panel_layout: serde_json::Value::Null,

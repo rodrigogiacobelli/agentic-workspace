@@ -1,6 +1,6 @@
 [package]
 name = "agentic-workspace"
-version = "0.2.1"
+version = "0.3.1"
 description = "Several agent-driven projects open at once, switching between them for free"
 authors = ["Rodrigo Giacobelli"]
 edition = "2021"

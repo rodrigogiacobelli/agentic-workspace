@@ -208,6 +208,8 @@ export interface Settings {
   tabDisplay: "labels" | "icons";
   /** The mode a markdown file opens in. */
   markdownMode: "source" | "split" | "rich";
+  /** Rich mode fills the tab's width rather than a readable column. */
+  richFullWidth: boolean;
   /** The program a terminal tab runs; empty means `$SHELL`. */
   terminalShell: string;
   /** Which renderer a terminal draws with. */

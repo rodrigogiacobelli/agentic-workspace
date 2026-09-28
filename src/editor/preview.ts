@@ -1,7 +1,8 @@
 // Rendering markdown in place: the syntax tree that highlights the source also
 // decides what to hide, style or replace with a widget. Syntax stays visible
-// on the lines the selection touches, so what is being edited is always the
-// source. See ADR-011.
+// on the lines the selection touches while the view has focus, so what is
+// being edited is always the source, and a pane only being read — the
+// rendered side of a split — draws every line. See ADR-011.
 
 import { syntaxTree } from "@codemirror/language";
 import { EditorState, StateEffect, StateField, type EditorSelection, type Extension, type Range } from "@codemirror/state";
@@ -37,7 +38,18 @@ export function mediaKind(href: string): "image" | "audio" | "video" | "file" {
 
 interface LineSpan { from: number; to: number }
 
+const setFocused = StateEffect.define<boolean>();
+
+const focused = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setFocused)) return e.value;
+    return value;
+  },
+});
+
 function selectionLines(state: EditorState, selection: EditorSelection): LineSpan[] {
+  if (!state.field(focused)) return [];
   return selection.ranges.map((r) => ({
     from: state.doc.lineAt(r.from).number,
     to: state.doc.lineAt(r.to).number,
@@ -287,7 +299,7 @@ function blockDecorations(state: EditorState): DecorationSet {
 const blockField = StateField.define<DecorationSet>({
   create: blockDecorations,
   update(value, tr) {
-    if (tr.docChanged || tr.selection || syntaxTree(tr.state) !== syntaxTree(tr.startState)) return blockDecorations(tr.state);
+    if (tr.docChanged || tr.selection || tr.state.field(focused) !== tr.startState.field(focused) || syntaxTree(tr.state) !== syntaxTree(tr.startState)) return blockDecorations(tr.state);
     return value;
   },
   provide: (f) => EditorView.decorations.from(f),
@@ -385,22 +397,27 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
           case "Escape":
             if (!isRevealed(n)) hide(n.from, n.from + 1);
             return false;
+          // Media being edited stays drawn after its source, so an image on
+          // the only line of a note is still seen while that line is edited.
           case "Image": {
-            if (isRevealed(n)) return true;
             const text = state.doc.sliceString(n.from, n.to);
             const m = /^!\[([^\]]*)\]\(\s*<?([^\s>)]+)>?(?:\s+"[^"]*")?\s*\)$/.exec(text);
             if (!m) return true;
-            marks.push(Decoration.replace({ widget: new MediaWidget(m[2], m[1], ctx.resolveUrl(m[2])) }).range(n.from, n.to));
+            const widget = new MediaWidget(m[2], m[1], ctx.resolveUrl(m[2]));
+            if (isRevealed(n)) { marks.push(Decoration.widget({ widget, side: 1 }).range(n.to)); return true; }
+            marks.push(Decoration.replace({ widget }).range(n.from, n.to));
             return false;
           }
           case "Citation": {
             // Cited media renders as the media; anything else is a chip (CITE-06, CITE-07).
-            if (isRevealed(n)) return false;
             const path = citedPath(state.doc.sliceString(n.from, n.to));
-            const kind = mediaKind(path);
-            const widget = kind !== "file"
-              ? new MediaWidget(path, path.split("/").pop() ?? path, ctx.resolveRoot(path))
-              : new ChipWidget(path, (() => { const e = ctx.citation.exists(path.replace(/\/$/, "")); return e === undefined ? undefined : !e; })(), ctx.citation);
+            const media = mediaKind(path) !== "file" ? new MediaWidget(path, path.split("/").pop() ?? path, ctx.resolveRoot(path)) : null;
+            if (isRevealed(n)) {
+              if (media) marks.push(Decoration.widget({ widget: media, side: 1 }).range(n.to));
+              return false;
+            }
+            const widget = media
+              ?? new ChipWidget(path, (() => { const e = ctx.citation.exists(path.replace(/\/$/, "")); return e === undefined ? undefined : !e; })(), ctx.citation);
             marks.push(Decoration.replace({ widget }).range(n.from, n.to));
             return false;
           }
@@ -442,7 +459,7 @@ export function livePreview(ctx: PreviewContext): Extension {
       decorations: DecorationSet;
       constructor(view: EditorView) { this.decorations = inlineDecorations(view, ctx); }
       update(u: ViewUpdate) {
-        const refreshed = u.transactions.some((tr) => tr.effects.some((e) => e.is(refreshPreview)));
+        const refreshed = u.transactions.some((tr) => tr.effects.some((e) => e.is(refreshPreview) || e.is(setFocused)));
         if (u.docChanged || u.viewportChanged || u.selectionSet || refreshed || syntaxTree(u.state) !== syntaxTree(u.startState)) {
           this.decorations = inlineDecorations(u.view, ctx);
         }
@@ -451,6 +468,8 @@ export function livePreview(ctx: PreviewContext): Extension {
     { decorations: (v) => v.decorations },
   );
   return [
+    focused,
+    EditorView.focusChangeEffect.of((_, focusing) => setFocused.of(focusing)),
     blockField,
     plugin,
     EditorView.editorAttributes.of({ class: "cm-lp" }),
