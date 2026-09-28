@@ -440,10 +440,10 @@ pub fn delete_theme(app: AppHandle, state: tauri::State<AppState>, id: String) -
                 changed = true;
             }
         }
-        changed.then(|| settings.clone())
+        changed
     };
-    if let Some(s) = changed {
-        crate::settings::save_and_emit(&app, &state, &s);
+    if changed {
+        crate::settings::save_and_emit(&app, &state);
     }
     Ok(())
 }

@@ -41,6 +41,9 @@ libc = "0.2"
 # Terminal output rides tauri's channel as base64: see pty::MAX_MESSAGE_BYTES.
 # Already in the tree through Tauri.
 base64 = "0.22"
+# Key passphrases in the desktop's wallet, over the Secret Service. Already in
+# the tree through ashpd and the opener and single-instance plugins.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [profile.release]
 opt-level = 3

@@ -5,6 +5,7 @@ import { api } from "./api";
 import { Doc, type DocHooks, type Mode } from "./editor/document";
 import { languageFor } from "./editor/languages";
 import { mediaKind } from "./editor/preview";
+import { modalOpen } from "./modal";
 import * as settings from "./settings";
 import type { EditorGroup, EditorTab, Workspace } from "./types";
 
@@ -107,7 +108,8 @@ export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElemen
     notify();
   }
   if ("doc" in entry) {
-    entry.doc.mount(container, tab.line || 1, focus);
+    // Behind a modal the keyboard stays with the modal.
+    entry.doc.mount(container, tab.line || 1, focus && !modalOpen());
     const target = pending.get(tab.id);
     if (target) {
       pending.delete(tab.id);

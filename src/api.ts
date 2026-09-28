@@ -5,8 +5,9 @@ import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
-  AreaId, BlameLine, Branches, ClipboardFiles, CommitDetail, DiffSpec, DirChanged, DockedMode, Entry, HotkeyStatus, ImportedTheme,
-  LogEntry, RepoInfo, SearchHit, Session, Settings, Stash, StatusEntry, StoredAsset, Tag, WindowRole, WorktreeEntry,
+  AreaId, BlameLine, Branches, ClipboardFiles, CommitDetail, CredentialPrompt, CredentialStatus, DiffSpec, DirChanged, DockedMode,
+  Entry, HotkeyStatus, ImportedTheme, KeyFile, LogEntry, RepoInfo, SearchHit, Session, Settings, StaleTerminal, Stash, StatusEntry,
+  StoredAsset, Tag, WindowRole, WorktreeEntry,
 } from "./types";
 
 /** Terminal output arrives base64-encoded (see `pty::MAX_MESSAGE_BYTES`); the
@@ -83,6 +84,32 @@ export const api = {
   readDraft: (workspaceId: string, path: string) => invoke<string | null>("read_draft", { workspaceId, path }),
   deleteDraft: (workspaceId: string, path: string) => invoke<void>("delete_draft", { workspaceId, path }),
   updateSettings: (settings: Settings) => invoke<Settings>("update_settings", { settings }),
+
+  credentialsStatus: () => invoke<CredentialStatus>("credentials_status"),
+  /** The private keys in `~/.ssh` that could be added. */
+  credentialsKeyFiles: () => invoke<KeyFile[]>("credentials_key_files"),
+  /** Returns the new credential's id. */
+  credentialAddKey: (path: string) => invoke<string>("credential_add_key", { path }),
+  credentialRenameKey: (id: string, name: string) => invoke<void>("credential_rename_key", { id, name }),
+  /** Checks the passphrase against the key, then stores it in the wallet. */
+  credentialSavePassphrase: (id: string, passphrase: string) =>
+    invoke<void>("credential_save_passphrase", { id, passphrase }),
+  /** Deletes its wallet entry first, then the credential and every assignment to it. */
+  credentialRemoveKey: (id: string) => invoke<void>("credential_remove_key", { id }),
+  /** Returns the new identity's id. */
+  credentialAddIdentity: (label: string, name: string, email: string) =>
+    invoke<string>("credential_add_identity", { label, name, email }),
+  credentialUpdateIdentity: (id: string, label: string, name: string, email: string) =>
+    invoke<void>("credential_update_identity", { id, label, name, email }),
+  credentialRemoveIdentity: (id: string) => invoke<void>("credential_remove_identity", { id }),
+  /** Null unsets a field; `""` is explicitly the user's own setup. */
+  setWorkspaceCredentials: (workspaceId: string, sshKey: string | null, identity: string | null, terminals: boolean) =>
+    invoke<void>("set_workspace_credentials", { workspaceId, sshKey, identity, terminals }),
+  /** The prompts from ssh still waiting on an answer. */
+  credentialPrompts: () => invoke<CredentialPrompt[]>("credential_prompts"),
+  /** Null declines. */
+  credentialPromptAnswer: (id: string, answer: string | null) =>
+    invoke<void>("credential_prompt_answer", { id, answer }),
   /** Stores clipboard bytes; metadata travels as headers beside the raw body. */
   saveAsset: (workspaceId: string, note: string, name: string | null, mime: string, bytes: ArrayBuffer) =>
     invoke<StoredAsset>("save_asset", new Uint8Array(bytes), {
@@ -101,6 +128,11 @@ export const api = {
 
   terminalOpen: (workspaceId: string) => invoke<string>("terminal_open", { workspaceId }),
   terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
+  /** Starts the shell again in the same tab, from the same directory, with a fresh environment. */
+  terminalRestart: (id: string) => invoke<void>("terminal_restart", { id }),
+  /** The workspace's shells that started without the credentials its terminals now carry. */
+  workspaceStaleTerminals: (workspaceId: string) =>
+    invoke<StaleTerminal[]>("workspace_stale_terminals", { workspaceId }),
   /** Installs `onOutput` for live bytes and returns the buffered tail. */
   terminalAttach: (id: string, cols: number, rows: number, onOutput: Channel<OutputChunk>) =>
     invoke<ArrayBuffer>("terminal_attach", { id, cols, rows, onOutput }),
@@ -226,6 +258,8 @@ export const events = {
     listen<Session>("session-changed", (e) => cb(e.payload)),
   onNotice: (cb: (message: string) => void): Promise<UnlistenFn> =>
     listen<string>("notice", (e) => cb(e.payload)),
+  onInfo: (cb: (message: string) => void): Promise<UnlistenFn> =>
+    listen<string>("notice-info", (e) => cb(e.payload)),
   onDirChanged: (cb: (p: DirChanged) => void): Promise<UnlistenFn> =>
     listen<DirChanged>("dir-changed", (e) => cb(e.payload)),
   onQuitRequested: (cb: () => void): Promise<UnlistenFn> =>
@@ -238,6 +272,14 @@ export const events = {
     listen<HotkeyStatus>("hotkey-changed", (e) => cb(e.payload)),
   onOpenAt: (cb: (t: OpenAt) => void): Promise<UnlistenFn> =>
     listen<OpenAt>("open-at", (e) => cb(e.payload)),
+  onCredentialPrompt: (cb: (p: CredentialPrompt) => void): Promise<UnlistenFn> =>
+    listen<CredentialPrompt>("credential-prompt", (e) => cb(e.payload)),
+  /** A prompt that stopped waiting; the id is the prompt's. */
+  onCredentialPromptClosed: (cb: (id: string) => void): Promise<UnlistenFn> =>
+    listen<string>("credential-prompt-closed", (e) => cb(e.payload)),
+  /** A terminal's shell was restarted in place; the id is the tab's. */
+  onTerminalRestarted: (cb: (id: string) => void): Promise<UnlistenFn> =>
+    listen<string>("terminal-restarted", (e) => cb(e.payload)),
   onWindowResized: (cb: () => void): Promise<UnlistenFn> => getCurrentWindow().onResized(() => cb()),
 };
 

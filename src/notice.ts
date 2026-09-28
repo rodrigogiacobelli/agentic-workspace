@@ -3,3 +3,8 @@ export function report(e: unknown): void {
   console.error(e);
   window.dispatchEvent(new CustomEvent("app-notice", { detail: String(e) }));
 }
+
+/** A short confirmation of something that worked: a toast that leaves on its own. */
+export function notify(text: string): void {
+  window.dispatchEvent(new CustomEvent("app-notice", { detail: { text, kind: "info" } }));
+}

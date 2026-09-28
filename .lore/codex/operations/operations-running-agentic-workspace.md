@@ -3,14 +3,16 @@ id: operations-running-agentic-workspace
 title: Running Agentic Workspace
 summary: How to run Agentic Workspace from a checkout on Arch, build the deb, rpm
   and AppImage bundles, install the AppImage and replace it with a newer build without
-  losing the session, run a development build beside an installed one, start the app
-  at login under KDE, and read the four failures that stop it before a window
-  appears.
+  losing the session, run a development build beside an installed one, find the
+  binary's ssh helper modes, the runtime files and the wallet items behind a
+  workspace's SSH key, start the app at login under KDE, and read the four failures
+  that stop it before a window appears.
 related:
 - standards-linux-desktop
 - 008-tauri-v2-on-arch-kde
 - 004-central-settings-store
 - 013-app-drawn-chrome-and-tray
+- 019-credentials-through-the-secret-service
 binds:
 - src-tauri/tauri.conf.json
 - package.json
@@ -47,10 +49,17 @@ sudo pacman -S --needed base-devel webkit2gtk-4.1 gtk3 libayatana-appindicator r
 | `rustup` | Rust; `rust-version` in `src-tauri/Cargo.toml` sets the floor at 1.88 |
 | `nodejs`, `pnpm` | the frontend build |
 
-The backend also shells out to four binaries at run time: `git` for every git
-operation, `rg` from `ripgrep` for project search, `gio` from `glib2` to move a
-deleted file to the trash, and `notify-send` from `libnotify` for desktop
-notifications. Each one fails at the moment it is used rather than at startup.
+The backend also shells out to six binaries at run time: `git` for every git
+operation, `ssh` and `ssh-keygen` from `openssh` for a workspace's SSH key —
+the wrapper runs `ssh`, and adding a key or saving its passphrase runs
+`ssh-keygen` — `rg` from `ripgrep` for project search, `gio` from `glib2` to
+move a deleted file to the trash, and `notify-send` from `libnotify` for
+desktop notifications. Each one fails at the moment it is used rather than at
+startup:
+
+```fish
+sudo pacman -S --needed git openssh ripgrep glib2 libnotify
+```
 
 Put Cargo on the path, install the frontend dependencies, and start the
 development build:
@@ -125,11 +134,13 @@ whole bundle step goes with it. `NO_STRIP=1` skips those calls, and
 `standards-linux-desktop` is the rule; the deb and rpm targets are unaffected by
 either variable.
 
-The deb and rpm declare the two shared libraries their package managers resolve
-— `libwebkit2gtk-4.1-0` and `libayatana-appindicator3-1` for deb,
-`webkit2gtk4.1` and `libayatana-appindicator-gtk3` for rpm, both in
-`src-tauri/tauri.conf.json`. The AppImage resolves nothing from the host: it
-carries WebKitGTK, GTK and their dependencies inside the bundle.
+The deb and rpm declare what their package managers resolve —
+`libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1` and `openssh-client` for
+deb, `webkit2gtk4.1`, `libayatana-appindicator-gtk3` and `openssh-clients` for
+rpm, all in `src-tauri/tauri.conf.json`. The AppImage resolves no library from
+the host: it carries WebKitGTK, GTK and their dependencies inside the bundle,
+and runs the host's `git`, `ssh`, `ssh-keygen` and the other binaries above.
+Its GTK hook runs it under X11 (`standards-linux-desktop`).
 
 ## Where the app keeps its state
 
@@ -141,7 +152,7 @@ Each entry below is one per build.
 | Entry | Written by | Holds |
 |---|---|---|
 | `session.json` | `store::save` | the workspaces, open editors, terminal tabs and their working directories, under a `version` field |
-| `settings.json` | `settings::save` | global settings and per-workspace settings keyed by absolute path, as ADR-004 requires |
+| `settings.json` | `settings::save` | global settings and per-workspace settings keyed by absolute path, as ADR-004 requires: among them `credentials` (the SSH keys by the path of their file in `~/.ssh`, and the commit identities), each workspace's `sshKey`, `identity` and `terminalCredentials`, and `settingsTab`, the page the settings dialog opens on. No passphrase is in it |
 | `windows.json` | `windows::save` | each window's size, position, maximised state and monitor name |
 | `drafts/` | `files::save_draft` | unsaved editor buffers, one file per document |
 | `themes/` | `themes::import_themes` | imported VS Code colour themes |
@@ -166,6 +177,66 @@ unconditionally. Both files are named after `desktop::APP_ID`, so a development
 build maintains its own pair rather than these.
 `standards-linux-desktop` holds the reason they are repaired at startup rather
 than installed by hand.
+
+An unreadable `settings.json` is renamed to
+`settings.json.unreadable-<seconds>` rather than overwritten. The app then
+starts on the default settings and shows a notice naming the moved file and
+saying that every workspace's SSH key, commit identity and terminal
+credentials were reset; the keys' passphrases stay in the wallet.
+
+## SSH keys, the wallet and the runtime directory
+
+`019-credentials-through-the-secret-service` holds why each piece below
+exists.
+
+**The binary's helper modes.** `main` runs `askpass::helper` before the
+application starts, and the same executable then acts for ssh instead of
+opening a window:
+
+| Started as | By | Does |
+|---|---|---|
+| `<exe> --agentic-ssh <socket> <key> <credential id> <ssh arguments>` | git, through `GIT_SSH_COMMAND` or a terminal's `core.sshCommand` | runs `ssh` with the assigned key as its only identity |
+| `<exe> <prompt>` with `AGENTIC_WORKSPACE_SOCKET` set | ssh, as `SSH_ASKPASS` | relays the prompt to the running application and prints its answer |
+
+Run by hand, the askpass mode with no application running prints `Agentic
+Workspace is not running, so no passphrase was given.` and exits 1. The
+wrapper exits 255 with a message starting `Agentic Workspace:` when the key
+file is missing or the runtime directory is unusable.
+
+**The runtime directory.** `$XDG_RUNTIME_DIR/<APP_ID>` —
+`/run/user/<uid>/dev.agenticworkspace.app/` for an installed build,
+`/run/user/<uid>/dev.agenticworkspace.app.dev/` for a development one. The app
+creates it with mode 0700 and refuses it, and `$XDG_RUNTIME_DIR`, when either
+is a symlink, belongs to another user, or is open to group or others. There is
+no fallback directory: without it ssh's prompts reach no dialog and a
+workspace with a key cannot fetch, pull or push.
+
+| Entry | Written by | Holds |
+|---|---|---|
+| `askpass-<pid>.sock` | `askpass::serve`, at launch | the relay's socket, mode 0600, one per running instance |
+| `ssh-<pid>-<random>.conf` | the wrapper, per connection | the host's flattened ssh configuration without its identity lines, mode 0600, deleted when ssh exits |
+| `terminal-<workspace id>.gitconfig` | `credentials::write_terminal_config` | for a workspace whose terminals carry its credentials: `core.sshCommand`, `ssh.variant` and the identity under `user`, `author` and `committer`, mode 0600 |
+
+`askpass::sweep` deletes, at launch, sockets and configuration files whose pid
+is gone. `credentials::write_terminal_configs` rewrites every open workspace's
+terminal file at launch and after every credential or assignment change, and
+deletes the file of a workspace that is closed or whose terminal option is off.
+
+**The wallet.** A saved passphrase is one item in the default collection of
+whatever owns `org.freedesktop.secrets` — GNOME Keyring, KWallet or KeePassXC —
+labelled `Agentic Workspace — SSH key <name>`, with the attributes
+`application=<APP_ID>`, `credential=<credential id>` and
+`xdg:schema=<APP_ID>.passphrase`. `secret-tool`, from `libsecret`, lists this
+build's items:
+
+```fish
+secret-tool search --all application dev.agenticworkspace.app
+```
+
+A development build's items carry `application=dev.agenticworkspace.app.dev`,
+and neither build reads, replaces or deletes the other's. Removing a key in
+Settings → Credentials deletes its item first; a key whose item cannot be
+deleted stays in the list.
 
 ## Install and update
 

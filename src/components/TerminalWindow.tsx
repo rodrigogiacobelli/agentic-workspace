@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { actionFor } from "../hotkeys";
+import { modalOpen } from "../modal";
 import { pick } from "../modes";
 import { useDismiss } from "../motion";
 import { report } from "../notice";
@@ -21,7 +23,7 @@ function basename(p: string): string {
 }
 
 function labelOf(tab: TerminalTab): string {
-  return tab.name ?? terminals.get(tab.id)?.title ?? basename(tab.cwd);
+  return tab.name ?? (terminals.get(tab.id)?.title || basename(tab.cwd));
 }
 
 export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
@@ -92,6 +94,9 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
     const onKey = (e: KeyboardEvent) => {
       const action = actionFor(e);
       if (!action) return;
+      // Behind a modal the keyboard is the modal's. Ctrl+Shift+V here would
+      // paste a passphrase meant for the dialog into the shell it covers.
+      if (modalOpen() && action !== "quit") return;
       const inst = activeId ? terminals.get(activeId) : undefined;
       switch (action) {
         case "switch-workspace": openSwitcher(); break;
@@ -170,38 +175,103 @@ export function TerminalFacts({ ws }: { ws: Workspace }) {
   );
 }
 
+/** What a dragged terminal tab carries: its id. */
+const TERMINAL_MIME = "application/x-agentic-terminal";
+
 function TabStrip({ ws, renaming, onRename, onRenamed }: {
   ws: Workspace;
   renaming: string | null;
   onRename: (id: string) => void;
   onRenamed: () => void;
 }) {
+  // The tab being dragged. A drag's data cannot be read before the drop, and
+  // the strip needs the tab earlier, to offer only the places it would move to.
   const dragging = useRef<string | null>(null);
+  // Where the dragged tab would land: before the tab at this index, or after
+  // the last one when it is the tab count.
+  const [over, setOver] = useState<number | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const strip = useTabStrip(ws.activeTerminal, ws.terminals.length);
 
-  const drop = (targetId: string) => {
-    const from = dragging.current;
-    dragging.current = null;
-    if (!from || from === targetId) return;
+  // A tab dropped on another lands before it; dropped on the empty strip past
+  // the last tab, it goes last.
+  const placeOf = (e: React.DragEvent): number | null => {
+    if (!(e.target instanceof Element)) return null;
+    const id = e.target.closest<HTMLElement>("[data-tab]")?.dataset.tab;
+    if (id) return ws.terminals.findIndex((t) => t.id === id);
+    return e.target.closest(".tabs-spacer") ? ws.terminals.length : null;
+  };
+
+  // Dropped on itself, or just before the tab that already follows it, a tab
+  // would stay where it is.
+  const moves = (from: string | null, at: number) => {
+    const i = ws.terminals.findIndex((t) => t.id === from);
+    return i >= 0 && at >= 0 && at !== i && at !== i + 1;
+  };
+
+  // WebKit fires only `dragenter` on the move that reaches a new element, and
+  // its answer decides whether a release there drops; `dragover` comes on the
+  // move after. Both are asked, and anywhere refused GTK cancels the drop.
+  const track = (e: React.DragEvent) => {
+    const at = placeOf(e);
+    const ok = at !== null && e.dataTransfer.types.includes(TERMINAL_MIME) && moves(dragging.current, at);
+    if (ok) e.preventDefault();
+    setOver(ok ? at : null);
+  };
+
+  // Crossing from a tab onto its label, or onto the next tab, fires
+  // `dragleave` too, after the new element's `dragenter`, and WebKit names no
+  // related target: only a pointer outside the strip has left it.
+  const leave = (e: React.DragEvent<HTMLElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX >= r.right || e.clientY < r.top || e.clientY >= r.bottom) setOver(null);
+  };
+
+  const drop = (e: React.DragEvent) => {
+    const from = e.dataTransfer.getData(TERMINAL_MIME);
+    const at = placeOf(e);
+    setOver(null);
+    if (at === null || !moves(from, at)) return;
+    e.preventDefault();
     const ids = ws.terminals.map((t) => t.id);
-    ids.splice(ids.indexOf(from), 1);
-    ids.splice(ids.indexOf(targetId), 0, from);
+    const i = ids.indexOf(from);
+    ids.splice(i, 1);
+    ids.splice(at > i ? at - 1 : at, 0, from);
     void api.reorderTerminals(ws.id, ids);
+  };
+
+  const restart = async (id: string) => {
+    const tab = ws.terminals.find((t) => t.id === id);
+    if (!tab) return;
+    const yes = await ask(`Restart the shell in “${labelOf(tab)}”? Whatever runs in it now stops.`, {
+      title: "Restart shell",
+      kind: "warning",
+      okLabel: "Restart",
+      cancelLabel: "Keep",
+    });
+    if (yes) await api.terminalRestart(id).catch((e) => report(`The shell in “${labelOf(tab)}” was not restarted: ${String(e)}`));
   };
 
   return (
     <div className="tab-bar">
-      <div className="tabs" ref={strip.ref} onWheel={strip.onWheel}>
-      {ws.terminals.map((tab) => (
+      <div
+        className="tabs"
+        ref={strip.ref}
+        onWheel={strip.onWheel}
+        onDragEnter={track}
+        onDragOver={track}
+        onDragLeave={leave}
+        onDrop={drop}
+      >
+      {ws.terminals.map((tab, i) => (
         <div
           key={tab.id}
           data-tab={tab.id}
-          className={`tab${tab.id === ws.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}`}
+          className={`tab${tab.id === ws.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}${over === i ? " drop-before" : ""}`}
           draggable
-          onDragStart={() => { dragging.current = tab.id; }}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={() => drop(tab.id)}
+          // WebKitGTK starts no drag whose data transfer is empty.
+          onDragStart={(e) => { dragging.current = tab.id; e.dataTransfer.setData(TERMINAL_MIME, tab.id); e.dataTransfer.effectAllowed = "move"; }}
+          onDragEnd={() => { dragging.current = null; setOver(null); }}
           onClick={() => void api.setActiveTerminal(ws.id, tab.id)}
           onDoubleClick={() => onRename(tab.id)}
           onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, id: tab.id }); }}
@@ -225,7 +295,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
           <button className="tab-close" onClick={(e) => { e.stopPropagation(); void api.terminalClose(tab.id); }} title="Close (Ctrl+Shift+W)">×</button>
         </div>
       ))}
-      <span className="tabs-spacer" />
+      <span className={`tabs-spacer${over === ws.terminals.length ? " drop-before" : ""}`} />
       </div>
       <TabOverflow
         strip={strip}
@@ -238,6 +308,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
           <button onClick={() => { onRename(menu.id); setMenu(null); }}>Rename…</button>
           <button onClick={() => { void api.terminalRename(menu.id, null); setMenu(null); }}>Use the program's title</button>
           <hr />
+          <button onClick={() => { void restart(menu.id); setMenu(null); }}>Restart shell</button>
           <button onClick={() => { void api.terminalClose(menu.id); setMenu(null); }}>Close</button>
         </ContextMenu>
       )}

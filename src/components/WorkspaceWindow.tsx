@@ -4,6 +4,7 @@ import { api, events } from "../api";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
 import { Live, retainKept } from "../live";
+import { modalOpen } from "../modal";
 import { pick } from "../modes";
 import { report } from "../notice";
 import * as repo from "../repo";
@@ -146,7 +147,8 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const action = actionFor(e);
-      if (!action) return;
+      // Behind a modal only quitting still works; every other key is the modal's.
+      if (!action || (modalOpen() && action !== "quit")) return;
       // Tab keys act on the working area of the mode on screen.
       const area = areaFor(ws?.mode ?? "editor");
       const activeId = ws ? activeGroupOf(ws, area)?.activeEditor ?? null : null;

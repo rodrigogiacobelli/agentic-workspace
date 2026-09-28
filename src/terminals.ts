@@ -8,8 +8,9 @@ import { SearchAddon } from "@xterm/addon-search";
 import type { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { Channel } from "@tauri-apps/api/core";
-import { api, toBytes, type OutputChunk } from "./api";
+import { api, events, toBytes, type OutputChunk } from "./api";
 import { actionFor, TERMINAL_ACTIONS } from "./hotkeys";
+import { modalOpen } from "./modal";
 import * as settings from "./settings";
 
 export interface Instance {
@@ -20,6 +21,9 @@ export interface Instance {
   /** The program's own title, from OSC 0/2. */
   title: string;
   disposers: IDisposable[];
+  /** The channel output arrives on. A restarted shell brings a new one, and
+   * whatever the old shell still had in flight is dropped, not drawn. */
+  channel: Channel<OutputChunk> | null;
 }
 
 const registry = new Map<string, Instance>();
@@ -125,7 +129,8 @@ export async function mount(id: string, container: HTMLElement): Promise<void> {
     inst.term.open(inst.el);
     if (webgl) loadWebgl(inst.term, webgl);
     inst.fit.fit();
-    inst.term.focus();
+    // Behind a modal, focus stays in the modal; keys typed there are not the shell's.
+    if (!modalOpen()) inst.term.focus();
     try {
       await attach(id, inst);
     } catch (e) {
@@ -141,7 +146,7 @@ export async function mount(id: string, container: HTMLElement): Promise<void> {
   // actually drawn in and redraws on the SIGWINCH.
   inst.fit.fit();
   inst.term.scrollToBottom();
-  inst.term.focus();
+  if (!modalOpen()) inst.term.focus();
 }
 
 export function unmount(id: string): void {
@@ -162,6 +167,25 @@ export function retain(ids: Set<string>): void {
   for (const id of [...registry.keys()]) if (!ids.has(id)) dispose(id);
 }
 
+// A restarted shell keeps its tab and its id and is a new process behind them:
+// its instance starts a clean screen and attaches again. One this window has
+// not shown yet attaches when it is first mounted.
+void events.onTerminalRestarted((id) => {
+  const inst = registry.get(id);
+  if (!inst) return;
+  // The reset is written into the stream, not called: `reset()` would run
+  // ahead of output from the old shell that xterm has not parsed yet, and that
+  // output would then draw on the new screen. The title was the stopped
+  // program's, and is cleared once that output is parsed, since a title it
+  // still carries would otherwise come back.
+  inst.term.write("\x1bc", () => {
+    inst.title = "";
+    titleListeners.forEach((cb) => cb(id));
+  });
+  // A shell that exited at once takes its tab with it; nothing is left to attach.
+  void attach(id, inst).catch(() => {});
+});
+
 function create(id: string): Instance {
   const s = settings.get();
   const font = s ? settings.terminalFont(s) : { fontFamily: settings.monospaceFallback, fontSize: 13, lineHeight: 1.15 };
@@ -178,7 +202,7 @@ function create(id: string): Instance {
   term.loadAddon(search);
   const el = document.createElement("div");
   el.className = "term";
-  const inst: Instance = { term, fit, search, el, title: "", disposers: [] };
+  const inst: Instance = { term, fit, search, el, title: "", disposers: [], channel: null };
 
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
@@ -248,14 +272,19 @@ const ACK_SIZE = 5_000;
 
 async function attach(id: string, inst: Instance): Promise<void> {
   const channel = new Channel<OutputChunk>();
+  inst.channel = channel;
   // The acknowledgement is sent from `write`'s callback, which runs once
   // xterm has actually parsed the bytes — so this reports what the terminal
   // has caught up on, not merely what arrived, and the backend stops reading
   // the pseudoterminal when it gets too far ahead.
   let parsed = 0;
   channel.onmessage = (chunk) => {
+    if (inst.channel !== channel) return;
     const bytes = toBytes(chunk);
     inst.term.write(bytes, () => {
+      // Parsed after a restart, these bytes were the old shell's; the id now
+      // names the new one, which is owed nothing for them.
+      if (inst.channel !== channel) return;
       parsed += bytes.length;
       while (parsed > ACK_SIZE) {
         parsed -= ACK_SIZE;
@@ -264,5 +293,5 @@ async function attach(id: string, inst: Instance): Promise<void> {
     });
   };
   const tail = await api.terminalAttach(id, inst.term.cols, inst.term.rows, channel);
-  if (tail.byteLength > 0) inst.term.write(new Uint8Array(tail));
+  if (inst.channel === channel && tail.byteLength > 0) inst.term.write(new Uint8Array(tail));
 }

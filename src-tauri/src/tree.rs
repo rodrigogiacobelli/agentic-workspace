@@ -55,7 +55,9 @@ fn ignored_by_git(root: &Path, paths: &[String]) -> HashSet<String> {
     if paths.is_empty() {
         return HashSet::new();
     }
-    let child = Command::new("git")
+    let mut cmd = Command::new("git");
+    crate::desktop::clean_child_env(&mut cmd);
+    let child = cmd
         .arg("-C")
         .arg(root)
         .args(["check-ignore", "-z", "--stdin"])
@@ -136,7 +138,9 @@ pub fn stat_entries(state: tauri::State<AppState>, workspace_id: String, paths: 
 #[tauri::command(async)]
 pub fn list_files(state: tauri::State<AppState>, workspace_id: String) -> Result<Vec<String>, String> {
     let (root, _) = resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
-    let listed = Command::new("git")
+    let mut cmd = Command::new("git");
+    crate::desktop::clean_child_env(&mut cmd);
+    let listed = cmd
         .arg("-C")
         .arg(&root)
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
@@ -384,6 +388,7 @@ pub fn search_project(state: tauri::State<AppState>, workspace_id: String, query
         return Ok(Vec::new());
     }
     let mut cmd = Command::new("rg");
+    crate::desktop::clean_child_env(&mut cmd);
     cmd.current_dir(&root)
         .args(["--json", "--smart-case", "--fixed-strings", "--hidden", "--glob", "!.git", "--max-count", "200", "--max-filesize", "2M"])
         .arg("--");

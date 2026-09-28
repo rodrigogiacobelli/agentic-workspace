@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const EVENT_CHANGED: &str = "session-changed";
 pub const EVENT_NOTICE: &str = "notice";
+pub const EVENT_INFO: &str = "notice-info";
 const RECENT_FILES_MAX: usize = 50;
 
 /// Refreshes the parts of the session only the machine knows — terminal
@@ -35,11 +36,26 @@ pub fn persist(app: &AppHandle) -> Session {
         let mut attention = state.attention.lock();
         let git = state.git.lock();
         let active = session.active.clone();
+        // The open workspace on each repository, by its common git directory:
+        // the first in session order that is not a linked worktree.
+        let mut repositories: HashMap<PathBuf, String> = HashMap::new();
+        for ws in session.workspaces.iter() {
+            if let Some(common) = git.get(&ws.id).filter(|g| g.is_repo && !g.is_worktree).and_then(|g| g.common_dir.clone()) {
+                repositories.entry(common).or_insert_with(|| ws.id.clone());
+            }
+        }
         let mut foreground = None;
         for ws in session.workspaces.iter_mut() {
             ws.ensure_groups();
             ws.available = ws.path.is_dir();
             ws.git = git.get(&ws.id).cloned();
+            ws.worktree_of = ws
+                .git
+                .as_ref()
+                .filter(|g| g.is_worktree)
+                .and_then(|g| g.common_dir.as_ref())
+                .and_then(|c| repositories.get(c))
+                .cloned();
             // The tab on screen cannot need attention.
             if active.as_deref() == Some(&ws.id) {
                 if let Some(t) = ws.active_terminal.as_deref() {
@@ -97,6 +113,14 @@ pub fn notice(app: &AppHandle, message: String) {
     if app.emit(EVENT_NOTICE, &message).is_err() {
         app.state::<AppState>().notices.lock().push(message);
     }
+}
+
+/// A notice that dismisses itself, such as ssh asking for a touch of a
+/// security key. One no window heard is dropped rather than kept: it is
+/// stale by the time a window shows it.
+pub fn inform(app: &AppHandle, message: String) {
+    eprintln!("agentic-workspace: {message}");
+    let _ = app.emit(EVENT_INFO, &message);
 }
 
 /// The new name of `path` after `from` became `to`, or `None` when the move
@@ -252,7 +276,13 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<()> {
         session.recent.retain(|r| r != id);
         session.recent.insert(0, id.to_string());
     }
-    crate::git::refresh_summary(app, id);
+    // The shells started before the summary was in, so their terminal
+    // configuration was resolved from the files git keeps; once `persist`
+    // has matched the worktree to its repository, it is resolved again.
+    if crate::git::refresh_summary(app, id) {
+        persist(app);
+        crate::credentials::write_terminal_configs(app);
+    }
     watch::sync(app);
     // Every way a workspace comes to the screen — the selector, the tray, a
     // notification, the removal of the one before it — passes through here.
@@ -314,6 +344,7 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
                     attention: false,
                     git: None,
                     from_worktree: from_worktree.unwrap_or(false),
+                    worktree_of: None,
                 });
                 id
             }
@@ -381,6 +412,9 @@ pub fn remove_workspace(app: AppHandle, state: tauri::State<AppState>, id: Strin
         }
     };
     publish(&app);
+    // Takes the removed workspace's include file away, so a shell that
+    // outlived the hangup — tmux, a disowned job — loses its credentials.
+    crate::credentials::write_terminal_configs(&app);
     result
 }
 

@@ -2,18 +2,21 @@
 //! attaches to receive output and detaches without disturbing the process.
 
 use crate::session;
-use crate::state::{AppState, TerminalTab};
+use crate::state::{AppState, Session, TerminalTab};
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use parking_lot::{Condvar, Mutex};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, InvokeResponseBody, Response};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
+
+pub const EVENT_RESTARTED: &str = "terminal-restarted";
 
 /// Bytes of recent output kept for a view that attaches after the fact — a
 /// reloaded webview. Roughly ten thousand lines of ordinary output.
@@ -74,15 +77,13 @@ const LOW_WATERMARK_CHARS: usize = 5_000;
 /// quotes add two, so 6000 bytes encodes to 8002 — inside the 8192 limit.
 const MAX_MESSAGE_BYTES: usize = 6_000;
 
-/// Set when the launcher exported `WEBKIT_DISABLE_DMABUF_RENDERER` itself, so
-/// shells do not inherit a variable the user never set.
-pub static SCRUB_WEBKIT_VAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub struct Live {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pub pid: Option<u32>,
+    /// The shell started with its workspace's terminal credentials (CRED-07).
+    pub credentials: bool,
     stream: Arc<Stream>,
 }
 
@@ -140,28 +141,52 @@ impl Live {
     }
 }
 
-fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result<Live> {
-    let system = native_pty_system();
-    let pair = system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .context("allocating a pseudoterminal")?;
-
-    // The setting names the program; empty means the one the desktop would
-    // have started. A tab takes it when it is opened, so changing it applies
-    // to the next terminal rather than disturbing a running one.
-    let chosen = app.state::<AppState>().settings.lock().terminal_shell.trim().to_string();
-    let shell = if chosen.is_empty() {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-    } else {
-        chosen
+/// What a workspace's shells start as: the program the setting names, empty
+/// meaning the one the desktop would have started, and the environment its
+/// terminal credentials add (CRED-06, CRED-07). Read once per spawn batch, the
+/// repository looked up on disk before the settings lock is taken. A tab
+/// takes both when its shell starts, so a change applies to the next shell
+/// rather than disturbing a running one.
+fn shell_env(app: &AppHandle, workspace_id: &str) -> (String, Vec<(String, String)>) {
+    let state = app.state::<AppState>();
+    let scope = crate::credentials::scope(&state, workspace_id);
+    let (shell, env, written) = {
+        let settings = state.settings.lock();
+        let chosen = settings.terminal_shell.trim();
+        let shell = if chosen.is_empty() {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        } else {
+            chosen.to_string()
+        };
+        match &scope {
+            // The include the environment names has to exist before the
+            // shell's first git runs.
+            Some(scope) => (
+                shell,
+                crate::credentials::terminal_env(&settings, scope, workspace_id),
+                crate::credentials::write_terminal_config(&settings, scope, workspace_id),
+            ),
+            None => (shell, Vec::new(), Ok(())),
+        }
     };
-    let mut cmd = CommandBuilder::new(&shell);
+    if let Err(e) = written {
+        session::notice(app, format!("Terminal credentials could not be written: {e}"));
+    }
+    (shell, env)
+}
+
+fn spawn(app: AppHandle, id: String, cwd: &Path, size: PtySize, shell: &str, env: &[(String, String)]) -> Result<Live> {
+    let system = native_pty_system();
+    let pair = system.openpty(size).context("allocating a pseudoterminal")?;
+
+    let mut cmd = CommandBuilder::new(shell);
     cmd.arg("-l");
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    if SCRUB_WEBKIT_VAR.load(std::sync::atomic::Ordering::Relaxed) {
-        cmd.env_remove("WEBKIT_DISABLE_DMABUF_RENDERER");
+    crate::desktop::clean_child_env(&mut cmd);
+    for (name, value) in env {
+        cmd.env(name, value);
     }
 
     let mut child = pair
@@ -215,7 +240,7 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
                 pump.armed.notify_one();
             }
             let _ = child.wait();
-            on_exit(&app, &exited_id);
+            on_exit(&app, &exited_id, &pump);
         })
         .context("starting the output thread")?;
 
@@ -277,7 +302,7 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, cols: u16, rows: u16) -> Result
         })
         .context("starting the flush thread")?;
 
-    Ok(Live { master: pair.master, writer, killer, pid, stream })
+    Ok(Live { master: pair.master, writer, killer, pid, credentials: !env.is_empty(), stream })
 }
 
 /// Drops the oldest bytes once the tail is an eighth past the cap, cutting
@@ -297,21 +322,32 @@ fn trim(buffer: &mut Vec<u8>) {
     buffer.drain(..cut);
 }
 
-/// The shell in a tab ended: the tab goes with it.
-fn on_exit(app: &AppHandle, id: &str) {
+/// The shell in a tab ended: the tab goes with it. Unless the tab has moved
+/// on — the shell was restarted in place, closed, or taken with its
+/// workspace — in which case its exit changes nothing at all.
+fn on_exit(app: &AppHandle, id: &str, stream: &Arc<Stream>) {
     let state = app.state::<AppState>();
     {
         let mut session = state.session.lock();
-        if let Some(ws) = session.workspace_of_terminal_mut(id) {
-            ws.terminals.retain(|t| t.id != id);
-            if ws.active_terminal.as_deref() == Some(id) {
-                ws.active_terminal = ws.terminals.last().map(|t| t.id.clone());
-            }
+        let mut ptys = state.ptys.lock();
+        if !ptys.get(id).is_some_and(|live| Arc::ptr_eq(&live.stream, stream)) {
+            return;
         }
-        state.ptys.lock().remove(id);
-        crate::agent::forget(&state, id);
+        ptys.remove(id);
+        drop(ptys);
+        close_tab(&state, &mut session, id);
     }
     session::publish(app);
+}
+
+fn close_tab(state: &AppState, session: &mut Session, id: &str) {
+    if let Some(ws) = session.workspace_of_terminal_mut(id) {
+        ws.terminals.retain(|t| t.id != id);
+        if ws.active_terminal.as_deref() == Some(id) {
+            ws.active_terminal = ws.terminals.last().map(|t| t.id.clone());
+        }
+    }
+    crate::agent::forget(state, id);
 }
 
 /// Starts a shell for every tab of the workspace that has none. A workspace is
@@ -334,20 +370,34 @@ pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Result<()> {
     if !root.is_dir() {
         anyhow::bail!("{} is not a directory", root.display());
     }
+    let mut shell = None;
+    let mut ended = false;
     for tab in tabs {
         if state.ptys.lock().contains_key(&tab.id) {
             continue;
         }
+        let (program, env) = shell.get_or_insert_with(|| shell_env(app, workspace_id));
         let cwd = if tab.cwd.is_dir() { tab.cwd.clone() } else { root.clone() };
-        let mut live = spawn(app.clone(), tab.id.clone(), &cwd, 80, 24)?;
+        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let mut live = spawn(app.clone(), tab.id.clone(), &cwd, size, program, env)?;
         // A tab closed, or its workspace removed, while the shell started has
         // nothing left to hang that shell up. Both take `ptys` under the
         // session, so under the two of them here the tab either is still
         // there or has already been taken out.
-        let session = state.session.lock();
+        let mut session = state.session.lock();
         let mut ptys = state.ptys.lock();
         if session.workspace_of_terminal_mut_ref(&tab.id).is_none() {
             live.hangup();
+            continue;
+        }
+        // A shell that has already exited, such as a shell program that
+        // fails to start, is not put here. Its exit handler, run or still
+        // waiting on these locks, finds it missing from `ptys` and leaves the
+        // tab alone, so the tab is taken out here instead.
+        if live.stream.out.lock().closed {
+            drop(ptys);
+            close_tab(&state, &mut session, &tab.id);
+            ended = true;
             continue;
         }
         // Read under `ptys`, which `show` needs too, so a persist that moves
@@ -356,6 +406,9 @@ pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Result<()> {
         let on_screen = state.foreground.lock().as_deref() == Some(tab.id.as_str());
         live.stream.out.lock().on_screen = on_screen;
         ptys.insert(tab.id, live);
+    }
+    if ended {
+        session::publish(app);
     }
     Ok(())
 }
@@ -527,4 +580,95 @@ pub fn reorder_terminals(app: AppHandle, state: tauri::State<AppState>, workspac
         }
     }
     session::publish(&app);
+}
+
+/// A shell that started without the credentials its workspace now gives
+/// terminals.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaleTerminal {
+    pub id: String,
+    pub label: String,
+}
+
+/// The workspace's shells that started without the credentials its terminals
+/// now carry (CRED-07). A shell that started with them follows every later
+/// change through its include, so only these need a restart.
+#[tauri::command]
+pub async fn workspace_stale_terminals(state: tauri::State<'_, AppState>, workspace_id: String) -> Result<Vec<StaleTerminal>, String> {
+    let scope = crate::credentials::scope(&state, &workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+    let settings = state.settings.lock().clone();
+    if crate::credentials::terminal_env(&settings, &scope, &workspace_id).is_empty() {
+        return Ok(Vec::new());
+    }
+    let tabs = state.session.lock().workspace(&workspace_id).map(|ws| ws.terminals.clone()).unwrap_or_default();
+    let ptys = state.ptys.lock();
+    Ok(tabs
+        .into_iter()
+        .enumerate()
+        .filter(|(_, tab)| ptys.get(&tab.id).is_some_and(|live| !live.credentials))
+        .map(|(at, tab)| {
+            // As the tab strip names it, less the program's title, which only
+            // the view knows; the tab's place tells two alike apart.
+            let name = tab.name.clone().unwrap_or_else(|| tab.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            StaleTerminal { id: tab.id, label: format!("{name} (tab {})", at + 1) }
+        })
+        .collect())
+}
+
+/// Replaces a running shell with a fresh one in the same tab: same id, name
+/// and working directory, the workspace's environment as it is now. A shell
+/// that has exited is not restarted (TERM-14 is unbuilt). The new shell
+/// starts before the old one goes, and is swapped in under the session and
+/// `ptys` as `ensure_live` does, so a tab closed meanwhile takes no shell
+/// with it. A tab without a running shell is refused, before and at
+/// the swap: starting its shell is `ensure_live`'s, and the two would each
+/// start one.
+#[tauri::command]
+pub fn terminal_restart(app: AppHandle, state: tauri::State<AppState>, id: String) -> Result<(), String> {
+    let (workspace_id, root, tab_cwd) = {
+        let session = state.session.lock();
+        let ws = session.workspace_of_terminal_mut_ref(&id).ok_or_else(|| format!("terminal {id} is not open"))?;
+        let tab = ws.terminals.iter().find(|t| t.id == id).map(|t| t.cwd.clone()).unwrap_or_else(|| ws.path.clone());
+        (ws.id.clone(), ws.path.clone(), tab)
+    };
+    let (pid, size) = {
+        let ptys = state.ptys.lock();
+        let live = ptys.get(&id).ok_or("No shell is running in this tab.")?;
+        (live.pid, live.master.get_size().ok())
+    };
+    let cwd = pid
+        .and_then(|p| std::fs::read_link(format!("/proc/{p}/cwd")).ok())
+        .filter(|d| d.is_dir())
+        .or_else(|| tab_cwd.is_dir().then_some(tab_cwd))
+        .unwrap_or(root);
+    let size = size.unwrap_or(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 });
+    let (shell, env) = shell_env(&app, &workspace_id);
+    let mut live = spawn(app.clone(), id.clone(), &cwd, size, &shell, &env).map_err(|e| format!("{e:#}"))?;
+    let old = {
+        let session = state.session.lock();
+        let mut ptys = state.ptys.lock();
+        if session.workspace_of_terminal_mut_ref(&id).is_none() {
+            live.hangup();
+            return Ok(());
+        }
+        let Some(old) = ptys.get(&id) else {
+            live.hangup();
+            return Err("No shell is running in this tab.".into());
+        };
+        // The new shell's exit handler finds the old one in `ptys` and
+        // leaves the tab to it.
+        if live.stream.out.lock().closed {
+            return Err("The new shell exited at once, so the old one keeps running.".into());
+        }
+        let on_screen = old.stream.out.lock().on_screen;
+        live.stream.out.lock().on_screen = on_screen;
+        ptys.insert(id.clone(), live)
+    };
+    if let Some(mut old) = old {
+        old.hangup();
+    }
+    let _ = app.emit(EVENT_RESTARTED, &id);
+    session::publish(&app);
+    Ok(())
 }

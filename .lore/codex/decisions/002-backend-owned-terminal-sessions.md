@@ -8,6 +8,7 @@ related:
   - vision-agentic-workspace
   - 001-two-os-windows
   - 007-workspace-is-one-directory
+  - 019-credentials-through-the-secret-service
 ---
 
 # ADR-002: Terminal sessions live in the backend and end with the app
@@ -36,6 +37,21 @@ tab, outlives the view that draws it, and ends when the application exits.
 Restored state is the tab's **name and working directory** only. A restored tab
 opens a fresh shell in that directory. No output is replayed and no command is
 re-run.
+
+A shell starts in the user's environment, not the application's.
+`pty::spawn` runs `desktop::clean_child_env` on it, which removes the
+variables an AppImage exports and the WebKit variable the application set
+itself (`standards-linux-desktop`). It adds a workspace's credentials only
+when that workspace's own terminal option is on
+(`019-credentials-through-the-secret-service`), and `Live.credentials`
+records whether the shell started with them. *Restart shell*, in a terminal
+tab's context menu and on the Workspace settings page, asks first and then
+calls `terminal_restart`, which replaces a running shell in place: the same
+tab, id, name and
+working directory — read from `/proc/<pid>/cwd` — with a fresh shell in the
+workspace's environment as it is now. The new shell starts before the old one
+is hung up, and the exit of the old one leaves the tab alone. A shell that has
+exited is not restarted; its tab closes with it.
 
 ## Rationale
 
@@ -79,4 +95,7 @@ re-run.
   program running in the tab.
 - **Scrollback is memory-only and bounded.** It is never written to disk.
 - **Closing the Terminal window stops nothing.** Only application exit ends a
-  session.
+  session, apart from a shell the user restarts or closes.
+- **A shell's environment is the user's.** It goes through
+  `clean_child_env`, and carries a workspace's credentials only on that
+  workspace's consent.

@@ -7,14 +7,19 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   gates a clipboard read, global shortcut binding through the portal, overlay
   scrollbars over app-drawn menus, the main loop a synchronous command blocks,
   the scheduling class an auto-nice daemon hands down, the identity a development
-  build carries so it runs beside an installed one, the AppImage strip flag and
-  the Cargo version floor. Each fails silently when broken.
+  build carries so it runs beside an installed one, the X11 backend an AppImage
+  runs on, the environment every child process is cleaned of, what WebKitGTK
+  does to Shift+Tab, the AppImage strip flag and the Cargo version floor. Each
+  fails silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
   - standards-motion
   - 001-two-os-windows
   - standards-code
   - operations-running-agentic-workspace
+  - 019-credentials-through-the-secret-service
+binds:
+  - src-tauri/src/desktop.rs
 ---
 
 # Linux desktop standard
@@ -245,6 +250,38 @@ On KDE the assignment is readable directly:
 ```bash
 grep -A4 '\[<app-id>\]' ~/.config/kglobalshortcutsrc
 ```
+
+## The AppImage runs under X11
+
+linuxdeploy's GTK hook exports `GDK_BACKEND=x11` inside the AppImage, so the
+installed application runs on XWayland while a development build runs on
+Wayland. Nothing on screen says which. The two backends have different drag
+stacks — what reaches the page mid-drag, when a drop is cancelled, whether a
+key pressed during a drag is seen — so a drag behaviour checked on a
+development build is checked on Wayland only, and has to be checked again on
+an AppImage build.
+
+## A child process runs in the user's environment
+
+AppRun and its GTK hook export variables that point the bundle at its own
+Python, GIO modules, GTK data and X11 backend, overwriting whatever the user
+had, and put the bundle's directories in front of `PATH`, `LD_LIBRARY_PATH`
+and `XDG_DATA_DIRS`. A shell, git, ssh or a GUI program started from a
+terminal inherits all of it and loads the bundle's libraries in place of the
+system's, or opens under X11. `desktop::clean_child_env` removes those
+variables and the bundle's entries from those search paths — the hook's own
+leading `/usr/share` in `XDG_DATA_DIRS` included — when `APPDIR` is set, and
+removes `WEBKIT_DISABLE_DMABUF_RENDERER` whenever the application set it
+itself. Every child the application starts goes through it: shells, git,
+ssh and ssh-keygen, and `rg`. The binary needs none of those variables to
+run again as a helper, since its RUNPATH finds every bundled library.
+
+## WebKitGTK reports Shift+Tab with key "Unidentified"
+
+A `keydown` for Shift+Tab carries `key: "Unidentified"` and `code: "Tab"`. A
+handler that matches `e.key === "Tab"` misses every Shift+Tab without any
+error, which in a focus trap lets the keyboard walk out of a modal backwards.
+Match `e.code` as well, as `src/modal.ts` does.
 
 ## The AppImage target needs `NO_STRIP=1`
 

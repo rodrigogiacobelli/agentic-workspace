@@ -18,7 +18,15 @@ export function ContextMenu({ x, y, align = "start", anchor, onClose, children }
   const [closing, dismiss, cancel] = useDismiss(onClose, "--d-exit");
   useEffect(() => {
     const down = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) dismiss(); };
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape") dismiss(); };
+    // The Escape is the menu's alone: a menu opened inside a dialog closes,
+    // and the dialog under it — which closes on an Escape nobody claimed —
+    // stays.
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    };
     window.addEventListener("mousedown", down, true);
     window.addEventListener("keydown", key, true);
     return () => { window.removeEventListener("mousedown", down, true); window.removeEventListener("keydown", key, true); };

@@ -3,12 +3,13 @@
 A native Linux desktop app for running several agent-driven projects at once —
 without losing the one you just switched away from.
 
-> **Status: eight milestones.** Workspaces, the two windows, terminals that
+> **Status: four rounds.** Workspaces, the two windows, terminals that
 > survive a switch, the file tree, session restore, the three-mode markdown
 > editor, git with worktrees, the two agent signals, app-drawn window chrome
 > over a tray-resident process, draggable editor splits and panels, custom
-> views, path citations, the typing helpers, and the Editor, Source Control and
-> Terminal modes run. `.lore/codex/` holds the decisions behind it.
+> views, path citations, the typing helpers, the Editor, Source Control and
+> Terminal modes, and an SSH key and commit identity per workspace run.
+> `.lore/codex/` holds the decisions behind it.
 
 ---
 
@@ -126,6 +127,19 @@ with hunk staging; blame stays in the Editor. Worktrees matter because a project
 here is often *itself* a worktree of another one — and creating one offers to
 open it as a new workspace.
 
+**A key and an identity per workspace.** Settings → *Credentials* lists the
+SSH keys you add from `~/.ssh` and the commit identities you define; a
+workspace's own page assigns one of each. Its fetches, pulls and pushes then
+offer that key and no other — two accounts on one host never cross — and its
+commits carry that name and email. A passphrase is kept in your desktop's
+wallet (GNOME Keyring, KWallet or KeePassXC), never in a file of the app's; with
+no wallet, it is not saved. A worktree with nothing assigned uses its
+repository's key and identity. Your terminals keep your own ssh setup unless
+you turn on *Terminals use this workspace's credentials* for that workspace,
+and then only inside its repository. An unknown host key, a passphrase or a
+server's question from git or from ssh in a terminal comes up as a dialog in
+the window that asked.
+
 **It tells you when an agent needs you.** A workspace you left running gets an
 attention badge when its terminal produces output, and an optional desktop
 notification when a busy terminal goes quiet — the agent finished, or it is
@@ -165,7 +179,7 @@ Arch / CachyOS:
 
 ```bash
 sudo pacman -S --needed base-devel webkit2gtk-4.1 gtk3 libayatana-appindicator \
-  rustup nodejs pnpm git ripgrep glib2 libnotify
+  rustup nodejs pnpm git openssh ripgrep glib2 libnotify
 ```
 
 `src-tauri/Cargo.toml` sets the Rust floor at 1.88; `rustup default stable`
@@ -240,13 +254,20 @@ Themes: four built in, and Settings → Import… reads a VS Code theme from a
 workspace so projects are distinguishable at a glance.
 
 Git runs through the `git` binary on your machine, so hooks run and your
-configuration applies. Desktop notifications go through `notify-send`; clicking
-one switches to the terminal that went quiet.
+configuration applies — except where a workspace has an SSH key or a commit
+identity assigned: its remote operations offer that key alone, and its
+commits take that name and email over your configuration's. Desktop
+notifications go through `notify-send`; clicking one switches to the terminal
+that went quiet.
 
 `Ctrl`+click a path or URL printed in a terminal to open the file at that line
 in the Workspace window, or the URL in your browser. The ✎ button in the title
 row renames a workspace; the path underneath does not change.
 
-Double-click a terminal tab to rename it; drag tabs to reorder them. Right-click
-in the file tree for file operations, for *Quote to AI*, and for *Send to* a
-view; deleting moves to the trash through GIO.
+Double-click a terminal tab to rename it; drag tabs to reorder them; right-click
+one to restart its shell. Right-click in the file tree for file operations, for
+*Quote to AI*, and for *Send to* a view; deleting moves to the trash through GIO.
+
+Settings open as a column of pages — General, Editor, Terminal, Panels, Agent
+signals, Credentials, and one for the active workspace — and reopen on the page
+you left.

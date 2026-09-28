@@ -7,6 +7,7 @@ summary: Why every git operation shells out to the user's `git` rather than
 related:
   - 007-workspace-is-one-directory
   - 008-tauri-v2-on-arch-kde
+  - 019-credentials-through-the-secret-service
   - standards-code
 ---
 
@@ -55,6 +56,20 @@ its `stash@{N}` position: `git_stash_apply` and `git_stash_drop` look the
 position up again in `stash list`, and refuse a stash that is gone, since a
 stash pushed or dropped from a terminal renumbers the ones below it.
 
+Every git command in `git.rs` for a workspace goes through `git::repo_of`,
+which resolves the workspace's credentials and runs git in their environment
+(`019-credentials-through-the-secret-service`) — reads included, since a
+checkout can run an LFS download and a partial clone fetches on read. A
+workspace with an SSH key runs git with `GIT_SSH_COMMAND` naming the
+application's binary as an ssh wrapper that offers that key and no other; a
+commit identity arrives as `GIT_AUTHOR_*` and `GIT_COMMITTER_*`; a workspace
+without a key gets ssh's askpass variables, so a host-key question or a
+passphrase prompt reaches a dialog. `git::run_env` records each such process
+under its workspace while it runs, which is how the askpass relay knows a
+prompt came from Source Control. Before a pull or a push with a key,
+`git::preflight` refuses to start when the key file is missing or the remote
+resolves to a transport that carries credentials of its own.
+
 ## Rationale
 
 - Hooks run, signing happens, credential helpers are consulted, and every
@@ -88,7 +103,14 @@ stash pushed or dropped from a terminal renumbers the ones below it.
 ## Constraints imposed
 
 - **`GIT_TERMINAL_PROMPT=0` on every invocation**, so an operation that would
-  ask for credentials fails with a message instead of hanging.
+  ask for credentials on a terminal fails with a message instead of hanging.
+  ssh's own questions go to the askpass relay instead.
+- **Every git the application starts goes through
+  `desktop::clean_child_env`**, so it runs in the user's environment rather
+  than an AppImage's (`standards-linux-desktop`).
+- **A workspace's credentials reach every git command run for it**, through
+  `repo_of`; a command that bypasses it would go out under the user's default
+  key.
 - **Refusals are surfaced, never forced.** A checkout, branch delete or
   worktree removal that git declines returns git's text; forcing is a separate,
   confirmed action.

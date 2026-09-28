@@ -20,33 +20,31 @@ pub fn load(data_dir: &Path) -> Loaded {
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded::Fresh,
-        Err(e) => return set_aside(&path, format!("reading it: {e}")),
+        Err(e) => return Loaded::Unreadable { moved_to: set_aside(&path), reason: format!("reading it: {e}") },
     };
-    match serde_json::from_str::<Session>(&text) {
-        Ok(session) if session.version <= SESSION_VERSION => Loaded::Session(session),
-        Ok(session) => set_aside(
-            &path,
-            format!(
-                "it was written by a newer version (format {}, this build reads {})",
-                session.version, SESSION_VERSION
-            ),
+    let reason = match serde_json::from_str::<Session>(&text) {
+        Ok(session) if session.version <= SESSION_VERSION => return Loaded::Session(session),
+        Ok(session) => format!(
+            "it was written by a newer version (format {}, this build reads {})",
+            session.version, SESSION_VERSION
         ),
-        Err(e) => set_aside(&path, format!("parsing it: {e}")),
-    }
+        Err(e) => format!("parsing it: {e}"),
+    };
+    Loaded::Unreadable { moved_to: set_aside(&path), reason }
 }
 
-/// Moves an unusable store aside rather than deleting it.
-fn set_aside(path: &Path, reason: String) -> Loaded {
+/// Moves an unusable store aside rather than deleting it, and says where to:
+/// the path it now has, or why it could not be moved.
+pub fn set_aside(path: &Path) -> String {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let aside = path.with_extension(format!("json.unreadable-{stamp}"));
-    let moved_to = match std::fs::rename(path, &aside) {
+    match std::fs::rename(path, &aside) {
         Ok(()) => aside.display().to_string(),
         Err(e) => format!("(could not move it: {e})"),
-    };
-    Loaded::Unreadable { moved_to, reason }
+    }
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);

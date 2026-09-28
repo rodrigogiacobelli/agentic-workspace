@@ -46,8 +46,9 @@ same query and turned off there.
 ## The tab indicator is a pseudo-element
 
 `box-shadow` is not animated, so the underline under the active tab and the
-active panel tab is a `::after` whose opacity and horizontal scale carry it.
-The rule it replaced set an inset shadow.
+active panel tab is a `::after` whose opacity and horizontal scale carry it,
+and the selected tab in the settings dialog's tab column is marked the same
+way.
 
 The one height reveal is a directory's children in the file tree, played for
 a directory opened while the tree is on screen — from the tree, the
@@ -63,8 +64,10 @@ A CSS transition needs the element in the document, and a conditionally
 rendered surface leaves it the moment its condition turns false. `useDismiss`
 in `src/motion.ts` keeps it for the length of its exit and then calls the
 parent's close, reading the duration from the token so reduced motion shortens
-that too. `ContextMenu`, `Palette`, `Prompt`, `SettingsDialog`, the
-terminal's search bar and each toast take their dismissal from it.
+that too. `ContextMenu`, `Palette`, `Prompt`, `SettingsDialog` with its tab
+pages, `CredentialPrompt`, the terminal's search bar and each toast — the
+error notice and the information notice that leaves on its own after 3.5
+seconds — take their dismissal from it.
 
 Three things the hook settles that a timer alone does not. A surface shown
 again while its exit is still playing has been reused, so its pending close is

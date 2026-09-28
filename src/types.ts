@@ -37,6 +37,9 @@ export interface Workspace {
   git: GitSummary | null;
   /** Opened from a repository's worktree list rather than named by the user. */
   fromWorktree: boolean;
+  /** The open workspace on this one's repository, when this one is a linked
+   *  worktree of it; the switcher and the tray list it under that one. */
+  worktreeOf: string | null;
 }
 
 /** A split node, shared by the editor layout and the panel layout. */
@@ -173,6 +176,13 @@ export interface WorkspaceSettings {
   clipboardDir: string | null;
   notifications: boolean | null;
   theme: string | null;
+  /** A credential id. Null is unset, which a linked worktree takes from its
+   *  repository; `""` is explicitly the user's own ssh setup. */
+  sshKey: string | null;
+  /** An identity id, three-state as `sshKey`. */
+  identity: string | null;
+  /** Whether this workspace's terminals carry its credentials; never inherited. */
+  terminalCredentials: boolean;
 }
 
 export interface Settings {
@@ -205,6 +215,72 @@ export interface Settings {
   /** One dock tree per docked mode; null, or a mode left out, is that mode's default. */
   panelLayout: Partial<PanelLayouts> | null;
   workspaces: Record<string, WorkspaceSettings>;
+  /** Changed only through the credential commands; `updateSettings` keeps the backend's. */
+  credentials: Credentials;
+  /** The page the settings dialog opens on. */
+  settingsTab: string;
+}
+
+/** Keys and identities a workspace can be assigned. No secret is in here. */
+export interface Credentials {
+  keys: SshKey[];
+  identities: Identity[];
+}
+
+export interface SshKey {
+  id: string;
+  name: string;
+  /** The private key file, absolute. */
+  path: string;
+  /** Null until known: an encrypted PEM key without its `.pub` shows it once its passphrase is checked. */
+  fingerprint: string | null;
+  /** The key needs a passphrase. */
+  protected: boolean;
+  /** Its passphrase is in the wallet. */
+  saved: boolean;
+}
+
+/** Who a workspace's commits are by. */
+export interface Identity {
+  id: string;
+  label: string;
+  name: string;
+  email: string;
+}
+
+/** Read when the Credentials page shows. */
+export interface CredentialStatus {
+  wallet: { available: boolean; name: string | null; message: string | null };
+  keys: Record<string, { missing: boolean; problem: string | null; stored: boolean }>;
+}
+
+/** A private key file in `~/.ssh`, offered by *Add SSH key*. */
+export interface KeyFile {
+  path: string;
+  name: string;
+  fingerprint: string | null;
+  /** Null when ssh-keygen could not tell. */
+  protected: boolean | null;
+  problem: string | null;
+}
+
+/** A question ssh asked, waiting on the user in the window `window` names. */
+export interface CredentialPrompt {
+  id: string;
+  window: WindowRole;
+  kind: "host" | "passphrase" | "secret" | "confirm";
+  title: string;
+  text: string;
+  host: string | null;
+  fingerprint: string | null;
+  /** Who asked: a workspace's Source Control, a terminal of one, or an unknown process. */
+  origin: string;
+}
+
+/** A shell started without the credentials its workspace now gives terminals. */
+export interface StaleTerminal {
+  id: string;
+  label: string;
 }
 
 export interface StoredAsset {

@@ -301,6 +301,12 @@ main { flex: 1; display: flex; min-height: 0; }
 .tabs-overflow { flex: none; padding: 0 8px; color: var(--fg-dim); border-left: 1px solid var(--border); }
 .tabs-overflow:hover { background: var(--bg-hover); color: var(--fg); }
 .tabs-overflow-count { font-size: 10px; margin-left: 3px; }
+
+
+/* A dragged terminal tab lands before the tab it is dropped on, or last when
+   dropped on the empty strip after the tabs (FIX-16). The mark is a still
+   frame, like the panel strip's: `box-shadow` is not animated. */
+.terminal-main .tabs .drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .tab-list button.selected { color: var(--accent); }
 .tab-list .menu-hint { margin-left: 12px; }
 .tab-add { padding: 0 10px; color: var(--fg-dim); }
@@ -636,6 +642,8 @@ main { flex: 1; display: flex; min-height: 0; }
   border-radius: 6px;
   user-select: text;
 }
+/* A confirmation, not a failure: it asks nothing, so it does not wear the error's colour. */
+.notice.info { border-color: var(--border); }
 
 /* Git */
 .attention-badge { color: var(--accent); font-size: 10px; }
@@ -860,6 +868,59 @@ main { flex: 1; display: flex; min-height: 0; }
 .setting-row .dropdown { width: 180px; justify-content: space-between; }
 .setting-row button { border: 1px solid var(--border); }
 .setting button { border: 1px solid var(--border); }
+
+
+/* Settings is a column of tabs beside the page it selects (SET-01). The
+   dialog keeps one size whichever page shows, so switching never moves its
+   edges; the page scrolls inside it. */
+.dialog.settings {
+  width: min(820px, 94vw);
+  height: min(640px, 84vh);
+  max-height: none;
+  display: grid;
+  grid-template-columns: minmax(150px, 190px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+}
+.dialog.settings > .dialog-title { grid-column: 1 / -1; padding: 8px 10px 8px 16px; border-bottom: 1px solid var(--border); }
+.settings-tabs { display: flex; flex-direction: column; gap: 1px; padding: 8px 6px; border-right: 1px solid var(--border); overflow: auto; }
+.settings-tabs [role="tab"] { position: relative; flex: none; text-align: left; padding: 5px 10px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.settings-tabs [role="tab"][aria-selected="true"] { color: var(--fg); background: var(--bg-hover); }
+.settings-divider { flex: none; height: 1px; margin: 6px 4px; background: var(--border); }
+.settings-page { overflow: auto; padding: 4px 16px 16px; }
+.settings-page > h3:first-child { margin-top: 8px; }
+.settings-page button { border-color: var(--border); }
+.settings-note { color: var(--fg-dim); margin: 4px 0; }
+.setting-error { color: var(--danger); margin: 2px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A control that cannot act looks it, as elsewhere in the application: faint
+   and unfilled. A disabled field's placeholder says why, so it stays legible. */
+.settings-page button:disabled,
+.credential-actions button:disabled { color: var(--fg-faint); background: transparent; cursor: default; }
+.settings-page input:disabled { color: var(--fg-faint); background: transparent; cursor: default; }
+.settings-page input:disabled::placeholder { color: var(--fg-dim); }
+
+/* An SSH key: its name and file, its fingerprint, where its passphrase is. */
+.cred-key { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.cred-key-head, .cred-pass { display: flex; align-items: center; gap: 8px; }
+.cred-key-head input, .cred-pass input { flex: 1; min-width: 0; }
+.cred-file { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
+.cred-fingerprint { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); overflow-wrap: anywhere; }
+.cred-status { color: var(--fg-dim); }
+.cred-status.problem { color: var(--danger); }
+.cred-add { margin: 8px 0 4px; }
+.cred-identity { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 6px; align-items: center; margin: 4px 0; }
+.cred-identity input { min-width: 0; }
+
+/* What ssh asks (CRED-08): one question at a time, over whatever is open. */
+.dialog.credential-prompt { width: min(480px, 92vw); padding: 8px 16px 14px; }
+.credential-prompt p { margin: 8px 0; }
+.credential-origin { color: var(--fg-dim); }
+.credential-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.credential-fingerprint { display: block; padding: 6px 8px; font-family: var(--mono); font-size: 12px; background: var(--code-bg); border-radius: 4px; overflow-wrap: anywhere; user-select: text; }
+.credential-prompt input { width: 100%; margin: 4px 0; }
+.credential-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.credential-actions button { border-color: var(--border); padding: 3px 14px; }
 .outline .tree-row { padding-top: 3px; padding-bottom: 3px; }
 
 /* ==========================================================================
@@ -1037,6 +1098,10 @@ input, textarea {
   transition-timing-function: var(--e-in);
 }
 
+/* A settings page fades in on the tab-switch clock as its tab selects it. */
+.settings-page { transition: opacity var(--d-base) var(--e-out); }
+@starting-style { .settings-page { opacity: 0; } }
+
 /* --- Sheets and panels (§11.5) ------------------------------------------- */
 
 /* The terminal's find bar comes down from the edge it is pinned to. */
@@ -1095,8 +1160,9 @@ input, textarea {
 
 /* --- Toasts (§9, §11.10) ------------------------------------------------- */
 
-/* A notice carries an error, so nothing dismisses it but the reader (WCAG
-   2.2.1). It arrives from the corner it lives in. */
+/* An error notice stays until the reader dismisses it (WCAG 2.2.1); an info
+   notice leaves by itself after its dwell, which `Notice` in App.tsx times.
+   Both arrive from the corner they live in and leave the same way. */
 .notice {
   transition:
     opacity   var(--d-enter) var(--e-out),
@@ -1138,6 +1204,24 @@ input, textarea {
 }
 .tab.active::after, .sidebar-tabs [role="tab"].active::after { opacity: 1; transform: none; }
 .editor-group:not(.active) .tab.active::after { background: var(--fg-faint); }
+
+/* A settings tab's mark is a bar down its leading edge, a pseudo-element
+   like every other tab indicator (standards-motion): what moves is its
+   opacity and its height, never a shadow. */
+.settings-tabs [role="tab"]::after {
+  content: "";
+  position: absolute;
+  left: 0; top: 4px; bottom: 4px;
+  width: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transform: scaleY(0.4);
+  transition:
+    opacity   var(--d-base) var(--e-in-out),
+    transform var(--d-base) var(--e-in-out);
+}
+.settings-tabs [role="tab"][aria-selected="true"]::after { opacity: 1; transform: none; }
+
 /* Revealed by hover. `visibility` and `display: none` are discrete — the
    first blinks off, the second moves the row's layout under the pointer —
    so each of these is an opacity fade with the space already reserved. */
@@ -1156,7 +1240,7 @@ input, textarea {
   .overlay.is-closing .palette, .overlay.is-closing .dialog,
   button:active, .cm-lp-chip:active, .hunk-action:active, .crumb:active { transform: none; }
   .tree-chevron, .git-chevron, .row-disclose, .dropdown-caret { transition: none; }
-  .tab::after, .sidebar-tabs [role="tab"]::after { transform: none; }
+  .tab::after, .sidebar-tabs [role="tab"]::after, .settings-tabs [role="tab"]::after { transform: none; }
   @starting-style {
     .menu, .palette, .dialog { transform: none; }
   }

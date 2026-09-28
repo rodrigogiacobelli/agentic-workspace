@@ -206,6 +206,8 @@ workspace active, so a window attaching to a terminal finds its shell.
 - **Terminals are never torn down by a switch.** An xterm instance ends only
   with its tab.
 - **Shared code imports neither half.** `App`, `Switcher`, `StatusBar`,
-  `SettingsDialog`, `Palette`, `Menu`, `api`, `settings` and `modes` reach
-  `editors`, `editor/*`, `repo` or `terminals` only by dynamic import; one
-  static import merges the halves again without any warning.
+  `SettingsDialog`, `CredentialsPage`, `CredentialPrompt`, `Palette`, `Menu`,
+  `api`, `settings`, `modes`, `modal` and `notice` reach `editors`,
+  `editor/*`, `repo` or `terminals` only by dynamic import; one static import
+  merges the halves again without any warning. `modal` is imported by both
+  halves, `terminals` and `editors` included, and imports nothing but React.

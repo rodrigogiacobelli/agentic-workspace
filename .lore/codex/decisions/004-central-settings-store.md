@@ -9,6 +9,7 @@ related:
 - 007-workspace-is-one-directory
 - standards-repository
 - 014-one-layout-tree
+- 019-credentials-through-the-secret-service
 ---
 
 # ADR-004: Settings live in a central store, never in the user's repos
@@ -34,6 +35,19 @@ Key forces:
 All settings — global and per project — live in the application's own store
 under `~/.local/share/<app-id>/`, with per-project settings keyed by absolute
 path. The application writes nothing inside any workspace directory.
+
+Credentials follow the same rule without their secrets
+(`019-credentials-through-the-secret-service`). `settings.json` lists the SSH
+keys — by the path of the key file in `~/.ssh` — and the commit identities, and
+each workspace's entry names the key and the identity it uses and whether its
+terminals carry them; a passphrase lives in the desktop's Secret Service and
+nowhere in the store. Only the backend's credential commands change those
+fields. The frontend sends the whole settings object back on every change, so
+`update_settings` copies `credentials` and every workspace's `sshKey`,
+`identity` and `terminalCredentials` from the backend's current value over
+whatever arrives, and a settings write holds the lock from the change through
+the file write and the emit, so the last writer's state is the one on disk and
+the one the windows hear last.
 
 ## Rationale
 
@@ -63,12 +77,21 @@ path. The application writes nothing inside any workspace directory.
   person.
 - Entries are keyed by absolute path, so moving a project orphans its settings
   until the workspace is relocated.
-- Two worktrees of one project are two keys and share nothing.
+- Two worktrees of one project are two keys and share nothing, with one
+  exception: a linked worktree whose SSH key or commit identity is unset takes
+  its repository's. Its theme, notifications, clipboard folder and terminal
+  option are its own.
 
 ## Constraints imposed
 
 - **The store is at `~/.local/share/<app-id>/`**, alongside session state.
 - **A corrupt or newer-versioned store is moved aside, never deleted**, and the
-  application starts with an empty workspace list and says what happened.
+  application starts with an empty workspace list and says what happened. An
+  unreadable `settings.json` is moved aside the same way, to
+  `settings.json.unreadable-<seconds>`, and the notice says that every
+  workspace's SSH key, commit identity and terminal credentials were reset
+  with it.
+- **No secret is written to the store.** A field that would hold one does not
+  exist.
 - **Nothing is written into a workspace directory** other than a file the user
   explicitly creates — a saved document, or an asset pasted into one.

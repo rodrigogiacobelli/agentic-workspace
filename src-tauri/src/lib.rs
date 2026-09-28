@@ -1,11 +1,14 @@
 mod agent;
+mod askpass;
 mod assets;
 mod clipboard;
+mod credentials;
 mod desktop;
 mod git;
 mod hotkey;
 mod files;
 mod pty;
+mod secret;
 mod session;
 mod settings;
 mod state;
@@ -15,6 +18,8 @@ mod tray;
 mod tree;
 mod watch;
 mod windows;
+
+pub use askpass::helper;
 
 use crate::state::AppState;
 use anyhow::{Context, Result};
@@ -57,11 +62,14 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         }
     };
 
+    let (settings, unreadable) = settings::load(&data_dir);
+    notices.extend(unreadable);
+
     let mut session = session;
     session.workspaces.iter_mut().for_each(state::Workspace::ensure_groups);
     handle.manage(AppState {
         session: Mutex::new(session),
-        settings: Mutex::new(settings::load(&data_dir)),
+        settings: Mutex::new(settings),
         attention: Mutex::new(std::collections::HashSet::new()),
         foreground: Mutex::new(None),
         activities: Mutex::new(HashMap::new()),
@@ -75,7 +83,16 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         published: Mutex::new(String::new()),
         data_dir,
         notices: Mutex::new(notices),
+        git_children: Mutex::new(HashMap::new()),
+        prompts: Mutex::new(askpass::Prompts::default()),
     });
+    // Before any shell or git starts: the relay answers their prompts, and a
+    // shell's include has to exist when its first git runs.
+    askpass::sweep();
+    if let Err(e) = askpass::serve(&handle) {
+        eprintln!("agentic-workspace: no askpass relay, so ssh's prompts reach no dialog ({e})");
+    }
+    credentials::write_terminal_configs(&handle);
     if let Err(e) = tray::init(&handle) {
         session::notice(&handle, format!("No tray icon: {e:#}. Closing the last window quits instead."));
     }
@@ -102,6 +119,9 @@ fn setup(app: &mut tauri::App) -> Result<()> {
             session::prune_worktrees(&summaries);
             watch::sync(&summaries);
             session::publish(&summaries);
+            // Launch wrote the terminal configurations before any summary
+            // was in; the summaries can resolve a worktree differently.
+            credentials::write_terminal_configs(&summaries);
         })
         .ok();
     watch::sync(&handle);
@@ -154,7 +174,7 @@ fn apply_webkit_workaround() {
     }
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        pty::SCRUB_WEBKIT_VAR.store(true, std::sync::atomic::Ordering::Relaxed);
+        desktop::WEBKIT_VAR_SET.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -202,6 +222,7 @@ fn set_application_id() {
 }
 
 pub fn run() {
+    credentials::forget_inherited_env();
     restore_scheduling();
     set_application_id();
     apply_webkit_workaround();
@@ -269,6 +290,18 @@ pub fn run() {
             desktop::gpu_accelerated,
             settings::get_settings,
             settings::update_settings,
+            credentials::credentials_status,
+            credentials::credentials_key_files,
+            credentials::credential_add_key,
+            credentials::credential_rename_key,
+            credentials::credential_save_passphrase,
+            credentials::credential_remove_key,
+            credentials::credential_add_identity,
+            credentials::credential_update_identity,
+            credentials::credential_remove_identity,
+            credentials::set_workspace_credentials,
+            askpass::credential_prompts,
+            askpass::credential_prompt_answer,
             themes::import_themes,
             themes::list_themes,
             themes::delete_theme,
@@ -324,6 +357,8 @@ pub fn run() {
             pty::terminal_rename,
             pty::set_active_terminal,
             pty::reorder_terminals,
+            pty::terminal_restart,
+            pty::workspace_stale_terminals,
             tree::list_dir,
             tree::list_files,
             tree::stat_entries,

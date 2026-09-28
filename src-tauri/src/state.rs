@@ -85,6 +85,12 @@ pub struct Workspace {
     /// rather than the user naming the folder. It goes when the worktree does.
     #[serde(default)]
     pub from_worktree: bool,
+    /// When this one is a linked worktree, the open workspace on its
+    /// repository: same common git directory, not a linked worktree itself.
+    /// The switcher and the tray list it under that one. Computed when
+    /// published.
+    #[serde(default, skip_deserializing)]
+    pub worktree_of: Option<String>,
 }
 
 /// A flat, ordered list of shortcuts into the workspace. Each entry sits at
@@ -465,6 +471,9 @@ impl Session {
 
 pub struct AppState {
     pub session: Mutex<Session>,
+    /// Locked after `session` when both are held, never before it, and
+    /// nothing else is taken while it is held: a settings write holds it from
+    /// the change through the file write and the emit.
     pub settings: Mutex<crate::settings::Settings>,
     /// Terminal ids that printed while out of view.
     pub attention: Mutex<std::collections::HashSet<String>>,
@@ -496,6 +505,13 @@ pub struct AppState {
     /// Messages for the user that have no command to return through, such as
     /// a state store that could not be read at launch.
     pub notices: Mutex<Vec<String>>,
+    /// The application's own git processes while they run, pid to workspace
+    /// id and whether the main thread started it: how the askpass relay tells
+    /// a prompt from Source Control apart from one of any other process, and
+    /// knows which it cannot put a dialog in front of.
+    pub git_children: Mutex<HashMap<u32, (String, bool)>>,
+    /// The prompts from ssh waiting on the user. Never held across the wait.
+    pub prompts: Mutex<crate::askpass::Prompts>,
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
