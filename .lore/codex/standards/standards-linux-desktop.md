@@ -9,9 +9,9 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   the scheduling class an auto-nice daemon hands down, the identity a development
   build carries so it runs beside an installed one, the X11 backend an AppImage
   runs on, the environment every child process is cleaned of, what WebKitGTK
-  does to a drag and to Shift+Tab, the hidden directories the asset protocol
-  refuses, the AppImage strip flag and the Cargo version floor. Each fails
-  silently when broken.
+  does to a drag and to Shift+Tab, the directories the asset protocol serves
+  and the hidden ones it refuses, the AppImage strip flag and the Cargo version
+  floor. Each fails silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
   - standards-motion
@@ -20,10 +20,12 @@ related:
   - operations-running-agentic-workspace
   - 014-one-layout-tree
   - 019-credentials-through-the-secret-service
+  - 015-views-and-citations
 binds:
   - src-tauri/src/desktop.rs
   - src/dropRoute.ts
   - src-tauri/tauri.conf.json
+  - src-tauri/src/tree.rs
 ---
 
 # Linux desktop standard
@@ -312,17 +314,36 @@ Match `e.code` as well, as `src/modal.ts` does.
 ## The asset protocol refuses hidden directories unless told otherwise
 
 Every image, audio and video the webview shows from a workspace loads through
-Tauri's `asset:` protocol, which checks the path against
-`app.security.assetProtocol.scope` in `tauri.conf.json`. On Unix that scope's
-glob requires a leading dot to be written literally, so `**` matches nothing
-beneath a component such as `.claude`, and a request under one is refused with
-a 403. The page sees only a failed load. A workspace under
-`.claude/worktrees/` then shows every asset as missing, in documents and in
-the image tab alike, while the same files render in a workspace elsewhere.
+Tauri's `asset:` protocol, which checks the path against the asset protocol's
+scope. `app.security.assetProtocol.scope` in `tauri.conf.json` allows nothing:
+`tree::serve`, called from `session::persist`, allows each open workspace's
+directory and its worktree family (`015-views-and-citations`) through
+`asset_protocol_scope().allow_directory`, so the protocol answers a request
+for any other file with a 403 (AST-14). Tauri's scope has no call that takes a
+directory back, so a workspace removed stays served until the application
+exits.
 
-The scope is therefore written as `{ "allow": ["**"], "requireLiteralLeadingDot": false }`.
-Left at the default, it also refuses an asset under `.github/` or `.lore/` in
-any workspace.
+Each allowed directory becomes the glob `<directory>/**`. On Unix the scope's
+glob requires a leading dot to be written literally, so `**` matches nothing
+beneath a component such as `.lore`, and a request under one is refused with
+a 403. The page sees only a failed load. A dot in the allowed directory itself
+is literal in the pattern and matches; a hidden directory inside it does not.
+Tauri reads the setting once, from `tauri.conf.json`, and applies it to the
+directories allowed at runtime as well.
+
+The scope is therefore written as `{ "allow": [], "requireLiteralLeadingDot": false }`.
+Left at the default, it refuses an asset under `.github/`, `.lore/` or
+`.claude/` inside any workspace or family directory (FIX-17).
+
+The scope follows a symlink before it matches, and in Tauri 2.11 it follows
+one badly. When the requested file is itself a symlink, the scope reads the
+link's target as written and checks a relative target, such as
+`../../assets/logo.png`, against the process's working directory instead of
+the link's own. The target stays relative, matches no `<directory>/**` glob,
+and the request is refused with a 403. An image reached through a relative
+symlink therefore never loads, in a document or in its own tab, although the
+Files panel lists it and a citation of it is drawn as present. A symlink with
+an absolute target loads when that target lies inside a served directory.
 
 ## The AppImage target needs `NO_STRIP=1`
 

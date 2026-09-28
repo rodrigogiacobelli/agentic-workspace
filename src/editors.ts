@@ -28,7 +28,7 @@ export type Entry = { doc: Doc } | { binary: string } | { media: "image" | "audi
 const registry = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const pending = new Map<string, { line: number; column: number }>();
-let hooks: DocHooks = { openFile: () => {}, notice: () => {}, showCommit: () => {} };
+let hooks: DocHooks = { openFile: () => {}, openIn: () => {}, workspaces: () => [], notice: () => {}, showCommit: () => {} };
 
 export function setHooks(h: DocHooks): void {
   hooks = h;
@@ -162,6 +162,11 @@ export function follow(workspaces: Workspace[]): void {
       }
     }
   }
+}
+
+/** The session changed: each document whose worktree family moved draws its paths again (ADR-015). */
+export function refreshFamilies(): void {
+  for (const entry of registry.values()) if ("doc" in entry) entry.doc.refreshFamily();
 }
 
 export async function save(id: string): Promise<void> {

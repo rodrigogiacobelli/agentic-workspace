@@ -5,17 +5,40 @@
 // rendered side of a split — draws every line. See ADR-011.
 
 import { syntaxTree } from "@codemirror/language";
-import { EditorState, StateEffect, StateField, type EditorSelection, type Extension, type Range } from "@codemirror/state";
+import { EditorState, StateEffect, StateField, type EditorSelection, type Extension, type Line, type Range } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
-import type { SyntaxNodeRef, Tree } from "@lezer/common";
-import { ChipWidget, citedPath, type CitationContext } from "./citation";
+import type { SyntaxNode, SyntaxNodeRef, Tree } from "@lezer/common";
+import { ChipWidget, chipElement, citedPath, releasePreview, type CitationContext } from "./citation";
+
+/**
+ * Where a path written in a document leads (ADR-015). The order gives at most
+ * one location to try, so a path names one file or none.
+ */
+export interface Resolved {
+  /** The path exactly as the document writes it: what a missing placeholder shows (AST-12). */
+  written: string;
+  /** The file, absolute; null for a path outside the boundary, which is never requested, and for a web address. */
+  file: string | null;
+  /** The same file from the workspace root, when it lies inside the workspace. A file in the worktree family has none. */
+  rel: string | null;
+  /** What the webview loads: an asset URL for the file, a web address as written, or null. */
+  url: string | null;
+  /** A missing placeholder's tooltip: the location tried, or that the path leads outside the workspace (AST-12). */
+  tip: string;
+}
 
 export interface PreviewContext {
-  /** Turns a link target, relative to the note, into something the webview can load, or null. */
-  resolveUrl(href: string): string | null;
-  /** The same for a path from the workspace root, as a citation names it. */
-  resolveRoot(path: string): string | null;
+  /**
+   * Where a path leads: a Markdown link's or image's target when `link`, a
+   * relative one read from the note's directory; a citation's path after its
+   * `@` otherwise, a relative one read from the workspace root.
+   */
+  resolve(path: string, link: boolean): Resolved;
+  /** Whether a resolved file exists: known, or not yet (undefined) — the answer redraws the pane. */
+  exists(target: Resolved): boolean | undefined;
+  /** Follows a link: a web address in the browser, any other target as `resolve` reads it. */
   openLink(href: string): void;
+  /** Takes a citation's path as `citedPath` gives it. A family file opens in the workspace holding it. */
   citation: CitationContext;
 }
 
@@ -101,7 +124,15 @@ class TaskWidget extends WidgetType {
 }
 
 class MediaWidget extends WidgetType {
-  constructor(readonly href: string, readonly alt: string, readonly url: string | null) { super(); }
+  constructor(
+    readonly href: string,
+    readonly alt: string,
+    readonly url: string | null,
+    /** The placeholder's tooltip when the file is missing (AST-12). */
+    readonly tip = "",
+    /** The target is not media and is known to be missing; media finds out by loading. */
+    readonly missing = false,
+  ) { super(); }
   toDOM(view: EditorView) {
     const wrap = document.createElement("span");
     wrap.className = "cm-lp-media";
@@ -117,9 +148,10 @@ class MediaWidget extends WidgetType {
       const ph = document.createElement("span");
       ph.className = "cm-lp-broken";
       ph.textContent = `Missing asset: ${this.href}`;
+      if (this.tip) ph.title = this.tip;
       wrap.appendChild(ph);
     };
-    if (!url) { broken(); return wrap; }
+    if (!url || this.missing) { broken(); return wrap; }
     if (kind === "image") {
       const img = document.createElement("img");
       img.src = url;
@@ -152,19 +184,45 @@ class MediaWidget extends WidgetType {
     }
     return wrap;
   }
-  eq(other: MediaWidget) { return other.href === this.href && other.alt === this.alt; }
+  eq(other: MediaWidget) {
+    return other.href === this.href && other.alt === this.alt && other.url === this.url && other.tip === this.tip && other.missing === this.missing;
+  }
   ignoreEvent(e: Event) { return e.type !== "mousedown" && e.type !== "click"; }
 }
 
-function inlineHtml(text: string): string {
-  const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return esc
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
-    .replace(/(^|[^_\w])_([^_]+)_(?!\w)/g, "$1<em>$2</em>")
-    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="cm-lp-link" data-href="$2">$1</span>');
+/** Whether a cited file is missing: known, or not yet (undefined) until a batched answer arrives. */
+function citationMissing(ctx: PreviewContext, path: string): boolean | undefined {
+  const e = ctx.citation.exists(path.replace(/\/$/, ""));
+  return e === undefined ? undefined : !e;
+}
+
+/** Whether an image's target is known to be missing. Only a target that is not media asks; media finds out by loading. */
+function imageMissing(ctx: PreviewContext, href: string, target: Resolved): boolean {
+  return mediaKind(href) === "file" && ctx.exists(target) === false;
+}
+
+/**
+ * Whether a line holds nothing but citations and whitespace, where cited media
+ * is drawn as the media (CITE-18). A quote mark or list marker opening the
+ * line is block markup, not text beside the citation, so `- @a.png` and
+ * `> @a.png` count; anything else on the line — a word, a heading mark, a
+ * `<br>`, a task box — does not.
+ */
+function citationsOnly(state: EditorState, tree: Tree, line: Line): boolean {
+  let pos = line.from;
+  let only = true;
+  tree.iterate({
+    from: line.from,
+    to: line.to,
+    enter(n) {
+      if (!only) return false;
+      if (n.name !== "Citation" && n.name !== "QuoteMark" && n.name !== "ListMark") return true;
+      if (state.doc.sliceString(pos, Math.max(pos, n.from)).trim()) only = false;
+      pos = Math.max(pos, n.to);
+      return false;
+    },
+  });
+  return only && !state.doc.sliceString(pos, line.to).trim();
 }
 
 function splitRow(line: string): string[] {
@@ -182,28 +240,124 @@ function splitRow(line: string): string[] {
   return cells.map((c) => c.trim());
 }
 
-class TableWidget extends WidgetType {
-  constructor(readonly text: string) { super(); }
-  toDOM() {
-    const lines = this.text.split("\n").filter((l) => l.trim());
-    const table = document.createElement("table");
-    table.className = "cm-lp-table";
-    const aligns = lines[1] ? splitRow(lines[1]).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "")) : [];
-    lines.forEach((line, i) => {
-      if (i === 1) return;
-      const tr = document.createElement("tr");
-      splitRow(line).forEach((cell, j) => {
-        const td = document.createElement(i === 0 ? "th" : "td");
-        td.innerHTML = inlineHtml(cell);
-        if (aligns[j]) td.style.textAlign = aligns[j];
-        tr.appendChild(td);
-      });
-      (i === 0 ? table.createTHead() : table.tBodies[0] ?? table.createTBody()).appendChild(tr);
-    });
-    return table;
+/** A row's cells in column order; an empty cell has no node of its own, only the pipes around it. */
+function rowCells(row: SyntaxNode): (SyntaxNode | null)[] {
+  const cells: (SyntaxNode | null)[] = [];
+  let cell: SyntaxNode | null = null;
+  let leading = true;
+  for (let c = row.firstChild; c; c = c.nextSibling) {
+    if (c.name === "TableCell") cell = c;
+    else if (c.name === "TableDelimiter") { if (!leading) cells.push(cell); cell = null; }
+    leading = false;
   }
-  eq(other: TableWidget) { return other.text === this.text; }
-  ignoreEvent(e: Event) { return e.type !== "mousedown"; }
+  if (cell) cells.push(cell);
+  return cells;
+}
+
+/**
+ * A GFM table, drawn from the document's own parse: each cell's inline syntax
+ * tree is walked into DOM, so a cell renders what a paragraph renders (ED-52)
+ * and the document's text never reaches the page as HTML.
+ */
+class TableWidget extends WidgetType {
+  constructor(
+    readonly text: string,
+    /** Where `text` starts in the document. */
+    readonly base: number,
+    readonly table: SyntaxNode,
+    /** What is known of each cited file; a new answer draws the table again. */
+    readonly known: string,
+    readonly ctx: PreviewContext,
+  ) { super(); }
+
+  toDOM(view: EditorView) {
+    const { ctx } = this;
+    const slice = (from: number, to: number) => this.text.slice(from - this.base, to - this.base);
+    const fill = (el: HTMLElement, node: SyntaxNode, from = node.from, to = node.to) => {
+      let pos = from;
+      for (let c = node.firstChild; c; c = c.nextSibling) {
+        if (c.from < from || c.to > to) continue;
+        if (c.from > pos) el.append(slice(pos, c.from));
+        inline(el, c);
+        pos = c.to;
+      }
+      if (to > pos) el.append(slice(pos, to));
+    };
+    const inline = (el: HTMLElement, n: SyntaxNode) => {
+      const text = slice(n.from, n.to);
+      const wrap = (tag: string) => { const e = el.appendChild(document.createElement(tag)); fill(e, n); return e; };
+      switch (n.name) {
+        case "EmphasisMark": case "StrikethroughMark": case "CodeMark": return;
+        case "Emphasis": wrap("em"); return;
+        case "StrongEmphasis": wrap("strong"); return;
+        case "Strikethrough": wrap("del"); return;
+        case "InlineCode": wrap("code").className = "cm-lp-code"; return;
+        case "Escape": el.append(text.slice(1)); return;
+        case "HTMLTag": {
+          if (/^<br\s*(\/\s*)?>$/i.test(text)) { el.append(document.createElement("br")); return; }
+          const tag = el.appendChild(document.createElement("span"));
+          tag.className = "cm-lp-html";
+          tag.textContent = text;
+          return;
+        }
+        case "Citation": {
+          const path = citedPath(text);
+          el.append(chipElement(path, citationMissing(ctx, path), ctx.citation));
+          return;
+        }
+        case "Image": case "Link": case "Autolink": case "URL": {
+          const url = n.name === "URL" ? n : n.getChild("URL");
+          const href = url ? slice(url.from, url.to).replace(/^<|>$/g, "") : "";
+          const marks = n.getChildren("LinkMark");
+          if (!href || (n.name !== "URL" && marks.length < 2)) { el.append(text); return; }
+          if (n.name === "Image") {
+            const target = ctx.resolve(href, true);
+            el.append(new MediaWidget(href, slice(marks[0].to, marks[1].from), target.url, target.tip, imageMissing(ctx, href, target)).toDOM(view));
+            return;
+          }
+          const link = el.appendChild(document.createElement("span"));
+          link.className = "cm-lp-link";
+          link.dataset.href = href;
+          link.title = href;
+          if (n.name === "Link") fill(link, n, marks[0].to, marks[1].from);
+          else link.textContent = href;
+          return;
+        }
+        default: el.append(text);
+      }
+    };
+
+    const box = document.createElement("div");
+    box.className = "cm-lp-table-wrap";
+    const table = box.appendChild(document.createElement("table"));
+    table.className = "cm-lp-table";
+    const delimiter = this.table.getChild("TableDelimiter");
+    const aligns = delimiter ? splitRow(slice(delimiter.from, delimiter.to)).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "")) : [];
+    let columns = 0;
+    for (let row = this.table.firstChild; row; row = row.nextSibling) {
+      const head = row.name === "TableHeader";
+      if (!head && row.name !== "TableRow") continue;
+      const cells = rowCells(row);
+      if (head) columns = cells.length;
+      const tr = (head ? table.createTHead() : table.tBodies[0] ?? table.createTBody()).insertRow();
+      // A short row is padded and a long one cut to the header's width, as GFM reads them.
+      for (let j = 0; j < columns; j++) {
+        const td = tr.appendChild(document.createElement(head ? "th" : "td"));
+        if (aligns[j]) td.style.textAlign = aligns[j];
+        const cell = td.appendChild(document.createElement("div"));
+        cell.className = "cm-lp-cell";
+        const node = cells[j];
+        if (node) fill(cell, node);
+      }
+    }
+    return box;
+  }
+  eq(other: TableWidget) { return other.text === this.text && other.known === this.known; }
+  destroy(dom: HTMLElement) { releasePreview(dom); }
+  // A chip opens its file and a player plays without moving the caret (ED-53);
+  // any other press enters the table's source, where a Ctrl+click on a link is
+  // taken first by the handler in `livePreview`.
+  ignoreEvent(e: Event) { return e.type !== "mousedown" || !!(e.target as HTMLElement).closest?.(".cm-lp-chip, audio, video"); }
 }
 
 interface FrontmatterRow { key: string; value: string; valueFrom: number; valueTo: number; editable: boolean }
@@ -274,7 +428,7 @@ class FrontmatterWidget extends WidgetType {
 // --- Block replacements (tables, frontmatter): a state field, because
 // replacing whole lines changes the vertical layout outside the viewport.
 
-function blockDecorations(state: EditorState): DecorationSet {
+function blockDecorations(state: EditorState, ctx: PreviewContext): DecorationSet {
   const tree: Tree = syntaxTree(state);
   const spans = selectionLines(state, state.selection);
   const ranges: Range<Decoration>[] = [];
@@ -285,7 +439,28 @@ function blockDecorations(state: EditorState): DecorationSet {
         const to = state.doc.lineAt(Math.max(n.from, n.to - 1)).to;
         if (!revealed(state, spans, from, to)) {
           const text = state.doc.sliceString(from, to);
-          const widget = n.name === "Table" ? new TableWidget(text) : new FrontmatterWidget(text, frontmatterRows(state, from, to));
+          let widget: WidgetType;
+          if (n.name === "Table") {
+            // Where each cited file and image leads, and whether it is there:
+            // the table draws again when an answer arrives, the worktree
+            // family changes or the note moves.
+            const known: unknown[] = [];
+            n.node.cursor().iterate((c) => {
+              if (c.name === "Citation") {
+                const path = citedPath(state.doc.sliceString(c.from, c.to));
+                known.push(citationMissing(ctx, path), ctx.citation.resolve(path).tip);
+              } else if (c.name === "Image") {
+                const url = c.node.getChild("URL");
+                if (!url) return;
+                const href = state.doc.sliceString(url.from, url.to).replace(/^<|>$/g, "");
+                const target = ctx.resolve(href, true);
+                known.push(target.url, imageMissing(ctx, href, target));
+              }
+            });
+            widget = new TableWidget(text, from, n.node, known.join(), ctx);
+          } else {
+            widget = new FrontmatterWidget(text, frontmatterRows(state, from, to));
+          }
           ranges.push(Decoration.replace({ widget, block: true }).range(from, to));
         }
         return false;
@@ -296,14 +471,20 @@ function blockDecorations(state: EditorState): DecorationSet {
   return Decoration.set(ranges, true);
 }
 
-const blockField = StateField.define<DecorationSet>({
-  create: blockDecorations,
-  update(value, tr) {
-    if (tr.docChanged || tr.selection || tr.state.field(focused) !== tr.startState.field(focused) || syntaxTree(tr.state) !== syntaxTree(tr.startState)) return blockDecorations(tr.state);
-    return value;
-  },
-  provide: (f) => EditorView.decorations.from(f),
-});
+/** Block decorations come from a state field, which reaches the preview's context through this closure. */
+function blockField(ctx: PreviewContext) {
+  return StateField.define<DecorationSet>({
+    create: (state) => blockDecorations(state, ctx),
+    update(value, tr) {
+      if (
+        tr.docChanged || tr.selection || tr.effects.some((e) => e.is(refreshPreview))
+        || tr.state.field(focused) !== tr.startState.field(focused) || syntaxTree(tr.state) !== syntaxTree(tr.startState)
+      ) return blockDecorations(tr.state, ctx);
+      return value;
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
+}
 
 // --- Inline decorations: a view plugin over the visible ranges.
 
@@ -313,7 +494,9 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
   const spans = selectionLines(state, state.selection);
   const marks: Range<Decoration>[] = [];
   const lines: Range<Decoration>[] = [];
-  const hide = (from: number, to: number) => { if (to > from) marks.push(Decoration.replace({}).range(from, to)); };
+  // A plugin may not replace a line break: a link title that runs onto the
+  // next line keeps its syntax visible rather than breaking the pane.
+  const hide = (from: number, to: number) => { if (to > from && !state.doc.sliceString(from, to).includes("\n")) marks.push(Decoration.replace({}).range(from, to)); };
   const mark = (from: number, to: number, cls: string, attrs?: Record<string, string>) => {
     if (to > from) marks.push(Decoration.mark({ class: cls, attributes: attrs }).range(from, to));
   };
@@ -323,6 +506,14 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
     for (let n = a; n <= b; n++) lines.push(Decoration.line({ class: cls }).range(state.doc.line(n).from));
   };
   const isRevealed = (n: SyntaxNodeRef) => revealed(state, spans, n.from, n.to);
+  /** `citationsOnly` for the line at `pos`, worked out once per line however many citations it holds. */
+  const own = new Map<number, boolean>();
+  const alone = (pos: number) => {
+    const line = state.doc.lineAt(pos);
+    let only = own.get(line.from);
+    if (only === undefined) own.set(line.from, (only = citationsOnly(state, tree, line)));
+    return only;
+  };
 
   for (const { from, to } of view.visibleRanges) {
     tree.iterate({
@@ -403,21 +594,28 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
             const text = state.doc.sliceString(n.from, n.to);
             const m = /^!\[([^\]]*)\]\(\s*<?([^\s>)]+)>?(?:\s+"[^"]*")?\s*\)$/.exec(text);
             if (!m) return true;
-            const widget = new MediaWidget(m[2], m[1], ctx.resolveUrl(m[2]));
-            if (isRevealed(n)) { marks.push(Decoration.widget({ widget, side: 1 }).range(n.to)); return true; }
+            const target = ctx.resolve(m[2], true);
+            const widget = new MediaWidget(m[2], m[1], target.url, target.tip, imageMissing(ctx, m[2], target));
+            // A plugin may not replace a line break, and alt text can hold one.
+            const multiline = state.doc.lineAt(n.from).number !== state.doc.lineAt(n.to).number;
+            if (isRevealed(n) || multiline) { marks.push(Decoration.widget({ widget, side: 1 }).range(n.to)); return true; }
             marks.push(Decoration.replace({ widget }).range(n.from, n.to));
             return false;
           }
           case "Citation": {
-            // Cited media renders as the media; anything else is a chip (CITE-06, CITE-07).
+            // Cited media on a line of its own is the media; anywhere else it
+            // is a chip, as any other cited file is (CITE-18, CITE-07).
             const path = citedPath(state.doc.sliceString(n.from, n.to));
-            const media = mediaKind(path) !== "file" ? new MediaWidget(path, path.split("/").pop() ?? path, ctx.resolveRoot(path)) : null;
+            let media: MediaWidget | null = null;
+            if (mediaKind(path) !== "file" && alone(n.from)) {
+              const target = ctx.resolve(path, false);
+              media = new MediaWidget(path, path.split("/").pop() ?? path, target.url, target.tip);
+            }
             if (isRevealed(n)) {
               if (media) marks.push(Decoration.widget({ widget: media, side: 1 }).range(n.to));
               return false;
             }
-            const widget = media
-              ?? new ChipWidget(path, (() => { const e = ctx.citation.exists(path.replace(/\/$/, "")); return e === undefined ? undefined : !e; })(), ctx.citation);
+            const widget = media ?? new ChipWidget(path, citationMissing(ctx, path), ctx.citation);
             marks.push(Decoration.replace({ widget }).range(n.from, n.to));
             return false;
           }
@@ -470,7 +668,7 @@ export function livePreview(ctx: PreviewContext): Extension {
   return [
     focused,
     EditorView.focusChangeEffect.of((_, focusing) => setFocused.of(focusing)),
-    blockField,
+    blockField(ctx),
     plugin,
     EditorView.editorAttributes.of({ class: "cm-lp" }),
     EditorView.contentAttributes.of({ spellcheck: "true" }),

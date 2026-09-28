@@ -1,14 +1,14 @@
 //! The file tree and the quick-open file list, both read lazily and both
 //! taking their ignore rules from git itself.
 
-use crate::state::AppState;
+use crate::state::{AppState, GitSummary};
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// Files an unindexed walk stops at, so a huge tree cannot stall quick open.
 const WALK_MAX: usize = 50_000;
@@ -17,7 +17,8 @@ const WALK_MAX: usize = 50_000;
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub name: String,
-    /// Relative to the workspace root, forward slashes, no leading `./`.
+    /// Relative to the workspace root, forward slashes, no leading `./`; or,
+    /// from `stat_entries`, absolute inside the worktree family, as asked.
     pub path: String,
     pub is_dir: bool,
     pub ignored: bool,
@@ -39,6 +40,56 @@ pub fn resolve(state: &AppState, workspace_id: &str, rel: &str) -> Result<(PathB
         anyhow::bail!("{rel} is not a path inside the workspace");
     }
     Ok((root.clone(), root.join(rel_path)))
+}
+
+/// The directories beyond its own root that a workspace's documents reach
+/// (ADR-015), and the directories inside those that they do not: a linked
+/// worktree reaches its main checkout but none of the other linked worktrees,
+/// which may sit inside the main checkout; a main checkout reaches its linked
+/// worktrees wherever git put them.
+pub fn family(git: Option<&GitSummary>) -> (Vec<&Path>, Vec<&Path>) {
+    let Some(g) = git.filter(|g| g.is_repo) else { return (Vec::new(), Vec::new()) };
+    let paths = |main: bool| g.worktrees.iter().filter(|w| w.is_main == main).map(|w| Path::new(&w.path)).collect::<Vec<_>>();
+    if g.is_worktree { (paths(true), paths(false)) } else { (paths(false), Vec::new()) }
+}
+
+/// Whether a document in the workspace at `root` may name the absolute path
+/// `abs`: inside the root, or inside its worktree family. A `..` anywhere
+/// refuses the path, as `resolve` refuses one; the check is on the path as
+/// written, so a symlink inside a reached directory is followed as the tree
+/// follows it.
+pub fn reaches(root: &Path, git: Option<&GitSummary>, abs: &Path) -> bool {
+    if !abs.is_absolute() || abs.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    if abs.starts_with(root) {
+        return true;
+    }
+    let (reached, excluded) = family(git);
+    reached.iter().any(|d| abs.starts_with(d)) && !excluded.iter().any(|d| abs.starts_with(d))
+}
+
+/// The directories the asset protocol serves. Tauri's scope only grows, so
+/// this remembers what it was given.
+static SERVED: parking_lot::Mutex<BTreeSet<PathBuf>> = parking_lot::Mutex::new(BTreeSet::new());
+
+/// Lets the asset protocol serve every open workspace and its worktree family
+/// (AST-14). `tauri.conf.json` allows nothing, so a file anywhere else is
+/// refused with a 403. A directory once served stays served until the
+/// application exits: the scope has no way to take one back.
+pub fn serve(app: &AppHandle, dirs: impl IntoIterator<Item = PathBuf>) {
+    let mut served = SERVED.lock();
+    for dir in dirs {
+        if served.contains(&dir) {
+            continue;
+        }
+        match app.asset_protocol_scope().allow_directory(&dir, true) {
+            Ok(()) => {
+                served.insert(dir);
+            }
+            Err(e) => eprintln!("agentic-workspace: could not serve assets from {}: {e}", dir.display()),
+        }
+    }
 }
 
 fn join_rel(dir: &str, name: &str) -> String {
@@ -109,23 +160,33 @@ pub fn list_dir(state: tauri::State<AppState>, workspace_id: String, path: Strin
     Ok(entries)
 }
 
-/// One entry per workspace-relative path, as a view's root or a citation
-/// needs it: its name, whether it is a directory, whether git ignores it,
-/// and whether it is there at all.
+/// One entry per path, as a view's root or a citation needs it: its name,
+/// whether it is a directory, whether git ignores it, and whether it is there
+/// at all. A path is workspace-relative, or absolute inside the workspace's
+/// worktree family (`reaches`); an absolute path anywhere else is reported
+/// missing without being looked at.
 #[tauri::command(async)]
 pub fn stat_entries(state: tauri::State<AppState>, workspace_id: String, paths: Vec<String>) -> Result<Vec<Entry>, String> {
     let (root, _) = resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
+    let git = state.git.lock().get(&workspace_id).cloned();
     let mut entries: Vec<Entry> = paths
         .iter()
         .map(|p| {
-            let rel = p.trim_matches('/').to_string();
-            let abs = root.join(&rel);
-            let inside = Path::new(&rel).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-            let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-            Entry { name, is_dir: inside && abs.is_dir(), ignored: false, missing: !inside || !abs.exists(), path: rel }
+            let (path, abs, inside) = if p.starts_with('/') {
+                let path = p.trim_end_matches('/').to_string();
+                let inside = reaches(&root, git.as_ref(), Path::new(&path));
+                (path.clone(), PathBuf::from(path), inside)
+            } else {
+                let rel = p.trim_matches('/').to_string();
+                let inside = Path::new(&rel).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+                (rel.clone(), root.join(&rel), inside)
+            };
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            Entry { name, is_dir: inside && abs.is_dir(), ignored: false, missing: !inside || !abs.exists(), path }
         })
         .collect();
-    let present: Vec<String> = entries.iter().filter(|e| !e.missing).map(|e| e.path.clone()).collect();
+    // Git answers for this workspace's own tree only.
+    let present: Vec<String> = entries.iter().filter(|e| !e.missing && !e.path.starts_with('/')).map(|e| e.path.clone()).collect();
     let ignored = ignored_by_git(&root, &present);
     for e in entries.iter_mut() {
         e.ignored = ignored.contains(&e.path);
@@ -482,4 +543,57 @@ pub fn search_project(state: tauri::State<AppState>, workspace_id: String, query
         }
     }
     Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reaches;
+    use crate::state::{GitSummary, Worktree};
+    use std::path::Path;
+
+    fn repo(is_worktree: bool, worktrees: &[(&str, bool)]) -> GitSummary {
+        GitSummary {
+            is_repo: true,
+            is_worktree,
+            worktrees: worktrees.iter().map(|(p, is_main)| Worktree { path: p.to_string(), name: String::new(), branch: None, is_main: *is_main }).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_document_reaches_its_workspace_and_its_worktree_family_and_nothing_else() {
+        // A linked worktree inside its main checkout, beside a sibling in the
+        // same place and another elsewhere.
+        let root = Path::new("/w/main/.claude/worktrees/a");
+        let git = repo(true, &[("/w/main", true), ("/w/main/.claude/worktrees/b", false), ("/elsewhere/c", false)]);
+        for (path, reached) in [
+            ("/w/main/.claude/worktrees/a/shots/1.png", true),
+            ("/w/main/working/x.png", true),
+            ("/w/main", true),
+            ("/w/main/.claude/worktrees/b/x.png", false),
+            ("/elsewhere/c/x.png", false),
+            ("/w/main/.claude/worktrees/a/../b/x.png", false),
+            ("/w/main/working/../../../etc/passwd", false),
+            ("/w/mainly/x.png", false),
+            ("/home/kk/Pictures/x.png", false),
+            ("working/x.png", false),
+        ] {
+            assert_eq!(reaches(root, Some(&git), Path::new(path)), reached, "from the worktree: {path}");
+        }
+        // The main checkout reaches down to each linked worktree, wherever it is.
+        let root = Path::new("/w/main");
+        let git = repo(false, &[("/w/main/.claude/worktrees/a", false), ("/elsewhere/c", false)]);
+        for (path, reached) in [
+            ("/w/main/docs/x.md", true),
+            ("/w/main/.claude/worktrees/a/x.png", true),
+            ("/elsewhere/c/x.png", true),
+            ("/elsewhere/d/x.png", false),
+            ("/elsewhere/c/../d/x.png", false),
+        ] {
+            assert_eq!(reaches(root, Some(&git), Path::new(path)), reached, "from the main checkout: {path}");
+        }
+        // Outside a repository there is no family.
+        assert!(reaches(root, None, Path::new("/w/main/x.md")));
+        assert!(!reaches(root, None, Path::new("/elsewhere/c/x.png")));
+    }
 }

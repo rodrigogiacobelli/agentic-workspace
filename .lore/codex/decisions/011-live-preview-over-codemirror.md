@@ -49,8 +49,36 @@ place: syntax marks are hidden except around the cursor, headings and emphasis
 are styled, and images, audio, tables, task boxes, rules and frontmatter are
 replaced by widgets while the cursor is outside them. Only a focused view
 reveals syntax, so the rendered side of a split draws every line while the
-source side is edited. An image, audio or video whose line holds the cursor
-stays drawn after its revealed source rather than disappearing into it.
+source side is edited. An image, audio or video drawn as the media — a
+Markdown image anywhere, a citation only on a line of its own
+(`015-views-and-citations`) — stays drawn after its revealed source when its
+line holds the cursor, rather than disappearing into it. A cited file drawn as
+a chip shows its source alone on that line.
+
+The table widget draws each cell by walking the cell's inline syntax tree from
+the document's own parse into DOM nodes. A cell therefore renders what a
+paragraph renders: emphasis, inline code, links, a citation as a chip, and an
+image scaled to the cell's width. `<br>`, in any letter case and with or
+without a closing slash, is a line break; any other inline HTML tag shows as dim
+source. The widget lays the table out as VSCode's Markdown preview does: a bold
+header row over a rule, a thin rule between body rows, no vertical rules and no
+outer box, cells padded 5 px by 10 px and centred vertically, and a column's
+`:---:` or `---:` alignment honoured, in the active theme's colours. The table
+sits in a box of its own that scrolls sideways when the table is wider than the
+pane; the box's inline-size containment keeps the table's width out of the
+document's, so the document never scrolls sideways. The table does not inherit
+CodeMirror's `overflow-wrap: anywhere`, which lets the browser size every
+column down to one letter: no column is narrower than its longest word, and
+only a word wider than the box breaks. A click on a chip in a cell opens the
+file, and a Ctrl+click on a link in a cell follows it, without moving the
+cursor; any other click on a table moves the cursor into it, and the table
+shows its source.
+
+The rendered view draws headings in the text colour, with a full-width rule
+under `#` and `##`; the source view keeps the theme's heading colour. Inline
+code, in a paragraph and in a table cell, sits on a rounded background mixed
+from the theme's code background and a tenth of its text colour, so it stands
+apart from the page in every theme.
 
 Split mode is two views over one document. Every change made in either view
 is forwarded to the other, and only the source view carries the undo history,
@@ -100,3 +128,5 @@ it replaces.
   keys act on the source view.
 - **A forwarded change is annotated** and never forwarded again.
 - **A widget edits the text it replaces and nothing else.**
+- **A widget never hands document text to the page as HTML.** A document is
+  untrusted input: a widget builds its DOM node by node and sets text as text.

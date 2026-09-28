@@ -15,8 +15,8 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
 import * as settings from "../settings";
 import { languageExtension, type LanguageId } from "./languages";
-import type { BlameLine, StoredAsset } from "../types";
-import { livePreview, mediaKind, refreshPreview, type PreviewContext } from "./preview";
+import type { BlameLine, StoredAsset, Workspace } from "../types";
+import { livePreview, mediaKind, refreshPreview, type PreviewContext, type Resolved } from "./preview";
 import { typingHelpers } from "./typing";
 import { MARKS_LIMIT, changeField, changeGutter, changeRuler, setBase } from "./changes";
 
@@ -31,6 +31,10 @@ export const external = Annotation.define<boolean>();
 export interface DocHooks {
   /** Follow a link to a file inside the workspace. */
   openFile(relPath: string): void;
+  /** Open a file in another open workspace, switching to it (CITE-17). */
+  openIn(workspaceId: string, relPath: string): void;
+  /** The open workspaces as last published: whose worktree family a path reaches, and which one holds a file. */
+  workspaces(): Workspace[];
   notice(message: string): void;
   /** Show a commit, from a blame annotation. */
   showCommit(hash: string): void;
@@ -87,26 +91,41 @@ const editorTheme = EditorView.theme({
   ".cm-foldPlaceholder": { backgroundColor: "var(--bg-hover)", color: "var(--fg-dim)", border: "none" },
 });
 
-function normalize(parts: string[]): string {
+/**
+ * `parts` with `.` and `..` applied, or null when a `..` climbs above the
+ * first: a link that climbs out is never clamped to the top, which would name
+ * a different file.
+ */
+function normalize(parts: string[]): string[] | null {
   const out: string[] = [];
   for (const p of parts) {
     if (!p || p === ".") continue;
-    if (p === "..") out.pop();
-    else out.push(p);
+    if (p !== "..") out.push(p);
+    else if (out.pop() === undefined) return null;
   }
-  return out.join("/");
+  return out;
 }
 
-/** Resolves a link written in `notePath` to a workspace-relative path. */
-export function resolveLink(notePath: string, href: string): string {
-  const dir = notePath.includes("/") ? notePath.slice(0, notePath.lastIndexOf("/")) : "";
-  const clean = decodeURI(href.split(/[?#]/)[0]);
-  return normalize([...dir.split("/"), ...clean.split("/")]);
+/** Whether the absolute path `abs` is `dir` or lies under it. */
+function under(dir: string, abs: string): boolean {
+  return abs === dir || abs.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
+}
+
+/**
+ * The directories beyond its own root that a workspace's documents reach, and
+ * those inside them they do not: `tree::family` in the backend, which
+ * `stat_entries` and the asset protocol hold to (ADR-015).
+ */
+function family(ws: Workspace | undefined): { reached: string[]; excluded: string[] } {
+  const git = ws?.git;
+  if (!git?.isRepo) return { reached: [], excluded: [] };
+  const paths = (main: boolean) => git.worktrees.filter((w) => w.isMain === main).map((w) => w.path);
+  return git.isWorktree ? { reached: paths(true), excluded: paths(false) } : { reached: paths(false), excluded: [] };
 }
 
 /**
  * The link from a note in `fromDir` to the workspace path `to`, both from the
- * workspace root: the inverse of `resolveLink`, and the path `assets.rs`'s
+ * workspace root: the inverse of `Doc.resolve` for a link, and the path `assets.rs`'s
  * `relative_link` gives a stored asset.
  */
 function relativeLink(fromDir: string, to: string): string {
@@ -161,6 +180,8 @@ export class Doc {
   private autosaveTimer: number | null = null;
   private viewTimer: number | null = null;
   private existence = new Map<string, boolean>();
+  /** The worktree family the rendered pane last resolved against. */
+  private familyKey = "";
   private pendingExists = new Set<string>();
   private existsTimer: number | null = null;
   /** Where a split's last sync left the other pane, so its echo is known. */
@@ -245,18 +266,19 @@ export class Doc {
 
   private richExtensions(): Extension[] {
     const ctx: PreviewContext = {
-      resolveUrl: (href) => {
-        if (/^(https?:|data:|blob:)/i.test(href)) return href;
-        return convertFileSrc(`${this.workspacePath}/${resolveLink(this.path, href)}`);
-      },
-      resolveRoot: (path) => convertFileSrc(`${this.workspacePath}/${normalize(path.split("/"))}`),
+      resolve: (path, link) => this.resolve(path, link),
+      exists: (target) => this.exists(target),
+      // Only a web address leaves the application. Every other link goes
+      // through `resolve`, which reads `file:` as a path and `asset:` or any
+      // other scheme as outside, so none reaches the system opener.
       openLink: (href) => {
-        if (/^[a-z]+:/i.test(href)) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(href)).catch((e) => this.hooks.notice(String(e)));
-        else this.hooks.openFile(resolveLink(this.path, href));
+        if (/^(https?|mailto|tel):/i.test(href)) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(href)).catch((e) => this.hooks.notice(String(e)));
+        else this.open(this.resolve(href, true));
       },
       citation: {
-        exists: (path) => this.exists(path),
-        open: (path) => this.hooks.openFile(normalize(path.split("/"))),
+        exists: (path) => this.exists(this.resolve(path, false)),
+        open: (path) => this.open(this.resolve(path, false)),
+        resolve: (path) => this.resolve(path, false),
       },
     };
     const source = this.source;
@@ -775,12 +797,85 @@ export class Doc {
     this.jumpTo(Math.min(l.from + column, l.to));
   }
 
-  // --- Citations ------------------------------------------------------------
+  // --- Paths ----------------------------------------------------------------
 
-  /** Whether a cited path exists, answered from a cache that is filled in batches. */
-  private exists(path: string): boolean | undefined {
-    const known = this.existence.get(path);
-    if (known === undefined) this.lookUp([path]);
+  /**
+   * Where a path written in this document leads, in ADR-015's order: a file
+   * inside the workspace, then one inside its worktree family, then — for a
+   * path starting with `/` — the same path read from the workspace root.
+   * Anything else is outside and is never requested. `link` reads a relative
+   * path from the note's directory, as a Markdown link or image does; a
+   * citation reads it from the root.
+   */
+  resolve(written: string, link: boolean): Resolved {
+    if (link && /^(https?:|data:|blob:)/i.test(written)) return { written, file: null, rel: null, url: written, tip: "" };
+    const outside = (abs: string | null): Resolved =>
+      ({ written, file: null, rel: null, url: null, tip: abs ? `Outside the workspace: ${abs}` : "Outside the workspace" });
+    let path = written;
+    if (link) {
+      path = path.split(/[?#]/)[0];
+      try { path = decodeURI(path); } catch { /* A stray `%` belongs to the name. */ }
+    }
+    // A `file:` URL names an absolute path, never one read from the root.
+    const fileUrl = /^file:\/\/(?:localhost)?(?=\/)/i.exec(path);
+    if (fileUrl) path = path.slice(fileUrl[0].length);
+    // A colon is legal in a file name, so only a link has a scheme.
+    else if (link && /^[a-z][a-z\d+.-]*:/i.test(path)) return outside(null);
+    const root = this.workspacePath;
+    const absolute = path.startsWith("/");
+    const base = absolute ? [] : [...root.split("/"), ...(link ? this.path.split("/").slice(0, -1) : [])];
+    const parts = normalize([...base, ...path.split("/")]);
+    const abs = parts && `/${parts.join("/")}`;
+    const found = (file: string, rel: string | null): Resolved => ({ written, file, rel, url: convertFileSrc(file), tip: `Not found: ${file}` });
+    if (abs && under(root, abs)) return found(abs, abs.slice(root.length + 1));
+    const { reached, excluded } = family(this.hooks.workspaces().find((w) => w.id === this.workspaceId));
+    // A sibling worktree is outside, not a path to try from the root.
+    if (abs && excluded.some((d) => under(d, abs))) return outside(abs);
+    if (abs && reached.some((d) => under(d, abs))) return found(abs, null);
+    // The older `@/path` form, and GitHub's `/path`. Whether the file is there
+    // is the load's answer: an absolute path elsewhere on disk reads the same.
+    if (absolute && !fileUrl && parts) return found(`${root}/${parts.join("/")}`, parts.join("/"));
+    return outside(abs);
+  }
+
+  /**
+   * The session changed. When this workspace's worktree family did — its
+   * repository summary arrives after launch, and worktrees come and go — the
+   * rendered pane resolves its paths again.
+   */
+  refreshFamily(): void {
+    const key = JSON.stringify(family(this.hooks.workspaces().find((w) => w.id === this.workspaceId)));
+    if (this.disposed || key === this.familyKey) return;
+    this.familyKey = key;
+    this.rich?.dispatch({ effects: refreshPreview.of(null) });
+  }
+
+  /**
+   * Opens a resolved file where it lives: here, or, for a file in the
+   * worktree family, in the open workspace that holds it (CITE-17).
+   */
+  private open(target: Resolved): void {
+    if (target.rel !== null) return this.hooks.openFile(target.rel);
+    const file = target.file;
+    if (!file) return this.hooks.notice(`${target.written} is outside the workspace.`);
+    const owner = this.hooks.workspaces()
+      .filter((w) => w.id !== this.workspaceId && under(w.path, file))
+      .sort((a, b) => b.path.length - a.path.length)[0];
+    if (owner) this.hooks.openIn(owner.id, file.slice(owner.path.length + 1));
+    else this.hooks.notice(`${file} is in no open workspace.`);
+  }
+
+  /**
+   * Whether a resolved file exists, answered from a cache that is filled in
+   * batches: known, or not yet (undefined). A web address counts as there; a
+   * path outside the boundary is missing and never looked up.
+   */
+  private exists(target: Resolved): boolean | undefined {
+    if (!target.file) return target.url !== null;
+    // A family file goes by its absolute path, which `stat_entries` checks against the family.
+    const key = target.rel ?? target.file;
+    const known = this.existence.get(key);
+    if (known === undefined) this.lookUp([key]);
     return known;
   }
 

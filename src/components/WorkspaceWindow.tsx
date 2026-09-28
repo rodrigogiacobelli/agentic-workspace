@@ -47,6 +47,8 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   const ws = session.workspaces.find((w) => w.id === session.active);
   const wsRef = useRef(ws);
   wsRef.current = ws;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
   /** The path each workspace's tree has selected, for the copy-path key. */
   const selection = useRef(new Map<string, string | null>());
@@ -93,12 +95,20 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     editors.retain(tabs);
     retainKept(new Set(session.workspaces.map((w) => w.id)), tabs);
     editors.follow(session.workspaces);
+    editors.refreshFamilies();
   }, [session]);
 
   // Links inside documents open files here; notices surface here.
   useEffect(() => {
     editors.setHooks({
       openFile: (rel) => { if (ws) void openFile(ws, rel, true).catch(report); },
+      // A document keeps the hooks it was built with, so these two read the
+      // session as it is now rather than as it was then.
+      openIn: (id, rel) => {
+        const target = sessionRef.current.workspaces.find((w) => w.id === id);
+        if (target) void api.switchWorkspace(id).then(() => openFile(target, rel, true)).catch(report);
+      },
+      workspaces: () => sessionRef.current.workspaces,
       notice: (m) => report(m),
       showCommit: (hash) => {
         if (!ws) return;

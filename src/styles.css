@@ -576,7 +576,10 @@ main { flex: 1; display: flex; min-height: 0; }
 /* Rendered markdown (ADR-011) */
 .cm-lp .cm-content { font-family: var(--prose); font-size: var(--prose-size); max-width: var(--prose-width); margin: 0 auto; padding: 16px 24px 40vh; }
 .cm-lp .cm-line { padding: 0 2px; }
+/* Rich mode draws a heading in the text colour, as VSCode's preview does; source mode keeps the theme's heading colour (ED-54). */
+.cm-lp { --syn-heading: var(--fg); }
 .cm-lp .cm-lp-h1, .cm-lp .cm-lp-h2, .cm-lp .cm-lp-h3, .cm-lp .cm-lp-h4, .cm-lp .cm-lp-h5, .cm-lp .cm-lp-h6 { font-weight: 700; line-height: 1.3; }
+.cm-lp .cm-lp-h1, .cm-lp .cm-lp-h2 { padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
 .cm-lp .cm-lp-h1 { font-size: 1.9em; margin-top: 0.6em; }
 .cm-lp .cm-lp-h2 { font-size: 1.5em; margin-top: 0.5em; }
 .cm-lp .cm-lp-h3 { font-size: 1.25em; margin-top: 0.4em; }
@@ -584,7 +587,8 @@ main { flex: 1; display: flex; min-height: 0; }
 .cm-lp .cm-lp-em { font-style: italic; }
 .cm-lp .cm-lp-strong { font-weight: 700; }
 .cm-lp .cm-lp-strike { text-decoration: line-through; color: var(--fg-dim); }
-.cm-lp .cm-lp-code { font-family: var(--mono); font-size: 0.9em; background: var(--code-bg); border-radius: 3px; padding: 0 3px; }
+/* Some themes' code background sits a shade off the page; a tenth of the text colour makes inline code read as code in every theme (ED-55). */
+.cm-lp .cm-lp-code { font-family: var(--mono); font-size: 0.9em; background: color-mix(in srgb, var(--fg) 10%, var(--code-bg)); border-radius: 4px; padding: 0.1em 0.35em; }
 .cm-lp .cm-lp-fence, .cm-lp .cm-lp-src { font-family: var(--mono); font-size: var(--editor-size); background: var(--code-bg); }
 .cm-lp .cm-lp-html { font-family: var(--mono); font-size: 0.9em; color: var(--fg-dim); }
 .cm-lp .cm-lp-codeinfo { color: var(--fg-dim); font-size: 0.85em; }
@@ -600,16 +604,34 @@ main { flex: 1; display: flex; min-height: 0; }
 .cm-lp-media audio { display: block; width: min(480px, 100%); }
 .cm-lp-media video { max-width: 100%; max-height: 70vh; display: block; }
 .cm-lp-media-label { display: block; font-size: 0.85em; color: var(--fg-dim); }
-.cm-lp-chip { display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; margin: 0 1px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); color: var(--fg); font-size: 0.85em; line-height: 1.5; cursor: pointer; vertical-align: baseline; }
+/* A chip's name never wraps, so a file name reads whole in a narrow table column; past its line's width it ends in an ellipsis. */
+.cm-lp-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; box-sizing: border-box; padding: 0 6px; margin: 0 1px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); color: var(--fg); font-size: 0.85em; line-height: 1.5; white-space: nowrap; cursor: pointer; vertical-align: baseline; }
 .cm-lp-chip:hover { border-color: var(--accent); }
-.cm-lp-chip-icon { color: var(--fg-dim); font-size: 0.9em; }
+.cm-lp-chip-icon { flex: none; width: 1.15em; height: 1.15em; color: var(--fg-dim); }
+.cm-lp-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cm-lp-chip-missing { border-color: var(--danger); color: var(--danger); }
 .cm-lp-chip-missing .cm-lp-chip-icon { color: var(--danger); }
 .cm-lp-broken { display: inline-block; padding: 4px 8px; border: 1px dashed var(--danger); color: var(--danger); border-radius: 4px; font-size: 0.85em; }
-.cm-lp-table { border-collapse: collapse; margin: 6px 0; font-size: 0.95em; }
-.cm-lp-table th, .cm-lp-table td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; vertical-align: top; }
-.cm-lp-table th { background: var(--bg-raised); }
-.cm-lp-table code { font-family: var(--mono); font-size: 0.9em; background: var(--code-bg); padding: 0 3px; border-radius: 3px; }
+/* An image chip's hover preview (CITE-19): one layer for the window, placed as
+   the tooltip is and sized by `citation.ts` from the image's own size. */
+.image-preview { position: fixed; z-index: var(--z-tooltip); padding: 6px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: none; }
+.image-preview img { display: block; margin: 0 auto; border-radius: 4px; }
+.image-preview-caption { display: flex; gap: 8px; margin: 4px auto 0; font-size: 11px; color: var(--fg-dim); }
+.image-preview-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.image-preview-size { flex: none; }
+.image-preview .cm-lp-broken, .image-preview-tip { max-width: 480px; overflow-wrap: anywhere; }
+.image-preview-tip { display: block; margin-top: 4px; font-size: 11px; color: var(--fg-dim); }
+/* A table is laid out as VSCode's preview lays it out (ED-50). Its box scrolls
+   sideways by itself, and its inline-size containment keeps its width out of
+   the document's, so the document never scrolls sideways (ED-51). The table
+   drops CodeMirror's `overflow-wrap: anywhere`, which sizes every column down
+   to one letter; a word breaks only past the box's width (ED-48). */
+.cm-lp-table-wrap { overflow-x: auto; container-type: inline-size; padding: 6px 0; }
+.cm-lp-table { border-collapse: collapse; font-size: 0.95em; white-space: normal; word-break: normal; overflow-wrap: normal; }
+.cm-lp-table th, .cm-lp-table td { padding: 5px 10px; text-align: left; vertical-align: middle; }
+.cm-lp-table th { font-weight: 700; border-bottom: 1px solid var(--fg-dim); }
+.cm-lp-table tbody tr + tr td { border-top: 1px solid var(--border); }
+.cm-lp-cell { max-width: calc(100cqw - 20px); overflow-wrap: break-word; }
 .cm-lp-frontmatter { border-collapse: collapse; margin: 4px 0 12px; font-size: 0.9em; width: 100%; }
 .cm-lp-frontmatter th { text-align: left; color: var(--fg-dim); font-weight: 500; padding: 3px 12px 3px 0; white-space: nowrap; vertical-align: top; width: 1%; }
 .cm-lp-frontmatter td { padding: 2px 0; }
@@ -1090,19 +1112,20 @@ input, textarea {
 .dropdown-caret { transition: transform var(--d-fast) var(--e-out); }
 .dropdown.open .dropdown-caret { transform: rotate(180deg); }
 
-/* The tooltip's own delay is in `src/tooltip.ts`; this is only its arrival.
-   It is a `[hidden]` element, not a mounted one, so `display` carries the
-   state and has to be allowed to transition discretely. */
-.tooltip {
+/* The tooltip's own delay is in `src/tooltip.ts`, and the image preview's in
+   `src/editor/citation.ts`; this is only their arrival. Each is a `[hidden]`
+   element, not a mounted one, so `display` carries the state and has to be
+   allowed to transition discretely. */
+.tooltip, .image-preview {
   transition:
     opacity   var(--d-instant) var(--e-out),
     transform var(--d-instant) var(--e-out),
     display   var(--d-instant) allow-discrete;
 }
 @starting-style {
-  .tooltip { opacity: 0; transform: translateY(calc(-3px * var(--travel))); }
+  .tooltip, .image-preview { opacity: 0; transform: translateY(calc(-3px * var(--travel))); }
 }
-.tooltip[hidden] {
+.tooltip[hidden], .image-preview[hidden] {
   opacity: 0;
   transform: translateY(calc(-3px * var(--travel)));
   transition-timing-function: var(--e-in);

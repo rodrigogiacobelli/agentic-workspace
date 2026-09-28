@@ -44,6 +44,19 @@ export function Icon({ name, color, size = 16, className }: { name: IconName; co
   );
 }
 
+/** The same icon as an element, for what is drawn outside React: a citation chip. */
+export function iconElement(name: IconName, color?: string, className?: string): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  const attrs = {
+    class: `icon${className ? ` ${className}` : ""}`, width: "16", height: "16", viewBox: "0 0 16 16", fill: "none",
+    stroke: color ?? "currentColor", "stroke-width": "1.4", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true",
+  };
+  for (const [k, v] of Object.entries(attrs)) svg.setAttribute(k, v);
+  svg.appendChild(document.createElementNS(ns, "path")).setAttribute("d", PATHS[name]);
+  return svg;
+}
+
 const CODE: Record<string, string> = {
   ts: "#3b82f6", tsx: "#3b82f6", mts: "#3b82f6", cts: "#3b82f6",
   js: "#eab308", jsx: "#eab308", mjs: "#eab308", cjs: "#eab308",

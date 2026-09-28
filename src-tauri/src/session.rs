@@ -31,7 +31,7 @@ pub fn persist(app: &AppHandle) -> Session {
         .into_iter()
         .filter_map(|(id, pid)| std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|cwd| (id, cwd)))
         .collect();
-    let (snapshot, moved) = {
+    let (snapshot, moved, served) = {
         let mut session = state.session.lock();
         let mut attention = state.attention.lock();
         let git = state.git.lock();
@@ -76,8 +76,16 @@ pub fn persist(app: &AppHandle) -> Session {
         let moved = *current != foreground;
         *current = foreground;
         drop(current);
-        (session.clone(), moved)
+        // What the asset protocol may serve: each workspace and the worktree
+        // family its documents reach (ADR-015).
+        let served: Vec<PathBuf> = session
+            .workspaces
+            .iter()
+            .flat_map(|ws| std::iter::once(ws.path.clone()).chain(tree::family(ws.git.as_ref()).0.into_iter().map(PathBuf::from)))
+            .collect();
+        (session.clone(), moved, served)
     };
+    tree::serve(app, served);
     if moved {
         pty::show(&state);
     }

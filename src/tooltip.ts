@@ -8,6 +8,22 @@ import { duration } from "./motion";
  *  (§7). Once one is up the next has none, which is the rest of that rule. */
 const delay = () => duration("--delay-hover-in") || 350;
 
+/**
+ * Puts a shown, fixed layer under `anchor` at its left edge, or above it when
+ * there is no room below, and inside the window either way.
+ */
+export function place(layer: HTMLElement, anchor: Element): void {
+  // Measured from the window's corner, with the whole width free to it: where
+  // it last stood could have wrapped it narrower than it will be.
+  layer.style.left = layer.style.top = "0px";
+  const r = anchor.getBoundingClientRect();
+  const w = layer.offsetWidth;
+  const h = layer.offsetHeight;
+  const below = r.bottom + 6;
+  layer.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - w - 4))}px`;
+  layer.style.top = `${below + h > window.innerHeight ? Math.max(4, r.top - h - 6) : below}px`;
+}
+
 export function installTooltips(): void {
   const tip = document.createElement("div");
   tip.className = "tooltip";
@@ -31,14 +47,7 @@ export function installTooltips(): void {
     if (!el.isConnected) return;
     tip.textContent = text;
     tip.hidden = false;
-    const r = el.getBoundingClientRect();
-    const w = tip.offsetWidth;
-    const h = tip.offsetHeight;
-    let x = Math.max(4, Math.min(r.left, window.innerWidth - w - 4));
-    let y = r.bottom + 6;
-    if (y + h > window.innerHeight) y = Math.max(4, r.top - h - 6);
-    tip.style.left = `${x}px`;
-    tip.style.top = `${y}px`;
+    place(tip, el);
   };
 
   document.addEventListener("mouseover", (e) => {

@@ -78,3 +78,8 @@ like any other.
   confirmed**, naming the running processes and any uncommitted work in it.
 - **A non-repository workspace is a supported state.** Source Control's panels
   say so and Commit offers to initialise; nothing else changes behaviour.
+- **A document reaches past its directory only into its worktree family.** A
+  linked worktree's documents render files from its main checkout, and a main
+  checkout's from its linked worktrees (`015-views-and-citations`). A file
+  from the family opens in the workspace that holds it. Every other operation
+  keeps to the one directory.

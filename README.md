@@ -105,8 +105,11 @@ copied and nothing is moved; deleting a view deletes the list.
 **Paths an agent can read.** *Quote to AI* on any file or folder writes
 `@path/from/the/workspace/root` into the document you are editing — one line
 per file when several are selected. In the rendered view a cited image, audio
-file or video plays inline, everything else is a chip you can click to open, and
-a citation to a file that is not there is marked in red. One setting decides
+file or video on a line of its own is drawn in place. Anywhere else — in a
+sentence, after a label, in a table cell — it is a chip, as every other cited
+file is: click a chip to open the file, rest the pointer on an image chip to
+preview the image, and a citation to a file that is not there is marked in
+red. One setting decides
 whether pasting and dropping write a citation or a markdown link relative to the
 note.
 
