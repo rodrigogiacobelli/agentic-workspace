@@ -5,6 +5,7 @@
 use crate::credentials::{self, Assigned};
 use crate::settings::SshKey;
 use crate::state::AppState;
+use crate::tree;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -407,15 +408,19 @@ pub fn git_diff(state: tauri::State<AppState>, workspace_id: String, path: Strin
 }
 
 /// File contents at a revision (`HEAD`, a hash, or `:` for the index), or
-/// empty when the path does not exist there.
+/// `None` when the path does not exist there or holds a NUL byte, which no
+/// text view shows.
 #[tauri::command(async)]
-pub fn git_show_file(state: tauri::State<AppState>, workspace_id: String, rev: String, path: String) -> Result<String, String> {
+pub fn git_show_file(state: tauri::State<AppState>, workspace_id: String, rev: String, path: String) -> Result<Option<String>, String> {
+    tree::resolve(&state, &workspace_id, &path).map_err(err)?;
     let repo = repo_of(&state, &workspace_id).map_err(err)?;
     // `:` is git's own name for the index, and it is the whole revision: the
     // separator must not be doubled, or the spec names nothing and the caller
-    // is handed an empty file (FIX-09).
-    let spec = format!("{}:{path}", rev.trim_end_matches(':'));
-    Ok(repo.git(&["show", &spec]).unwrap_or_default())
+    // is handed an empty file (FIX-09). `./` makes the path relative to the
+    // workspace rather than to the repository's top level, which differ for
+    // a workspace on a repository's subdirectory.
+    let spec = format!("{}:./{}", rev.trim_end_matches(':'), path.trim_start_matches("./"));
+    Ok(repo.git(&["show", &spec]).ok().filter(|text| !text.contains('\0')))
 }
 
 #[tauri::command(async)]
@@ -656,7 +661,10 @@ pub struct CommitFile {
 #[tauri::command(async)]
 pub fn git_show(state: tauri::State<AppState>, workspace_id: String, hash: String) -> Result<CommitDetail, String> {
     let repo = repo_of(&state, &workspace_id).map_err(err)?;
-    let out = repo.git(&["show", "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%B%x1e", "--name-status", "--root", "--date=iso", &hash]).map_err(err)?;
+    // `--relative` lists paths from the workspace, the form git_show_file and
+    // git_commit_file_diff resolve on a repository's subdirectory; files
+    // outside the workspace drop out, and it could not open them anyway.
+    let out = repo.git(&["show", "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%B%x1e", "--name-status", "--relative", "--root", "--date=iso", &hash]).map_err(err)?;
     let (head, files) = out.split_once('\x1e').unwrap_or((&out, ""));
     let f: Vec<&str> = head.split('\x1f').collect();
     if f.len() < 5 {

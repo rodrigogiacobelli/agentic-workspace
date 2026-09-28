@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
 import { useKept, useKeptScroll, useLive } from "../live";
@@ -90,6 +90,14 @@ const NOTHING = new Map<string, Entry[]>();
  * every tree, since the clipboard is the desktop's.
  */
 let clipboardHasFiles: boolean | null = null;
+
+/**
+ * A row asked for from outside the tree: a breadcrumb's Reveal in Explorer
+ * (ED-47). Held here rather than in a tree, since the Explorer it names may be
+ * built only once the request has brought it forward.
+ */
+let revealing: { workspaceId: string; path: string } | null = null;
+window.addEventListener("tree-reveal", (e) => { revealing = (e as CustomEvent<{ workspaceId: string; path: string }>).detail; });
 
 /**
  * Explorer: the tree rooted at the workspace, read one directory at a time.
@@ -265,8 +273,8 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   }, [filter, allFiles, ws.id]);
 
   /**
-   * The directories opened since the tree last drew — from a click, the
-   * breadcrumb, a paste or a new folder: their branches alone unfold, never
+   * The directories opened since the tree last drew — from a click, a
+   * breadcrumb's Reveal in Explorer, a paste or a new folder: their branches alone unfold, never
    * the ones drawn open as the tree is built.
    */
   const opened = built.current ? ws.expanded.filter((d) => !wasExpanded.current.includes(d)) : [];
@@ -407,6 +415,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     const icon = fileIcon(e.name, e.isDir, expanded);
     return (
       <div
+        data-path={e.path}
         className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected === e.path || multi.has(e.path) ? " selected" : ""}${dragOver === e.path ? " drop-before" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={(ev) => {
@@ -538,6 +547,34 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   order.current = [];
 
   const scroller = useKeptScroll<HTMLElement>(`${kept}:scroll`, view ? viewEntries !== null : listings.has(""));
+  // A revealed row is scrolled to once the folders above it have opened and it
+  // is drawn; behind another panel's tab it has no box yet, and waits. One the
+  // reader has since moved away from is dropped rather than paid later.
+  const body = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const want = revealing;
+    if (kind !== "explorer" || !want || want.workspaceId !== ws.id) return;
+    if (selected !== want.path) { revealing = null; return; }
+    const row = body.current?.querySelector(`[data-path="${CSS.escape(want.path)}"]`);
+    if (!row?.getClientRects().length) return;
+    revealing = null;
+    row.scrollIntoView({ block: "nearest" });
+    // A folder just opened is still unfolding, and its clipped rows do not yet
+    // count toward the height the tree scrolls through, so near the end the
+    // scroll falls short of the row; it is made again once they do.
+    const unfolding: Animation[] = [];
+    for (let b = row.closest(".tree-branch"); b; b = b.parentElement?.closest(".tree-branch") ?? null) unfolding.push(...b.getAnimations());
+    if (unfolding.length) void Promise.all(unfolding.map((a) => a.finished)).then(() => row.scrollIntoView({ block: "nearest" }), () => {});
+  });
+  // The request may change nothing the tree draws — the row already selected,
+  // the Explorer already in front, every folder above it open — so it draws
+  // again to look.
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (kind !== "explorer") return;
+    window.addEventListener("tree-reveal", redraw);
+    return () => window.removeEventListener("tree-reveal", redraw);
+  }, [kind]);
   const refilter = (value: string) => {
     setFilter(value);
     // The file list is read once per filter session; the next one reads it afresh.
@@ -548,7 +585,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   const create = (kind: "new-file" | "new-folder") => { if (creation !== null) setDialog({ kind, dir: creation }); };
 
   return (
-    <div className="sidebar-body">
+    <div className="sidebar-body" ref={body}>
       {kind === "custom" && !view ? (
         <div className="panel-empty">
           No custom views yet. A view gathers files and folders from anywhere in the workspace at its root: right-click one in Explorer and choose “Send to view”.

@@ -18,6 +18,7 @@ import { languageExtension, type LanguageId } from "./languages";
 import type { BlameLine, StoredAsset } from "../types";
 import { livePreview, mediaKind, refreshPreview, type PreviewContext } from "./preview";
 import { typingHelpers } from "./typing";
+import { MARKS_LIMIT, changeField, changeGutter, changeRuler, setBase } from "./changes";
 
 export type Mode = "source" | "split" | "rich";
 export const MODES: Mode[] = ["source", "split", "rich"];
@@ -136,7 +137,14 @@ export class Doc {
    *  are reconfigured rather than fixed when the file moves. */
   private typingComp = new Compartment();
   private blameComp = new Compartment();
+  /** The change gutter, which steps aside while the conflict diff draws its own. */
+  private changeComp = new Compartment();
   blameOn = false;
+  /** The index's copy of the file as last read, which the change marks compare against (GIT-14). */
+  private base: string | null | undefined = undefined;
+  /** Whether the index may have moved since it was read. */
+  private baseStale = true;
+  private baseReads = 0;
   private autosaveTimer: number | null = null;
   private viewTimer: number | null = null;
   private existence = new Map<string, boolean>();
@@ -203,6 +211,7 @@ export class Doc {
   private sourceExtensions(): Extension[] {
     return [
       lineNumbers(),
+      this.changeComp.of(changeGutter),
       highlightActiveLineGutter(),
       history(),
       foldGutter(),
@@ -215,6 +224,8 @@ export class Doc {
       ...this.common(),
       this.mergeComp.of([]),
       this.blameComp.of([]),
+      changeField,
+      changeRuler,
       EditorView.updateListener.of((u) => this.onUpdate(u, this.source)),
     ];
   }
@@ -250,6 +261,9 @@ export class Doc {
       ]),
       ...this.common(),
       livePreview(ctx),
+      // Built later than the source view, it starts from the chunks the source already holds.
+      changeField.init(() => this.source.state.field(changeField)),
+      changeRuler,
       EditorView.updateListener.of((u) => this.onUpdate(u, this.rich!)),
     ];
   }
@@ -318,6 +332,7 @@ export class Doc {
       for (const [view, at] of this.owed) view.dispatch({ effects: at });
       if (focus && !document.activeElement?.closest(".tree")) this.active().focus();
     }
+    if (this.baseStale) void this.readBase();
   }
 
   focus(): void {
@@ -508,6 +523,13 @@ export class Doc {
     }, 1500);
   }
 
+  /** Deletes the draft, and any save of it still to come: the changes were discarded. */
+  dropDraft(): void {
+    if (this.draftTimer) window.clearTimeout(this.draftTimer);
+    this.draftTimer = null;
+    void api.deleteDraft(this.workspaceId, this.path).catch(() => {});
+  }
+
   /** Applies a draft left by a previous run as unsaved changes. */
   restoreDraft(text: string): void {
     if (this.source.state.doc.toString() === text) return;
@@ -541,7 +563,12 @@ export class Doc {
     const current = this.source.state.doc.toString();
     const changes = diff(current, text).map((c) => ({ from: c.fromA, to: c.toA, insert: text.slice(c.fromB, c.toB) }));
     this.saved = Text.of(text.split("\n"));
-    this.source.dispatch({ changes, annotations: external.of(true) });
+    // A rewrite from outside is compared with the index afresh, by line: an
+    // agent's edits can lie close enough together that re-diffing the stretch
+    // around each by character gives up and marks everything between them.
+    const effects = typeof this.base === "string" ? [setBase.of(this.base)] : [];
+    this.source.dispatch({ changes, effects, annotations: external.of(true) });
+    if (effects.length) this.rich?.dispatch({ effects });
   }
 
   /**
@@ -557,6 +584,7 @@ export class Doc {
     this.rich?.dispatch({ effects: helpers });
     this.invalidateExistence();
     this.rich?.dispatch({ effects: refreshPreview.of(null) });
+    this.refreshBase();
     // The watcher may have reported the old name's removal first.
     void this.checkDisk();
     this.emit();
@@ -608,7 +636,12 @@ export class Doc {
 
   openDiff(): void {
     if (this.conflict === null) return;
-    this.source.dispatch({ effects: this.mergeComp.reconfigure(unifiedMergeView({ original: this.conflict, mergeControls: true, highlightChanges: true })) });
+    this.source.dispatch({
+      effects: [
+        this.mergeComp.reconfigure(unifiedMergeView({ original: this.conflict, mergeControls: true, highlightChanges: true })),
+        this.changeComp.reconfigure([]),
+      ],
+    });
     this.diffOpen = true;
     if (this.mode === "rich") this.setMode("source");
     this.emit();
@@ -616,8 +649,35 @@ export class Doc {
 
   closeDiff(): void {
     if (!this.diffOpen) return;
-    this.source.dispatch({ effects: this.mergeComp.reconfigure([]) });
+    this.source.dispatch({ effects: [this.mergeComp.reconfigure([]), this.changeComp.reconfigure(changeGutter)] });
     this.diffOpen = false;
+  }
+
+  /**
+   * The index may have moved (GIT-14). A document on screen reads it now; one
+   * out of sight reads it when it is next shown, so a workspace out of sight
+   * starts no git for its documents (ADR-018).
+   */
+  refreshBase(): void {
+    this.baseStale = true;
+    if (this.root?.isConnected) void this.readBase();
+  }
+
+  private async readBase(): Promise<void> {
+    this.baseStale = false;
+    const n = ++this.baseReads;
+    // A buffer past the limit gets no marks, so its index copy is not fetched
+    // only to be dropped, again after every git change an agent makes.
+    // `./` names the file from the workspace, which may sit below the
+    // repository's top level.
+    const text = this.source.state.doc.length > MARKS_LIMIT
+      ? null
+      : await api.gitShowFile(this.workspaceId, ":", `./${this.path}`).catch(() => null);
+    if (this.disposed || n !== this.baseReads || text === this.base) return;
+    this.base = text;
+    const effects = setBase.of(text);
+    this.source.dispatch({ effects });
+    this.rich?.dispatch({ effects });
   }
 
   /** Annotates every line with its last commit, or clears the annotations. */

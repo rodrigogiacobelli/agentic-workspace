@@ -9,6 +9,13 @@
   --accent: #7dd3fc;
   --selection: #2e4a6b;
   --danger: #f87171;
+  /* What a change did to a line or a file, wherever change status shows: the
+     tree, the Source Control lists, the diff and editor marks, ahead and
+     behind. Tags and warnings share the yellow but not the meaning, so they
+     keep their own value. */
+  --git-added: #86efac;
+  --git-modified: #e0b35a;
+  --git-deleted: var(--danger);
   --mono: "JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", "Cascadia Code", "DejaVu Sans Mono", monospace;
   --ui: system-ui, "Noto Sans", sans-serif;
   /* Layering, lowest first. Every floating layer sits above the window's
@@ -496,6 +503,14 @@ main { flex: 1; display: flex; min-height: 0; }
 .crumb { cursor: pointer; }
 .crumb + .crumb::before { content: "›"; margin: 0 6px; color: var(--fg-faint); }
 .crumb.heading { color: var(--fg); }
+
+
+/* A crumb is a button that copies its path (ED-47), drawn as the text it
+   always was; the separator drawn inside it keeps its own colour. */
+.breadcrumbs .crumb { padding: 0; border: 0; border-radius: 0; color: inherit; }
+.breadcrumbs .crumb:hover { background: transparent; color: var(--fg); }
+.breadcrumbs .crumb:focus-visible { outline-offset: 0; }
+.breadcrumbs .crumb.heading { color: var(--fg); }
 .mode-switch { margin-left: auto; display: flex; gap: 2px; }
 .mode-switch button { padding: 0 8px; font-size: 11px; color: var(--fg-dim); text-transform: capitalize; }
 .mode-switch button.active { color: var(--fg); background: var(--bg-hover); }
@@ -537,8 +552,8 @@ main { flex: 1; display: flex; min-height: 0; }
 .statusbar-danger { color: var(--danger); }
 .statusbar-language { height: 18px; font-size: 11px; color: var(--fg-dim); background: transparent; border-color: transparent; }
 .statusbar button.statusbar-branch { height: 18px; font-family: var(--mono); font-size: 10.5px; color: var(--fg); }
-.statusbar-branch .ahead { color: #86efac; }
-.statusbar-branch .behind { color: #e0b35a; }
+.statusbar-branch .ahead { color: var(--git-added); }
+.statusbar-branch .behind { color: var(--git-modified); }
 .statusbar-branch .state { color: var(--danger); }
 .binary-notice { padding: 24px; color: var(--fg-dim); text-align: center; }
 .binary-notice button { border: 1px solid var(--border); }
@@ -649,10 +664,10 @@ main { flex: 1; display: flex; min-height: 0; }
 .attention-badge { color: var(--accent); font-size: 10px; }
 .tab.attention .tab-label::before { content: "● "; color: var(--accent); font-size: 9px; vertical-align: middle; }
 .tree-git { margin-left: auto; padding-left: 8px; font-size: 11px; color: var(--fg-dim); }
-.tree-row.git-M .tree-name, .tree-row.git-M .tree-git { color: #e0b35a; }
-.tree-row.git-A .tree-name, .tree-row.git-U .tree-name, .tree-row.git-A .tree-git, .tree-row.git-U .tree-git { color: #86efac; }
-.tree-row.git-D .tree-name { color: var(--danger); text-decoration: line-through; }
-.tree-row.git-R .tree-name { color: #e0b35a; }
+.tree-row.git-M .tree-name, .tree-row.git-M .tree-git { color: var(--git-modified); }
+.tree-row.git-A .tree-name, .tree-row.git-U .tree-name, .tree-row.git-A .tree-git, .tree-row.git-U .tree-git { color: var(--git-added); }
+.tree-row.git-D .tree-name { color: var(--git-deleted); text-decoration: line-through; }
+.tree-row.git-R .tree-name { color: var(--git-modified); }
 .tree-row.git-\! .tree-name, .tree-row.git-\! .tree-git { color: var(--danger); }
 .tree-row.ignored .tree-name { color: var(--fg-faint); }
 
@@ -675,9 +690,9 @@ main { flex: 1; display: flex; min-height: 0; }
 .git-row { position: relative; display: flex; align-items: center; gap: 6px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
 .git-row:hover { background: var(--bg-hover); }
 .git-letter { width: 14px; text-align: center; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); flex: none; }
-.git-letter.s-M { color: #e0b35a; }
-.git-letter.s-A, .git-letter.s-U { color: #86efac; }
-.git-letter.s-D { color: var(--danger); }
+.git-letter.s-M { color: var(--git-modified); }
+.git-letter.s-A, .git-letter.s-U { color: var(--git-added); }
+.git-letter.s-D { color: var(--git-deleted); }
 .git-letter.s-\! { color: var(--danger); }
 .git-path { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 /* Over the row rather than in it: reserving the space would narrow every
@@ -786,8 +801,8 @@ main { flex: 1; display: flex; min-height: 0; }
 .ref-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 11.5px; }
 .ref-name.tag { color: #e0b35a; }
 .ref-ab { flex: none; display: flex; gap: 4px; font-family: var(--mono); font-size: 10px; }
-.ref-ab .ahead, .remote-op .ahead { color: #86efac; }
-.ref-ab .behind, .remote-op .behind { color: #e0b35a; }
+.ref-ab .ahead, .remote-op .ahead { color: var(--git-added); }
+.ref-ab .behind, .remote-op .behind { color: var(--git-modified); }
 .ref-meta { flex: none; display: flex; gap: 6px; color: var(--fg-dim); font-size: 11px; }
 .ref-hash { font-family: var(--mono); font-size: 10.5px; }
 /* A row whose click does nothing: only its actions do, so the pointer must
@@ -843,9 +858,33 @@ main { flex: 1; display: flex; min-height: 0; }
    where to look; it sits over the scrollbar, as the platform's does. */
 .diff-ruler { position: absolute; top: 0; right: 0; bottom: 0; width: 8px; pointer-events: none; }
 .diff-mark { position: absolute; left: 1px; right: 1px; min-height: 2px; border-radius: 1px; }
-.diff-mark.add { background: #86efac; }
-.diff-mark.del { background: var(--danger); }
-.diff-mark.mod { background: #e0b35a; }
+.diff-mark.add { background: var(--git-added); }
+.diff-mark.del { background: var(--git-deleted); }
+.diff-mark.mod { background: var(--git-modified); }
+
+
+/* The change gutter (GIT-14): a band beside added and changed lines, and a
+   wedge pointing into the text on the top edge of the line where lines were
+   deleted. It keeps its width while nothing has changed, so the first change
+   does not push the text over. */
+.cm-gutter.cm-change-gutter { width: 5px; }
+.cm-change-gutter .cm-gutterElement { position: relative; }
+.cm-change-mark { position: absolute; left: 1px; top: 0; bottom: 0; width: 3px; }
+.cm-change-mark.add { background: var(--git-added); }
+.cm-change-mark.mod { background: var(--git-modified); }
+.cm-change-mark.del {
+  left: 0; top: -4px; bottom: auto; width: 0;
+  border-style: solid; border-width: 4px 0 4px 5px;
+  border-color: transparent transparent transparent var(--git-deleted);
+}
+
+/* The editor's change ruler (SCR-09), over the scrollbar's lane as the diff's
+   is. The lane lets the pointer through to the scroller beneath; its marks
+   take the click. The source view's lines stop short of it; the rendered
+   view's own margin already keeps its text clear. */
+.cm-change-ruler { position: absolute; right: 0; width: 8px; pointer-events: none; }
+.cm-change-ruler .diff-mark { pointer-events: auto; cursor: pointer; }
+.editor .cm-editor:not(.cm-lp) .cm-line { padding-right: 10px; }
 .diff-empty { padding: 24px; color: var(--fg-dim); text-align: center; }
 .diff-empty button { border: 1px solid var(--border); }
 /* The selection layer sits above the text (see editorTheme); a blend mode

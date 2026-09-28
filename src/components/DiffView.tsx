@@ -3,10 +3,11 @@ import { EditorState, Text } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, drawSelection, lineNumbers } from "@codemirror/view";
 import { StreamLanguage, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
 import { diff as diffMode } from "@codemirror/legacy-modes/mode/diff";
-import { Chunk, MergeView } from "@codemirror/merge";
+import { MergeView } from "@codemirror/merge";
 import { tags as t } from "@lezer/highlight";
 import { api } from "../api";
 import { keep, peek, useChanged, useKept } from "../live";
+import { buildChunks, endOf, hunksOf, kindOf, measure, type Mark, type Span } from "../editor/changes";
 import { languageExtension, languageFor } from "../editor/languages";
 import { report } from "../notice";
 import * as repo from "../repo";
@@ -55,17 +56,11 @@ class HunkWidget extends WidgetType {
   ignoreEvent() { return true; }
 }
 
-type MarkKind = "add" | "del" | "mod";
-interface Mark { top: number; height: number; kind: MarkKind }
-interface Span { from: number; to: number; kind: MarkKind }
-
-/** The changed lines of the new file, from the two versions of it. */
-function sideSpans(old: string, now: string, length: number): Span[] {
-  return Chunk.build(Text.of(old.split("\n")), Text.of(now.split("\n"))).map((c) => ({
-    from: Math.min(c.fromB, length),
-    to: Math.min(c.endB, length),
-    kind: c.fromA === c.toA ? "add" : c.fromB === c.toB ? "del" : "mod",
-  }));
+/** The changed lines of the new file, from the two versions of it, split as the new side's view splits its text. */
+function sideSpans(old: string, now: string): Span[] {
+  const a = Text.of(old.split(/\r\n?|\n/));
+  const b = Text.of(now.split(/\r\n?|\n/));
+  return hunksOf(buildChunks(a, b), a, b).map((h) => ({ from: h.fromB, to: endOf(h, b), kind: kindOf(h, a, b) }));
 }
 
 /** The changed lines of a unified diff: its own `+` and `-` lines. */
@@ -86,19 +81,6 @@ function inlineSpans(doc: Text): Span[] {
   }
   flush();
   return spans;
-}
-
-/** Those spans as fractions of the scrollable height, which is what the
- * ruler is drawn in: the whole file is shown, so this is how a change is
- * found without reading it. */
-function measure(view: EditorView, spans: Span[]): Mark[] {
-  const total = view.contentHeight;
-  if (!total) return [];
-  return spans.map(({ from, to, kind }) => {
-    const first = view.lineBlockAt(from);
-    const last = view.lineBlockAt(Math.max(from, to));
-    return { kind, top: first.top / total, height: Math.max((last.bottom - first.top) / total, 0.004) };
-  });
 }
 
 /** The mode the last diff was read in; a new tab opens the same way. */
@@ -169,17 +151,17 @@ export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
       let now = "";
       if (target.kind === "worktree") {
         text = await api.gitDiff(ws.id, path, false, target.untracked);
-        old = target.untracked ? "" : await api.gitShowFile(ws.id, ":", path);
+        old = target.untracked ? "" : await api.gitShowFile(ws.id, ":", path) ?? "";
         now = await api.readFile(ws.id, path).catch(() => "");
       } else if (target.kind === "staged") {
         text = await api.gitDiff(ws.id, path, true, false);
-        old = await api.gitShowFile(ws.id, "HEAD", path);
-        now = await api.gitShowFile(ws.id, ":", path);
+        old = await api.gitShowFile(ws.id, "HEAD", path) ?? "";
+        now = await api.gitShowFile(ws.id, ":", path) ?? "";
       } else {
         const hash = target.hash ?? "HEAD";
         text = await api.gitCommitFileDiff(ws.id, hash, path);
-        old = await api.gitShowFile(ws.id, `${hash}^`, path);
-        now = await api.gitShowFile(ws.id, hash, path);
+        old = await api.gitShowFile(ws.id, `${hash}^`, path) ?? "";
+        now = await api.gitShowFile(ws.id, hash, path) ?? "";
       }
       if (cancelled) return;
       // A workspace where agents write is never quiet, and every write asks
@@ -228,20 +210,20 @@ export function DiffView({ ws, tab, onClose, onOpenInEditor }: Props) {
       waiting.observe(s);
     };
     el.addEventListener("scroll", remember, true);
-    // The ruler follows the content height, which is an estimate until the
-    // lines below the fold have been measured.
+    // The ruler stands for the whole scrollable height, the content height,
+    // which is an estimate until the lines below the fold have been measured.
     let measured = 0;
     const paint = (v: EditorView, spans: Span[]) =>
       v.requestMeasure({
         key: "diff-ruler",
-        read: () => (v.contentHeight === measured ? null : ((measured = v.contentHeight), measure(v, spans))),
+        read: () => (v.contentHeight === measured ? null : ((measured = v.contentHeight), measure(v, spans, v.contentHeight))),
         write: (m) => { if (m) setMarks(m); },
       });
     const follow = (spans: Span[]) => EditorView.updateListener.of((u) => { if (u.geometryChanged) paint(u.view, spans); });
     const lang = languageExtension(languageFor(path));
     const shared = [EditorState.readOnly.of(true), EditorView.editable.of(false), drawSelection(), lineNumbers(), theme, syntaxHighlighting(diffHighlight)];
     if (mode === "side") {
-      const spans = sideSpans(loaded.old, loaded.now, loaded.now.length);
+      const spans = sideSpans(loaded.old, loaded.now);
       const mv = new MergeView({
         a: { doc: loaded.old, extensions: [...shared, lang] },
         b: { doc: loaded.now, extensions: [...shared, lang, follow(spans)] },

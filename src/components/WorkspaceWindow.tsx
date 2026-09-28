@@ -118,10 +118,13 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     return () => { void unlisten.then((u) => u()); };
   }, [session.active]);
 
-  // An agent rewrote something: every open document in that directory checks its file.
+  // An agent rewrote something: every open document in that directory checks
+  // its file, and after a change in the git directory — staging, above all —
+  // every document of the workspace compares against the index again (GIT-14).
   useEffect(() => {
-    const unlisten = events.onDirChanged((change) => editors.checkDisk(change.workspaceId, change.dirs));
-    return () => { void unlisten.then((u) => u()); };
+    const dirs = events.onDirChanged((change) => editors.checkDisk(change.workspaceId, change.dirs));
+    const git = events.onGitChanged(editors.gitChanged);
+    return () => { void dirs.then((u) => u()); void git.then((u) => u()); };
   }, []);
 
   // Files dropped from the file manager land at the caret of the active
@@ -208,6 +211,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
           update={update}
           front={front}
           openFile={openFile}
+          focusPanel={focusPanel}
           selection={selection.current}
         />
       ) : (
@@ -232,6 +236,7 @@ interface ViewProps {
   update: (mode: DockedMode, next: PanelLayout) => void;
   front: (mode: DockedMode) => void;
   openFile: (ws: Workspace, path: string, preview: boolean) => Promise<string>;
+  focusPanel: (id: PanelId) => void;
   selection: Map<string, string | null>;
 }
 
@@ -243,10 +248,32 @@ interface ViewProps {
  * diffs are kept in `src/live.ts`, so a rebuilt view paints from them at once
  * and re-reads after.
  */
-function WorkspaceView({ ws, session, layouts, update, front, openFile, selection }: ViewProps) {
+function WorkspaceView({ ws, session, layouts, update, front, openFile, focusPanel, selection }: ViewProps) {
   const [selected, setSelected] = useState<string | null>(() => selection.get(ws.id) ?? null);
   const select = (path: string | null) => { selection.set(ws.id, path); setSelected(path); };
   const { status } = repo.useRepo(ws.id);
+
+  // A breadcrumb's Reveal in Explorer (ED-47): the path is selected and the
+  // Explorer comes forward, and every folder above the path opens, in order,
+  // so each unfolds as the tree draws it. The tree scrolls to the row once it
+  // is drawn.
+  useEffect(() => {
+    const onReveal = (e: Event) => {
+      const { workspaceId, path } = (e as CustomEvent<{ workspaceId: string; path: string }>).detail;
+      if (workspaceId !== ws.id) return;
+      select(path);
+      focusPanel("explorer");
+      const parts = path.split("/");
+      void (async () => {
+        for (let i = 1; i < parts.length; i++) {
+          const dir = parts.slice(0, i).join("/");
+          if (!ws.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true);
+        }
+      })().catch(report);
+    };
+    window.addEventListener("tree-reveal", onReveal);
+    return () => window.removeEventListener("tree-reveal", onReveal);
+  });
 
   const openAt = (path: string, line: number, column: number) => {
     openFile(ws, path, true).then((id) => editors.revealLine(id, line, column)).catch(report);

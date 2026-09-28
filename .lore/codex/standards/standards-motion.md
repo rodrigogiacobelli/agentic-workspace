@@ -51,8 +51,9 @@ and the selected tab in the settings dialog's tab column is marked the same
 way.
 
 The one height reveal is a directory's children in the file tree, played for
-a directory opened while the tree is on screen — from the tree, the
-breadcrumb, a paste or a new folder — and never for the open directories of a
+a directory opened while the tree is on screen — from the tree, a
+breadcrumb's *Reveal in Explorer*, a paste or a new folder — and never
+for the open directories of a
 tree built when its workspace or mode comes back (`.tree-branch.open.unfold`). The grid
 wrapper that carries it clips its child downwards only, with
 `overflow: visible clip`, so a name longer than the panel still scrolls into

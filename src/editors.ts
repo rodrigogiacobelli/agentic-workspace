@@ -189,6 +189,16 @@ export function checkDisk(workspaceId: string, dirs: string[]): void {
   }
 }
 
+/**
+ * The workspace's git directory changed, the index with it perhaps: every
+ * open document of it compares against the index again (GIT-14). This is
+ * heard straight from the watcher, not through the repository store, whose
+ * own wait would leave the marks of a staged file up past 300 ms.
+ */
+export function gitChanged(workspaceId: string): void {
+  for (const entry of registry.values()) if ("doc" in entry && entry.doc.workspaceId === workspaceId) entry.doc.refreshBase();
+}
+
 /** Re-creates a document so a new language override takes effect. */
 export function reopen(id: string): void {
   const entry = registry.get(id);

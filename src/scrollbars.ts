@@ -202,6 +202,10 @@ export function installScrollbars(): void {
         const el = rails.y.target;
         if (!el) return;
         e.preventDefault();
+        // The lane an editor marks its changes in lies under this one (SCR-09):
+        // a press on a mark goes to the mark, and pages nothing.
+        const mark = document.elementsFromPoint(e.clientX, e.clientY).find((n): n is HTMLElement => n instanceof HTMLElement && n.dataset.scrollMark !== undefined);
+        if (mark) { mark.click(); return; }
         const thumbBox = rails.y.thumb.getBoundingClientRect();
         el.scrollTop += (e.clientY < thumbBox.top ? -1 : 1) * el.clientHeight;
         show("y", el);

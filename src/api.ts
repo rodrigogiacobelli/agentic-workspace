@@ -192,8 +192,9 @@ export const api = {
   gitStatus: (workspaceId: string) => invoke<StatusEntry[]>("git_status", { workspaceId }),
   gitDiff: (workspaceId: string, path: string, staged: boolean, untracked: boolean) =>
     invoke<string>("git_diff", { workspaceId, path, staged, untracked }),
+  /** Null when git cannot read the file at that revision, or the file is binary. */
   gitShowFile: (workspaceId: string, rev: string, path: string) =>
-    invoke<string>("git_show_file", { workspaceId, rev, path }),
+    invoke<string | null>("git_show_file", { workspaceId, rev, path }),
   gitCommitFileDiff: (workspaceId: string, hash: string, path: string) =>
     invoke<string>("git_commit_file_diff", { workspaceId, hash, path }),
   gitStage: (workspaceId: string, paths: string[]) => invoke<void>("git_stage", { workspaceId, paths }),

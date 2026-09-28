@@ -5,7 +5,7 @@ import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Live, keep, peek } from "../live";
-import { report } from "../notice";
+import { notify, report } from "../notice";
 import type { AreaId, EditorGroup, EditorTab, LayoutGroup, PanelId, WorkArea, Workspace } from "../types";
 import { DiffView } from "./DiffView";
 import { panelInfo } from "./dock";
@@ -25,7 +25,8 @@ export function activeGroupOf(ws: Workspace, area: AreaId): EditorGroup | undefi
 }
 
 export async function closeTab(ws: Workspace, id: string): Promise<void> {
-  if (editors.isDirty(id)) {
+  const dirty = editors.isDirty(id) ? editors.doc(id) : undefined;
+  if (dirty) {
     const path = ws.groups.flatMap((g) => g.editors).find((t) => t.id === id)?.path ?? "this file";
     const discard = await ask(`${path} has unsaved changes. Close it and discard them?`, {
       title: "Unsaved changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep open",
@@ -33,6 +34,9 @@ export async function closeTab(ws: Workspace, id: string): Promise<void> {
     if (!discard) return;
   }
   await api.closeFile(ws.id, id);
+  // Discarded stays discarded: the draft kept against a crash would lay the
+  // changes over the file the next time it opens.
+  dirty?.dropDraft();
 }
 
 /** What a tab reads: the file name, marked when the tab shows a diff of it. */
@@ -336,17 +340,40 @@ function MediaView({ ws, path, kind }: { ws: Workspace; path: string; kind: "ima
   );
 }
 
+/**
+ * The path from the workspace to the file, then the headings around the
+ * cursor. A crumb of the path copies the path up to itself, from the
+ * workspace's root, and its menu reveals it in the Explorer or copies it
+ * whole (ED-47); the workspace's own crumb, whose relative path is empty,
+ * copies the absolute root. A heading crumb jumps to its heading.
+ */
 function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: import("../editor/document").Doc }) {
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const segments = path.split("/");
   const trail = doc?.headingTrail() ?? [];
+  const copy = (text: string) => void api.copyText(text).then(() => notify(`Copied ${text}`)).catch(report);
   return (
-    <div className="breadcrumbs">
-      <span className="crumb">{ws.name}</span>
-      {segments.map((s, i) => (
-        <span key={i} className="crumb" onClick={() => { if (i < segments.length - 1) void api.setExpanded(ws.id, segments.slice(0, i + 1).join("/"), true); }}>{s}</span>
-      ))}
+    // WebKitGTK gives a button the focus when it is clicked; a press on a
+    // crumb leaves it, and so the cursor, in the text, and no autosave runs
+    // on the blur.
+    <div className="breadcrumbs" onMouseDown={(e) => { if ((e.target as Element).closest(".crumb")) e.preventDefault(); }}>
+      <button className="crumb" title={`Copy ${ws.path}`} onClick={() => copy(ws.path)}>{ws.name}</button>
+      {segments.map((s, i) => {
+        const rel = segments.slice(0, i + 1).join("/");
+        return (
+          <button
+            key={i}
+            className="crumb"
+            title={`Copy ${rel}`}
+            onClick={() => copy(rel)}
+            onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, path: rel }); }}
+          >
+            {s}
+          </button>
+        );
+      })}
       {trail.map((h, i) => (
-        <span key={`h${i}`} className="crumb heading" onClick={() => doc?.jumpTo(h.from)}>{h.text}</span>
+        <button key={`h${i}`} className="crumb heading" onClick={() => doc?.jumpTo(h.from)}>{h.text}</button>
       ))}
       {doc?.isMarkdown && (
         <span className="mode-switch">
@@ -354,6 +381,13 @@ function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: imp
             <button key={m} className={doc.mode === m ? "active" : ""} onClick={() => doc.setMode(m)} title="Cycle with Ctrl+E">{m}</button>
           ))}
         </span>
+      )}
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} anchor={menu} onClose={() => setMenu(null)}>
+          {/* The workspace window opens the folders above it, selects it and brings the Explorer forward. */}
+          <button onClick={() => { window.dispatchEvent(new CustomEvent("tree-reveal", { detail: { workspaceId: ws.id, path: menu.path } })); setMenu(null); }}>Reveal in Explorer</button>
+          <button onClick={() => { copy(`${ws.path}/${menu.path}`); setMenu(null); }}>Copy absolute path</button>
+        </ContextMenu>
       )}
     </div>
   );

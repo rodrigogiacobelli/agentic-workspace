@@ -8,8 +8,8 @@ without losing the one you just switched away from.
 > editor, git with worktrees, the two agent signals, app-drawn window chrome
 > over a tray-resident process, draggable editor splits and panels, custom
 > views, path citations, the typing helpers, the Editor, Source Control and
-> Terminal modes, and an SSH key and commit identity per workspace run.
-> `.lore/codex/` holds the decisions behind it.
+> Terminal modes, an SSH key and commit identity per workspace, and change
+> marks in the editor run. `.lore/codex/` holds the decisions behind it.
 
 ---
 
@@ -139,6 +139,10 @@ you turn on *Terminals use this workspace's credentials* for that workspace,
 and then only inside its repository. An unknown host key, a passphrase or a
 server's question from git or from ssh in a terminal comes up as a dialog in
 the window that asked.
+
+**Change marks.** Lines that differ from git's index are marked in the gutter
+of the source view — added, changed, and a wedge where lines were deleted — and
+over the scrollbar of every view, where clicking a mark scrolls to it.
 
 **It tells you when an agent needs you.** A workspace you left running gets an
 attention badge when its terminal produces output, and an optional desktop
@@ -270,4 +274,6 @@ one to restart its shell. Right-click in the file tree for file operations, for
 
 Settings open as a column of pages — General, Editor, Terminal, Panels, Agent
 signals, Credentials, and one for the active workspace — and reopen on the page
-you left.
+you left. Click a breadcrumb above a document to copy its path, relative to the
+workspace (the workspace crumb copies the absolute path); right-click it to
+reveal it in the Explorer or copy its absolute path.
