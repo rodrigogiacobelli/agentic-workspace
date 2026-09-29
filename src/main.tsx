@@ -6,9 +6,11 @@ import type { WindowRole } from "./types";
 import "./styles.css";
 import { installScrollbars } from "./scrollbars";
 import { installTooltips } from "./tooltip";
+import { installWheel } from "./wheel";
 
 installScrollbars();
 installTooltips();
+installWheel();
 
 const role: WindowRole = getCurrentWindow().label === "terminal" ? "terminal" : "workspace";
 

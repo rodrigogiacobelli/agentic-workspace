@@ -5,7 +5,8 @@ summary: How this codebase writes the rules in design-motion — the token scale
   src/styles.css that every duration and easing is named from, the calc form that
   makes the reduced-motion switch work, the pseudo-element that carries the tab
   indicator, the positions a dragged tab and its neighbours take, the hook that
-  lets a surface React unmounts still play its exit, and what checks the result.
+  lets a surface React unmounts still play its exit, the easing every wheel scroll
+  goes through, and what checks the result.
 related:
   - design-motion
   - standards-code
@@ -16,6 +17,7 @@ binds:
   - src/styles.css
   - src/motion.ts
   - src/components/tabs.tsx
+  - src/wheel.ts
 ---
 
 # Motion standard
@@ -110,10 +112,40 @@ takes `is-closing`, stops listening for keys, and removes its element after
 `duration("--d-fast")`. Each opening builds a new element, so no pending exit
 lands on a menu shown again.
 
+## Wheel scrolling is the application's own
+
+`src/wheel.ts` scrolls every surface a wheel scrolls vertically: both editor
+views, the diff, the Explorer, the panels, the settings. WebKitGTK animates each
+wheel event by itself and starts over at the next, so the stream of small steps
+a high-resolution or free-spinning wheel sends moved a page in stalls and
+spurts (`standards-linux-desktop`). One listener on the window takes each
+vertical wheel event after every surface below it has had the chance, moves the
+target of the scroller under the pointer — the nearest one with room left that
+way, as the webview chains a scroll outwards — and eases every moving scroller
+toward its target once a frame by a fixed share of the distance left, 0.17. At
+60 frames a second that is a time constant of about 90 ms, so a page's speed
+follows the wheel's: it builds as the wheel spins up, holds while it spins,
+and falls away as it coasts.
+
+The share is per frame, not per millisecond. WebKitGTK's frame callbacks arrive
+at uneven times while the frames are shown at even ones, and a step scaled by
+the callback's interval moved the text unevenly between shown frames.
+
+A move the easing did not make — an editor keeping its place as it measures
+the lines coming into view, a split's other pane following — shifts the target
+by the same amount, so it is carried rather than undone. A press or a key stops
+every glide where it is, as a touch stops a fling. Sideways scrolling, a zoom
+(Ctrl), a terminal, whose wheel xterm hands to the program running in it, and
+`prefers-reduced-motion: reduce` keep the webview's own scrolling.
+
 ## What checks it
 
 `prefers-reduced-motion: reduce` is the state to test in: movement gone, every
 state change still legible.
+
+How smooth a scroll is gets measured frame by frame, with real wheel input, in
+the running application; judging it by eye in a development build misses
+single dropped frames and cannot be repeated.
 
 The mechanical half is greppable in `src/styles.css` — a `transition`
 declaration carrying a number rather than a token, a bare easing keyword, a

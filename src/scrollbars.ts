@@ -32,11 +32,11 @@ let dragging: Axis | null = null;
 let queued = false;
 let ticking = false;
 
-function room(el: HTMLElement, axis: Axis): number {
+export function room(el: HTMLElement, axis: Axis): number {
   return axis === "y" ? el.scrollHeight - el.clientHeight : el.scrollWidth - el.clientWidth;
 }
 
-function scrolls(el: HTMLElement, axis: Axis): boolean {
+export function scrolls(el: HTMLElement, axis: Axis): boolean {
   if (room(el, axis) <= 1) return false;
   const style = getComputedStyle(el);
   const value = axis === "y" ? style.overflowY : style.overflowX;
@@ -44,7 +44,7 @@ function scrolls(el: HTMLElement, axis: Axis): boolean {
 }
 
 /** The nearest ancestor of `node` that scrolls on `axis`. */
-function scrollerAt(node: Element | null, axis: Axis): HTMLElement | null {
+export function scrollerAt(node: Element | null, axis: Axis): HTMLElement | null {
   for (let el = node as HTMLElement | null; el && el !== document.body; el = el.parentElement) {
     if (el.classList.contains("sbar-thumb") || el.classList.contains("sbar-track")) continue;
     if (scrolls(el, axis)) return el;
@@ -53,7 +53,7 @@ function scrollerAt(node: Element | null, axis: Axis): HTMLElement | null {
 }
 
 /** While a menu or a dialog is open, only what is inside one gets a bar. */
-function allowed(el: HTMLElement): boolean {
+export function allowed(el: HTMLElement): boolean {
   const layers = document.querySelectorAll(".menu, .overlay");
   if (layers.length === 0) return true;
   for (const layer of layers) if (layer.contains(el)) return true;
@@ -90,6 +90,12 @@ function place(axis: Axis): void {
     thumb.width = `${length}px`;
     thumb.height = "3px";
   }
+}
+
+/** The scroller a vertical bar stands for, when `node` is that bar's thumb or lane. */
+export function barTarget(node: Element | null): HTMLElement | null {
+  const bar = node?.closest?.(".sbar-thumb.sbar-y, .sbar-track");
+  return bar ? rails.y?.target ?? null : null;
 }
 
 function hide(axis: Axis): void {

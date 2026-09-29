@@ -6,7 +6,7 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   a declaration is silently dropped for, the table row that is never a
   positioned child's containing block, the table cell held at its min-width
   and max-width, the query container that moves a scroller back as it is
-  redrawn, window placement limits, the focus that
+  redrawn, the wheel event each animated on its own, window placement limits, the focus that
   gates a clipboard read, global shortcut binding through the portal, overlay
   scrollbars over app-drawn menus, the main loop a synchronous command blocks,
   the scheduling class an auto-nice daemon hands down, the identity a development
@@ -25,6 +25,7 @@ related:
   - 019-credentials-through-the-secret-service
   - 015-views-and-citations
 binds:
+  - src/wheel.ts
   - src-tauri/src/desktop.rs
   - src/dropRoute.ts
   - src-tauri/tauri.conf.json
@@ -202,6 +203,20 @@ width never counting toward its container's, without making the box a query
 container, and leaves the scroller where it is. A box inside a scroller takes
 its inline-size containment from `contain`; `container-type` stays on boxes
 that enclose the scroller, such as `.region` and `.work-panel`.
+
+## WebKitGTK animates each wheel event on its own
+
+Measured on WebKitGTK 2.52 with the smooth scrolling it has on by default, which
+wry leaves as it is: each wheel event starts a short animation of its own, and
+the next event starts another from wherever the last one had got to. A notched
+wheel turned steadily moves a page in steps, stopping between notches. A
+high-resolution or free-spinning wheel sends a small step every few
+milliseconds, and the page stalls and spurts under it — 34 frames standing
+still and about 30 dips in speed across one measured flick — or lags the wheel
+and then leaps hundreds of pixels a frame to catch up. Nothing reports it, and
+frames stay at 16 ms throughout. The application scrolls wheels itself
+(`standards-motion`), and a notch reaches the page as `wheelDeltaY` ±120, a
+high-resolution step as a fraction of that.
 
 ## WebKitGTK paints overlay scrollbars above every layer
 
