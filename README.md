@@ -86,11 +86,12 @@ wrote them.
 
 **Tabs that don't pile up.** A single click in the file tree opens a preview
 tab, labelled in italics, which the next single click replaces. Editing it,
-double-clicking it or dragging it makes it permanent.
+double-clicking it or dragging it to a new place makes it permanent.
 
-**A layout you drag into shape.** Drop an editor tab on a group's edge to split
-the area in that direction, on its centre to move it there, and drag any divider
-to resize. Panels move the same way — onto any edge of any region, into another
+**A layout you drag into shape.** Drag an editor tab along its strip, or into
+another group's strip, and the tabs there move aside to show where it will land;
+Escape puts it back. Drop it on a group's edge to split the area in that
+direction, on its centre to move it there, and drag any divider to resize. Panels move the same way — onto any edge of any region, into another
 region's tab strip, or onto the centre of the working area, where the panel
 becomes a tab beside your documents or diffs. A panel closed from its tab comes
 back from the title row's *View* menu or its hotkey. Editor splits belong to the
@@ -256,8 +257,41 @@ Inside a document:
 | `Tab` / `Shift+Tab` | Nest / un-nest a list item |
 | `Alt+C` | Toggle a task checkbox |
 
-In the rendered markdown view, syntax shows on the lines the cursor touches and
-is hidden elsewhere; `Ctrl`+click follows a link. Paste an image or drop a file
+In rich mode, and on the rendered side of a split, a toolbar under the
+breadcrumb sets the paragraph style (body text, heading 1, 2 or 3) and applies
+bold, italic, strikethrough, inline code, a link, a bulleted or numbered list,
+a checklist, a quote or a code block. Each control shows whether the selection
+already has its formatting, and its tooltip names its key:
+
+| Key | Does |
+|---|---|
+| `Ctrl+B` / `Ctrl+I` | Bold / italic the selection or the word at the caret; again, take it off |
+| `Ctrl+Shift+X` / `` Ctrl+` `` | Strikethrough / inline code |
+| `Ctrl+K` | Link the selection, or edit the link at the caret: its text, its target, or *Remove link* |
+| `Ctrl+Alt+1` / `Ctrl+Alt+2` / `Ctrl+Alt+3` | Heading 1 / 2 / 3 |
+| `Ctrl+Alt+0` | Body text |
+| `Ctrl+Shift+8` / `Ctrl+Shift+7` / `Ctrl+Shift+9` | Bulleted list / numbered list / checklist, on each selected line; again, plain text |
+| `Backspace` at the start of a heading, item or quote | Plain paragraph; a second press joins it to the paragraph above |
+
+The keys go by their place on the keyboard, so they sit in the same place on
+any layout. With the caret between words, a character format applies to what
+you type next. Each command writes the Markdown for its formatting — `**`, `*`,
+`~~`, backticks, `#`, `-`, `1.`, `- [ ]`, `>` or a fence — and only the few
+bytes that Markdown needs to read as meant, such as a backslash before a stray
+`*` or a blank line before the next list item. It never changes the text you
+see anywhere else, and one `Ctrl+Z` takes it back. A command that Markdown
+would read otherwise does nothing, and in code, frontmatter or a source box
+the formatting commands and `Ctrl+K` do nothing. Copying from rich mode puts
+the Markdown on the clipboard as text, for an agent's prompt, and the formatting
+as HTML, for a word processor or an email.
+
+The rendered markdown view never shows the Markdown: the caret moves over text,
+one arrow press per visible character, and steps over an image, a chip or a
+rule in one press. Enter starts a new paragraph and `Shift+Enter` breaks the
+line inside one; typing `# `, `- `, `**word**` or three backticks and Enter
+formats as you go. A code block keeps its language as a small label you can
+change, and what the view does not draw — an HTML block, a footnote — shows its
+source in a box of its own. `Ctrl`+click follows a link. Paste an image or drop a file
 onto a document and it lands in the workspace's clipboard folder; Settings →
 *Asset links* decides whether the document gets a markdown link relative to the
 note or an `@` citation from the workspace root.
@@ -292,4 +326,8 @@ Settings open as a column of pages — General, Editor, Terminal, Panels, Agent
 signals, Credentials, and one for the active workspace — and reopen on the page
 you left. Click a breadcrumb above a document to copy its path, relative to the
 workspace (the workspace crumb copies the absolute path); right-click it to
-reveal it in the Explorer or copy its absolute path.
+reveal it in the Explorer or copy its absolute path. In a narrow editor group
+the Source, Split and Rich buttons keep their place at the right and the
+breadcrumb gives way: the heading trail shortens and then goes, the folders and
+then the workspace fold into one `…` crumb whose menu lists them, and last the
+file name shortens. A shortened crumb shows its full text in its tooltip.

@@ -12,8 +12,8 @@ import { DiffView } from "./DiffView";
 import { panelInfo } from "./dock";
 import { Icon } from "./icons";
 import { ContextMenu } from "./Menu";
-import { PANEL_MIME, SplitTree, TAB_MIME, useDropZone } from "./SplitTree";
-import { TabOverflow, useTabStrip } from "./tabs";
+import { PANEL_MIME, SplitTree, useDropZone, zoneAt, type Zone } from "./SplitTree";
+import { dragTab, settleTabDrag, TabOverflow, useTabStrip, type TabZone } from "./tabs";
 
 /** A working area's groups: the Editor's sit on the workspace itself, Source Control's under `review`. */
 export function areaOf(ws: Workspace, area: AreaId): WorkArea {
@@ -95,6 +95,8 @@ export function EditorArea({ ws, area, panels, onOpenInEditor }: AreaProps) {
     settled.current = true;
     return () => { settled.current = false; };
   }, []);
+  // The split zone a dragged tab is over, drawn by the group it belongs to.
+  const [tabZone, setTabZone] = useState<TabZone | null>(null);
   return (
     <section className="editor-area">
       <SplitTree<LayoutGroup>
@@ -111,6 +113,8 @@ export function EditorArea({ ws, area, panels, onOpenInEditor }: AreaProps) {
               active={group.id === state.activeGroup || state.groups.length === 1}
               panels={group.id === host ? panels : null}
               settled={settled}
+              tabZone={tabZone?.group === group.id ? tabZone.zone : null}
+              onTabZone={setTabZone}
               onOpenInEditor={onOpenInEditor}
             />
           ) : null;
@@ -121,7 +125,7 @@ export function EditorArea({ ws, area, panels, onOpenInEditor }: AreaProps) {
   );
 }
 
-function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }: {
+function GroupView({ ws, area, group, active, panels, settled, tabZone, onTabZone, onOpenInEditor }: {
   ws: Workspace;
   area: AreaId;
   group: EditorGroup;
@@ -129,6 +133,9 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
   panels: WorkPanels | null;
   /** Whether the area had been built before this render; see `EditorArea`. */
   settled: React.RefObject<boolean>;
+  /** The zone of this group a dragged tab is over. */
+  tabZone: Zone | null;
+  onTabZone: (zone: TabZone | null) => void;
   onOpenInEditor: (path: string) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -154,22 +161,20 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
   const doc = entry && "doc" in entry ? entry.doc : undefined;
   const media = entry && "media" in entry ? entry.media : null;
 
-  // A tab dropped on the group: the centre joins it, an edge splits it
-  // (ED-36, ED-37). A file dragged from a tree opens the same way (ED-41),
-  // except on the centre of a Markdown document, where a reference to it is
-  // written at the drop point (TREE-16, D7). Files open in the Editor only;
-  // Source Control's area takes tabs. The tab strip handles its own drops.
+  // A file dragged from a tree onto the group: the centre opens it, an edge
+  // splits the group and opens it there (ED-41), except on the centre of a
+  // Markdown document, where a reference to it is written at the drop point
+  // (TREE-16, D7). Files open in the Editor only. The tab strip handles its
+  // own drops. A tab is dragged by the pointer, not natively: `dragEditor`
+  // below finds the zone it is over, and the area hands it back here to draw
+  // (`tabZone`).
   const zone = useDropZone(
-    (types) => types.includes(TAB_MIME),
-    (z, e) => {
-      const editor = e.dataTransfer.getData(TAB_MIME);
-      if (!editor || (z === "center" && group.editors.some((t) => t.id === editor))) return;
-      void api.dropEditor(ws.id, { editor }, group.id, z, null).catch(report);
-    },
+    () => false,
+    () => {},
     {
       // A tree docked in the group keeps its own drags: a spot it refuses
       // takes nothing, rather than opening the file here.
-      ignore: (target) => !!target.closest(".tab-bar") || (!!treeDrag() && !!target.closest(".sidebar-body")),
+      ignore: (target) => !!target.closest(".tab-bar, .sidebar-body"),
       tree: area === "editor" ? {
         insertsAtCentre: () => !shownPanel && !!doc?.isMarkdown,
         onDrop: (z, x, y, drag, inserts) => {
@@ -213,29 +218,36 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
     return () => { if (shownRef.current && container) editors.unmount(shownRef.current, container); };
   }, []);
 
-  const dropOnTab = (e: React.DragEvent, index: number | null) => {
-    const id = e.dataTransfer.getData(TAB_MIME);
-    if (!id) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (group.editors.some((t) => t.id === id)) {
-      if (index === null) return;
-      const ids = group.editors.map((t) => t.id);
-      const from = ids.indexOf(id);
-      ids.splice(from, 1);
-      ids.splice(index > from ? index - 1 : index, 0, id);
-      void api.reorderEditors(ws.id, group.id, ids, id);
-    } else {
-      void api.moveEditor(ws.id, id, group.id, index).catch(report);
-    }
-  };
+  // A tab dragged along a strip lands in the slot under the pointer — its own
+  // strip's or another group's (TAB-09, TAB-12); dragged over a group's
+  // working area it joins the group at the centre or splits it at an edge
+  // (ED-36, ED-37), and the centre of its own group takes nothing.
+  const dragEditor = (e: React.PointerEvent<HTMLElement>, id: string) => dragTab(e, {
+    tabsOf: editorTabs,
+    hit: (x, y) => {
+      const under = document.elementFromPoint(x, y);
+      const target = under?.closest<HTMLElement>(".editor-group[data-group]");
+      if (!under || !target) return null;
+      if (under.closest(".tab-bar")) return { strip: target.querySelector<HTMLElement>(":scope > .tab-bar > .tabs")! };
+      const z = zoneAt(target.getBoundingClientRect(), x, y);
+      return z === "center" && target === zone.ref.current ? null : { zone: { group: target.dataset.group!, zone: z } };
+    },
+    showZone: onTabZone,
+    drop: (to) => {
+      if ("zone" in to) return api.dropEditor(ws.id, { editor: id }, to.zone.group, to.zone.zone, null).catch(report);
+      const target = to.strip.closest<HTMLElement>("[data-group]")!.dataset.group!;
+      if (target === group.id) return api.reorderEditors(ws.id, group.id, to.order, id).catch(report);
+      return api.moveEditor(ws.id, id, target, to.index).catch(report);
+    },
+  });
+  // The strip's tabs changing is a dropped tab's move arriving.
+  useLayoutEffect(settleTabDrag, [group.editors.map((t) => t.id).join("\n")]);
   // A file dragged from a tree onto the strip opens at that position; the
   // router runs the offer at the drop.
-  const acceptsTab = (e: React.DragEvent, index: number | null) => {
+  const acceptsFile = (e: React.DragEvent, index: number | null) => {
     const drag = area === "editor" ? treeDrag() : null;
     const file = drag && !drag.missing ? firstFile(drag) : undefined;
     if (file) offerDrop(e, () => void api.dropEditor(ws.id, { path: file }, group.id, "center", index).catch(report));
-    else if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault();
   };
   const pickTab = (id: string) => {
     if (shownPanel) panels?.onPick(null);
@@ -247,10 +259,11 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
       ref={zone.ref}
       {...zone.handlers}
       className={`editor-group${active ? " active" : ""}`}
+      data-group={group.id}
       onMouseDownCapture={() => { if (areaOf(ws, area).activeGroup !== group.id) void api.setActiveGroup(ws.id, group.id); }}
     >
       <div className="tab-bar">
-        <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={(e) => acceptsTab(e, null)} onDrop={(e) => dropOnTab(e, null)}>
+        <div className="tabs" ref={strip.ref} onWheel={strip.onWheel} onDragOver={(e) => acceptsFile(e, null)}>
           {panels?.ids.map((id) => {
             const info = panelInfo(id);
             return (
@@ -276,10 +289,8 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
               key={t.id}
               data-tab={t.id}
               className={`tab${t.id === activeId && !shownPanel ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
-              draggable
-              onDragStart={(e) => { e.dataTransfer.setData(TAB_MIME, t.id); e.dataTransfer.effectAllowed = "move"; }}
-              onDragOver={(e) => acceptsTab(e, i)}
-              onDrop={(e) => dropOnTab(e, i)}
+              onPointerDown={(e) => dragEditor(e, t.id)}
+              onDragOver={(e) => acceptsFile(e, i)}
               onClick={() => pickTab(t.id)}
               onDoubleClick={() => { if (t.preview) void api.pinEditor(ws.id, t.id); }}
               title={t.preview ? `${t.path} (preview — double-click to keep)` : t.path}
@@ -338,9 +349,14 @@ function GroupView({ ws, area, group, active, panels, settled, onOpenInEditor }:
           )}
         </Live.Provider>
       </div>
-      {zone.overlay}
+      {zone.overlay ?? (tabZone && <div className={`drop-zone drop-${tabZone}`} />)}
     </div>
   );
+}
+
+/** A strip's editor tabs: the panel tabs in front of them are dragged natively, into the dock. */
+function editorTabs(strip: HTMLElement): HTMLElement[] {
+  return Array.from(strip.querySelectorAll<HTMLElement>(":scope > [data-tab]:not(.panel-tab)"));
 }
 
 /** An image, an audio file or a video opened from the tree, shown as itself. */
@@ -355,40 +371,102 @@ function MediaView({ ws, path, kind }: { ws: Workspace; path: string; kind: "ima
   );
 }
 
+/** Cut shorter than this, the deepest heading says nothing, and the trail goes. */
+const HEADING_FLOOR = 48;
+
+/**
+ * Whether the header row shows all it holds: its last item — the mode switch,
+ * or the last crumb — ends inside the row's padding, and the deepest heading,
+ * when it is cut short, still shows a few letters.
+ */
+function fits(row: HTMLElement): boolean {
+  const end = row.getBoundingClientRect().right - parseFloat(getComputedStyle(row).paddingRight);
+  if ((row.lastElementChild?.getBoundingClientRect().right ?? 0) > end + 0.5) return false;
+  const deepest = row.querySelector<HTMLElement>(".heading.fit > span");
+  return !deepest || deepest.scrollWidth <= deepest.clientWidth || deepest.clientWidth >= HEADING_FLOOR;
+}
+
 /**
  * The path from the workspace to the file, then the headings around the
  * cursor. A crumb of the path copies the path up to itself, from the
  * workspace's root, and its menu reveals it in the Explorer or copies it
  * whole (ED-47); the workspace's own crumb, whose relative path is empty,
  * copies the absolute root. A heading crumb jumps to its heading.
+ *
+ * A row too narrow for all of it keeps the mode switch whole at its right and
+ * gives way a step at a time (ED-56): the deepest heading shortens, then the
+ * heading trail goes (level 1); the folders fold into one `…` crumb (2), which
+ * the workspace joins (3); last, the file name shortens. `…` opens a menu of
+ * the crumbs it holds, whose rows act as the crumbs themselves do — a click
+ * copies, a right-click opens the crumb's menu in the list's place — and a
+ * crumb's tooltip carries its full text (ED-57).
  */
 function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: import("../editor/document").Doc }) {
-  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  // One menu at a time: the list `…` opens, which has no `path`, or a crumb's.
+  const [menu, setMenu] = useState<{ x: number; y: number; path?: string } | null>(null);
+  const row = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
   const segments = path.split("/");
   const trail = doc?.headingTrail() ?? [];
   const copy = (text: string) => void api.copyText(text).then(() => notify(`Copied ${text}`)).catch(report);
+  const crumbMenu = (rel: string) => rel ? (e: React.MouseEvent) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, path: rel }); } : undefined;
+  const crumbs = [{ name: ws.name, rel: "" }, ...segments.map((name, i) => ({ name, rel: segments.slice(0, i + 1).join("/") }))];
+  // A change to what the row holds, or to its width, starts over from nothing
+  // folded; each step is laid out and measured before the paint. A keystroke
+  // that leaves the heading trail as it was measures nothing.
+  const shape = [width, ws.name, path, !!doc?.isMarkdown, ...trail.map((h) => h.text)].join("\n");
+  const [fold, setFold] = useState({ shape, level: 0 });
+  const level = fold.shape === shape ? fold.level : 0;
+  useLayoutEffect(() => {
+    if (level < 3 && row.current && !fits(row.current)) setFold({ shape, level: level + 1 });
+  }, [shape, level]);
+  // The group is resized by a divider as often as by the window.
+  useEffect(() => {
+    const el = row.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => setWidth(el.clientWidth));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const folded = level < 2 ? [] : crumbs.slice(level < 3 ? 1 : 0, -1);
+  const listed = !!menu && menu.path === undefined;
+  // The row unfolded under an open list: the list closes rather than coming
+  // back at its old place when the row next folds.
+  useEffect(() => { if (listed && folded.length === 0) setMenu(null); }, [listed, folded.length]);
   return (
     // WebKitGTK gives a button the focus when it is clicked; a press on a
-    // crumb leaves it, and so the cursor, in the text, and no autosave runs
-    // on the blur.
-    <div className="breadcrumbs" onMouseDown={(e) => { if ((e.target as Element).closest(".crumb")) e.preventDefault(); }}>
-      <button className="crumb" title={`Copy ${ws.path}`} onClick={() => copy(ws.path)}>{ws.name}</button>
-      {segments.map((s, i) => {
-        const rel = segments.slice(0, i + 1).join("/");
-        return (
-          <button
-            key={i}
-            className="crumb"
-            title={`Copy ${rel}`}
-            onClick={() => copy(rel)}
-            onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, path: rel }); }}
-          >
-            {s}
-          </button>
-        );
-      })}
-      {trail.map((h, i) => (
-        <button key={`h${i}`} className="crumb heading" onClick={() => doc?.jumpTo(h.from)}>{h.text}</button>
+    // crumb, or on a row of its menus, leaves it, and so the cursor, in the
+    // text, and no autosave runs on the blur.
+    <div ref={row} className="breadcrumbs" onMouseDown={(e) => { if ((e.target as Element).closest(".crumb, .menu")) e.preventDefault(); }}>
+      {crumbs.map((c, i) => folded.includes(c) ? c === folded[0] && (
+        <button
+          key="folded"
+          className="crumb"
+          title={folded.map((f) => f.name).join(" › ")}
+          aria-haspopup="menu"
+          aria-expanded={listed}
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setMenu(listed ? null : { x: r.left, y: r.bottom + 2 });
+          }}
+        >
+          …
+        </button>
+      ) : (
+        <button
+          key={i}
+          className={`crumb${level === 3 && i === crumbs.length - 1 ? " fit" : ""}`}
+          title={`Copy ${c.rel || ws.path}`}
+          onClick={() => copy(c.rel || ws.path)}
+          onContextMenu={crumbMenu(c.rel)}
+        >
+          <span>{c.name}</span>
+        </button>
+      ))}
+      {level === 0 && trail.map((h, i) => (
+        <button key={`h${i}`} className={`crumb heading${i === trail.length - 1 ? " fit" : ""}`} title={`Jump to ${h.text}`} onClick={() => doc?.jumpTo(h.from)}>
+          <span>{h.text}</span>
+        </button>
       ))}
       {doc?.isMarkdown && (
         <span className="mode-switch">
@@ -397,11 +475,17 @@ function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: imp
           ))}
         </span>
       )}
-      {menu && (
+      {menu && (menu.path !== undefined || folded.length > 0) && (
         <ContextMenu x={menu.x} y={menu.y} anchor={menu} onClose={() => setMenu(null)}>
-          {/* The workspace window opens the folders above it, selects it and brings the Explorer forward. */}
-          <button onClick={() => { window.dispatchEvent(new CustomEvent("tree-reveal", { detail: { workspaceId: ws.id, path: menu.path } })); setMenu(null); }}>Reveal in Explorer</button>
-          <button onClick={() => { copy(`${ws.path}/${menu.path}`); setMenu(null); }}>Copy absolute path</button>
+          {menu.path === undefined ? folded.map((f) => (
+            <button key={f.rel} title={`Copy ${f.rel || ws.path}`} onClick={() => { copy(f.rel || ws.path); setMenu(null); }} onContextMenu={crumbMenu(f.rel)}>{f.name}</button>
+          )) : (
+            <>
+              {/* The workspace window opens the folders above it, selects it and brings the Explorer forward. */}
+              <button onClick={() => { window.dispatchEvent(new CustomEvent("tree-reveal", { detail: { workspaceId: ws.id, path: menu.path } })); setMenu(null); }}>Reveal in Explorer</button>
+              <button onClick={() => { copy(`${ws.path}/${menu.path}`); setMenu(null); }}>Copy absolute path</button>
+            </>
+          )}
         </ContextMenu>
       )}
     </div>

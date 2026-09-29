@@ -51,6 +51,9 @@ export function installTooltips(): void {
   };
 
   document.addEventListener("mouseover", (e) => {
+    // A pointer crossing things with a button held is dragging: a tab, a
+    // selection, a divider.
+    if (e.buttons) return;
     const el = hoverable(e.target);
     if (el === current || el === clicked) return;
     clicked = null;

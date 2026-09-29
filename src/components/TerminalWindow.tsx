@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { actionFor } from "../hotkeys";
@@ -9,7 +9,7 @@ import { report } from "../notice";
 import * as terminals from "../terminals";
 import type { Session, TerminalTab, Workspace } from "../types";
 import { ContextMenu } from "./Menu";
-import { TabOverflow, useTabStrip } from "./tabs";
+import { dragTab, settleTabDrag, TabOverflow, useTabStrip } from "./tabs";
 
 interface Props {
   session: Session;
@@ -175,70 +175,27 @@ export function TerminalFacts({ ws }: { ws: Workspace }) {
   );
 }
 
-/** What a dragged terminal tab carries: its id. */
-const TERMINAL_MIME = "application/x-agentic-terminal";
-
 function TabStrip({ ws, renaming, onRename, onRenamed }: {
   ws: Workspace;
   renaming: string | null;
   onRename: (id: string) => void;
   onRenamed: () => void;
 }) {
-  // The tab being dragged. A drag's data cannot be read before the drop, and
-  // the strip needs the tab earlier, to offer only the places it would move to.
-  const dragging = useRef<string | null>(null);
-  // Where the dragged tab would land: before the tab at this index, or after
-  // the last one when it is the tab count.
-  const [over, setOver] = useState<number | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const strip = useTabStrip(ws.activeTerminal, ws.terminals.length);
 
-  // A tab dropped on another lands before it; dropped on the empty strip past
-  // the last tab, it goes last.
-  const placeOf = (e: React.DragEvent): number | null => {
-    if (!(e.target instanceof Element)) return null;
-    const id = e.target.closest<HTMLElement>("[data-tab]")?.dataset.tab;
-    if (id) return ws.terminals.findIndex((t) => t.id === id);
-    return e.target.closest(".tabs-spacer") ? ws.terminals.length : null;
-  };
-
-  // Dropped on itself, or just before the tab that already follows it, a tab
-  // would stay where it is.
-  const moves = (from: string | null, at: number) => {
-    const i = ws.terminals.findIndex((t) => t.id === from);
-    return i >= 0 && at >= 0 && at !== i && at !== i + 1;
-  };
-
-  // WebKit fires only `dragenter` on the move that reaches a new element, and
-  // its answer decides whether a release there drops; `dragover` comes on the
-  // move after. Both are asked, and anywhere refused GTK cancels the drop.
-  const track = (e: React.DragEvent) => {
-    const at = placeOf(e);
-    const ok = at !== null && e.dataTransfer.types.includes(TERMINAL_MIME) && moves(dragging.current, at);
-    if (ok) e.preventDefault();
-    setOver(ok ? at : null);
-  };
-
-  // Crossing from a tab onto its label, or onto the next tab, fires
-  // `dragleave` too, after the new element's `dragenter`, and WebKit names no
-  // related target: only a pointer outside the strip has left it.
-  const leave = (e: React.DragEvent<HTMLElement>) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    if (e.clientX < r.left || e.clientX >= r.right || e.clientY < r.top || e.clientY >= r.bottom) setOver(null);
-  };
-
-  const drop = (e: React.DragEvent) => {
-    const from = e.dataTransfer.getData(TERMINAL_MIME);
-    const at = placeOf(e);
-    setOver(null);
-    if (at === null || !moves(from, at)) return;
-    e.preventDefault();
-    const ids = ws.terminals.map((t) => t.id);
-    const i = ids.indexOf(from);
-    ids.splice(i, 1);
-    ids.splice(at > i ? at - 1 : at, 0, from);
-    void api.reorderTerminals(ws.id, ids);
-  };
+  // A tab dragged along the strip lands in the slot under the pointer; off
+  // the strip there is nowhere to land, and a release puts it back (TAB-15).
+  const drag = (e: React.PointerEvent<HTMLElement>) => dragTab(e, {
+    tabsOf: (el) => Array.from(el.querySelectorAll<HTMLElement>(":scope > [data-tab]")),
+    hit: (x, y) => {
+      const el = strip.ref.current;
+      return el && el.parentElement?.contains(document.elementFromPoint(x, y)) ? { strip: el } : null;
+    },
+    drop: (to) => ("order" in to ? api.reorderTerminals(ws.id, to.order).catch(report) : Promise.resolve()),
+  });
+  // The strip's tabs changing is a dropped tab's move arriving.
+  useLayoutEffect(settleTabDrag, [ws.terminals.map((t) => t.id).join("\n")]);
 
   const restart = async (id: string) => {
     const tab = ws.terminals.find((t) => t.id === id);
@@ -254,24 +211,13 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
 
   return (
     <div className="tab-bar">
-      <div
-        className="tabs"
-        ref={strip.ref}
-        onWheel={strip.onWheel}
-        onDragEnter={track}
-        onDragOver={track}
-        onDragLeave={leave}
-        onDrop={drop}
-      >
-      {ws.terminals.map((tab, i) => (
+      <div className="tabs" ref={strip.ref} onWheel={strip.onWheel}>
+      {ws.terminals.map((tab) => (
         <div
           key={tab.id}
           data-tab={tab.id}
-          className={`tab${tab.id === ws.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}${over === i ? " drop-before" : ""}`}
-          draggable
-          // WebKitGTK starts no drag whose data transfer is empty.
-          onDragStart={(e) => { dragging.current = tab.id; e.dataTransfer.setData(TERMINAL_MIME, tab.id); e.dataTransfer.effectAllowed = "move"; }}
-          onDragEnd={() => { dragging.current = null; setOver(null); }}
+          className={`tab${tab.id === ws.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}`}
+          onPointerDown={drag}
           onClick={() => void api.setActiveTerminal(ws.id, tab.id)}
           onDoubleClick={() => onRename(tab.id)}
           onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, id: tab.id }); }}
@@ -295,7 +241,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
           <button className="tab-close" onClick={(e) => { e.stopPropagation(); void api.terminalClose(tab.id); }} title="Close (Ctrl+Shift+W)">×</button>
         </div>
       ))}
-      <span className={`tabs-spacer${over === ws.terminals.length ? " drop-before" : ""}`} />
+      <span className="tabs-spacer" />
       </div>
       <TabOverflow
         strip={strip}

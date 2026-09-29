@@ -17,6 +17,7 @@ binds:
 - src/components/SplitTree.tsx
 - src/components/dock.ts
 - src/components/EditorArea.tsx
+- src/components/tabs.tsx
 - src/dropRoute.ts
 ---
 
@@ -89,6 +90,27 @@ collapse around it (DOCK-06), and it is never removed and never becomes a tab
 in a region. A panel dropped on its centre, or on its tab strip, becomes one of
 its tabs (`017-modes`).
 
+**A tab is dragged by the pointer.** An editor tab, and a terminal tab in the
+Terminal window, move by the page's own drag on pointer events — `dragTab` in
+`src/components/tabs.tsx` — because a native drag image cannot move the tabs
+beside it (TAB-09 to TAB-15). The pressed tab stays in its strip, hidden, and
+a copy of it follows the pointer. The strip under the pointer opens a gap at
+the slot the pointer picks: before a tab over its left half, after it over its
+right half. The strip the tab left closes its place. Over a group's working
+area `dragTab` places the pointer with `zoneAt`, the geometry `useDropZone`
+uses, and the group draws the same overlay; the centre of the tab's own group
+is no target. A release on a slot reorders the group (`reorder_editors`) or
+moves the tab into another group at that index (`move_editor`), a release on a
+zone calls `drop_editor`. A release over nothing, Escape, the window losing
+focus, the tab losing pointer capture, or a pointer move with the button up
+puts the tab back. The strips keep their marks until the session update
+carrying the move is drawn: every strip calls `settleTabDrag` in a layout
+effect when its tabs change, and once the tab's own strip, or the strip it
+lands in, holds different tabs, `dragTab` takes the marks off before that
+frame is painted. It takes them off regardless 250 ms after the backend
+answers, or one second after it sends the move when the backend does not
+answer.
+
 **A tree drag goes through the drop router.** A row dragged out of the
 Explorer or a custom view carries `text/uri-list` only when it is one entry,
 so that another application can take the file (TREE-15); a multi-selection
@@ -105,8 +127,8 @@ row beats the tree around it. `takeDrop` runs the last offer once, from a DOM
 Ctrl as GDK's keymap reports it (`windows::drop_modifiers`); `onDropEnd` tells
 every target to clear its marks. `nativeSession` tells a native session begun
 in this page from one another application started, whose files are copied in
-or inserted instead. MIME checks remain for drags that never carry a URI:
-editor tabs, panels, terminal tabs and workspaces. `useDropZone` takes tree
+or inserted instead. MIME checks remain for the native drags that never carry
+a URI: panels and workspaces. `useDropZone` takes tree
 drags through its `tree` option: an edge splits the group and opens the first
 file there, the centre opens it — except over a Markdown document in the
 Editor, where the centre writes a reference to each dragged entry at the drop

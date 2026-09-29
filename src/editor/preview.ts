@@ -1,14 +1,21 @@
 // Rendering markdown in place: the syntax tree that highlights the source also
-// decides what to hide, style or replace with a widget. Syntax stays visible
-// on the lines the selection touches while the view has focus, so what is
-// being edited is always the source, and a pane only being read — the
-// rendered side of a split — draws every line. See ADR-011.
+// decides what to hide, style or replace with a widget. The rendered view
+// never shows the syntax; `rich.ts` decides what is hidden and where the caret
+// stands, and this module draws it and binds the keys that edit it. See
+// ADR-011.
 
+import { deleteBracketPair } from "@codemirror/autocomplete";
+import { isolateHistory } from "@codemirror/commands";
 import { syntaxTree } from "@codemirror/language";
-import { EditorState, StateEffect, StateField, type EditorSelection, type Extension, type Line, type Range } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from "@codemirror/view";
-import type { SyntaxNode, SyntaxNodeRef, Tree } from "@lezer/common";
-import { ChipWidget, chipElement, citedPath, releasePreview, type CitationContext } from "./citation";
+import { Annotation, type ChangeSet, EditorSelection, EditorState, Prec, type RangeSet, type SelectionRange, StateEffect, StateField, Transaction, type Extension, type Line, type Range } from "@codemirror/state";
+import { BlockWrapper, type Command, Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType, keymap } from "@codemirror/view";
+import type { SyntaxNode, Tree } from "@lezer/common";
+import { ChipWidget, citedPath, type CitationContext } from "./citation";
+import {
+  type Block, type Change, type Layout, type Obj, IMAGE, canonical, cellAt, cellBreak, cellEdge, cellMove, cellText, deleteBy, deletion, enter, exemptLines,
+  caretSide, cellTail, hardBreak, infoRange, intact, isFootnote, landing, layout, layoutHolds, lineSyntax, mapLayout, mended, moveChar, moveGroup, paragraphBreakBefore, pasted,
+  rowMove, runAt, settle, step, typedRange,
+} from "./rich";
 
 /**
  * Where a path written in a document leads (ADR-015). The order gives at most
@@ -55,34 +62,6 @@ export function mediaKind(href: string): "image" | "audio" | "video" | "file" {
   if (VIDEO.has(ext)) return "video";
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"].includes(ext)) return "image";
   return "file";
-}
-
-// --- Selection geometry --------------------------------------------------
-
-interface LineSpan { from: number; to: number }
-
-const setFocused = StateEffect.define<boolean>();
-
-const focused = StateField.define<boolean>({
-  create: () => false,
-  update(value, tr) {
-    for (const e of tr.effects) if (e.is(setFocused)) return e.value;
-    return value;
-  },
-});
-
-function selectionLines(state: EditorState, selection: EditorSelection): LineSpan[] {
-  if (!state.field(focused)) return [];
-  return selection.ranges.map((r) => ({
-    from: state.doc.lineAt(r.from).number,
-    to: state.doc.lineAt(r.to).number,
-  }));
-}
-
-function revealed(state: EditorState, spans: LineSpan[], from: number, to: number): boolean {
-  const a = state.doc.lineAt(from).number;
-  const b = state.doc.lineAt(Math.max(from, to - 1)).number;
-  return spans.some((s) => s.from <= b && s.to >= a);
 }
 
 // --- Widgets --------------------------------------------------------------
@@ -240,124 +219,63 @@ function splitRow(line: string): string[] {
   return cells.map((c) => c.trim());
 }
 
-/** A row's cells in column order; an empty cell has no node of its own, only the pipes around it. */
-function rowCells(row: SyntaxNode): (SyntaxNode | null)[] {
-  const cells: (SyntaxNode | null)[] = [];
-  let cell: SyntaxNode | null = null;
-  let leading = true;
-  for (let c = row.firstChild; c; c = c.nextSibling) {
-    if (c.name === "TableCell") cell = c;
-    else if (c.name === "TableDelimiter") { if (!leading) cells.push(cell); cell = null; }
-    leading = false;
-  }
-  if (cell) cells.push(cell);
-  return cells;
+/** Each column's alignment class, from a table's delimiter row (`:---:`, `---:`). */
+function alignments(state: EditorState, table: SyntaxNode): string[] {
+  const d = table.getChild("TableDelimiter");
+  return d ? splitRow(state.doc.sliceString(d.from, d.to)).map((c) => (c.startsWith(":") && c.endsWith(":") ? " cm-lp-align-center" : c.endsWith(":") ? " cm-lp-align-right" : "")) : [];
 }
 
 /**
- * A GFM table, drawn from the document's own parse: each cell's inline syntax
- * tree is walked into DOM, so a cell renders what a paragraph renders (ED-52)
- * and the document's text never reaches the page as HTML.
+ * A `<br>` in a table cell: a line break inside the cell (ED-49). The widget
+ * is a box-less wrapper around the `<br>`, so the editor's hit-testing never
+ * lands on it: a `<br>` has a box at the end of the line it ends, and a click
+ * or a vertical move past that line's end took the position after it, which
+ * is on the next line.
  */
-class TableWidget extends WidgetType {
-  constructor(
-    readonly text: string,
-    /** Where `text` starts in the document. */
-    readonly base: number,
-    readonly table: SyntaxNode,
-    /** What is known of each cited file; a new answer draws the table again. */
-    readonly known: string,
-    readonly ctx: PreviewContext,
-  ) { super(); }
-
-  toDOM(view: EditorView) {
-    const { ctx } = this;
-    const slice = (from: number, to: number) => this.text.slice(from - this.base, to - this.base);
-    const fill = (el: HTMLElement, node: SyntaxNode, from = node.from, to = node.to) => {
-      let pos = from;
-      for (let c = node.firstChild; c; c = c.nextSibling) {
-        if (c.from < from || c.to > to) continue;
-        if (c.from > pos) el.append(slice(pos, c.from));
-        inline(el, c);
-        pos = c.to;
-      }
-      if (to > pos) el.append(slice(pos, to));
-    };
-    const inline = (el: HTMLElement, n: SyntaxNode) => {
-      const text = slice(n.from, n.to);
-      const wrap = (tag: string) => { const e = el.appendChild(document.createElement(tag)); fill(e, n); return e; };
-      switch (n.name) {
-        case "EmphasisMark": case "StrikethroughMark": case "CodeMark": return;
-        case "Emphasis": wrap("em"); return;
-        case "StrongEmphasis": wrap("strong"); return;
-        case "Strikethrough": wrap("del"); return;
-        case "InlineCode": wrap("code").className = "cm-lp-code"; return;
-        case "Escape": el.append(text.slice(1)); return;
-        case "HTMLTag": {
-          if (/^<br\s*(\/\s*)?>$/i.test(text)) { el.append(document.createElement("br")); return; }
-          const tag = el.appendChild(document.createElement("span"));
-          tag.className = "cm-lp-html";
-          tag.textContent = text;
-          return;
-        }
-        case "Citation": {
-          const path = citedPath(text);
-          el.append(chipElement(path, citationMissing(ctx, path), ctx.citation));
-          return;
-        }
-        case "Image": case "Link": case "Autolink": case "URL": {
-          const url = n.name === "URL" ? n : n.getChild("URL");
-          const href = url ? slice(url.from, url.to).replace(/^<|>$/g, "") : "";
-          const marks = n.getChildren("LinkMark");
-          if (!href || (n.name !== "URL" && marks.length < 2)) { el.append(text); return; }
-          if (n.name === "Image") {
-            const target = ctx.resolve(href, true);
-            el.append(new MediaWidget(href, slice(marks[0].to, marks[1].from), target.url, target.tip, imageMissing(ctx, href, target)).toDOM(view));
-            return;
-          }
-          const link = el.appendChild(document.createElement("span"));
-          link.className = "cm-lp-link";
-          link.dataset.href = href;
-          link.title = href;
-          if (n.name === "Link") fill(link, n, marks[0].to, marks[1].from);
-          else link.textContent = href;
-          return;
-        }
-        default: el.append(text);
-      }
-    };
-
-    const box = document.createElement("div");
-    box.className = "cm-lp-table-wrap";
-    const table = box.appendChild(document.createElement("table"));
-    table.className = "cm-lp-table";
-    const delimiter = this.table.getChild("TableDelimiter");
-    const aligns = delimiter ? splitRow(slice(delimiter.from, delimiter.to)).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "")) : [];
-    let columns = 0;
-    for (let row = this.table.firstChild; row; row = row.nextSibling) {
-      const head = row.name === "TableHeader";
-      if (!head && row.name !== "TableRow") continue;
-      const cells = rowCells(row);
-      if (head) columns = cells.length;
-      const tr = (head ? table.createTHead() : table.tBodies[0] ?? table.createTBody()).insertRow();
-      // A short row is padded and a long one cut to the header's width, as GFM reads them.
-      for (let j = 0; j < columns; j++) {
-        const td = tr.appendChild(document.createElement(head ? "th" : "td"));
-        if (aligns[j]) td.style.textAlign = aligns[j];
-        const cell = td.appendChild(document.createElement("div"));
-        cell.className = "cm-lp-cell";
-        const node = cells[j];
-        if (node) fill(cell, node);
-      }
-    }
-    return box;
+class BreakWidget extends WidgetType {
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "cm-lp-br";
+    el.appendChild(document.createElement("br"));
+    return el;
   }
-  eq(other: TableWidget) { return other.text === this.text && other.known === this.known; }
-  destroy(dom: HTMLElement) { releasePreview(dom); }
-  // A chip opens its file and a player plays without moving the caret (ED-53);
-  // any other press enters the table's source, where a Ctrl+click on a link is
-  // taken first by the handler in `livePreview`.
-  ignoreEvent(e: Event) { return e.type !== "mousedown" || !!(e.target as HTMLElement).closest?.(".cm-lp-chip, audio, video"); }
+  eq() { return true; }
+  // A caret stands at the editor's spacer on its side of the break: before
+  // it at the end of the line it ends, after it where the next line starts.
+  coordsAt(dom: HTMLElement, pos: number) {
+    const spacer = pos > 0 ? dom.nextElementSibling : dom.previousElementSibling;
+    return spacer ? spacer.getBoundingClientRect() : null;
+  }
+}
+
+/**
+ * A table cell with nothing at all between its pipes (`||`), which has no
+ * text to mark as a cell: it is drawn as an empty cell, and a click on it puts
+ * the caret between the pipes.
+ */
+class EmptyCellWidget extends WidgetType {
+  constructor(readonly cls: string) { super(); }
+  toDOM(view: EditorView) {
+    const el = document.createElement("span");
+    el.className = this.cls;
+    el.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      view.focus();
+      view.dispatch({ selection: EditorSelection.cursor(view.posAtDOM(el), -1), userEvent: "select.pointer" });
+    });
+    return el;
+  }
+  eq(other: EmptyCellWidget) { return other.cls === this.cls; }
+  // The caret stands at the start of the cell's content, one line tall, in the middle of the row.
+  coordsAt(dom: HTMLElement) {
+    const box = dom.getBoundingClientRect();
+    const style = getComputedStyle(dom);
+    const x = box.left + parseFloat(style.paddingLeft);
+    const y = (box.top + box.bottom) / 2;
+    const half = parseFloat(style.fontSize) * 0.6;
+    return { left: x, right: x, top: y - half, bottom: y + half };
+  }
 }
 
 interface FrontmatterRow { key: string; value: string; valueFrom: number; valueTo: number; editable: boolean }
@@ -386,7 +304,11 @@ function frontmatterRows(state: EditorState, from: number, to: number): Frontmat
 class FrontmatterWidget extends WidgetType {
   constructor(readonly text: string, readonly rows: FrontmatterRow[]) { super(); }
   toDOM(view: EditorView) {
-    const table = document.createElement("table");
+    // The box's spacing is padding on a wrapper: the editor's height map does
+    // not count a block widget's margins (FIX-20).
+    const box = document.createElement("div");
+    box.className = "cm-lp-frontmatter-wrap";
+    const table = box.appendChild(document.createElement("table"));
     table.className = "cm-lp-frontmatter";
     for (const row of this.rows) {
       const tr = document.createElement("tr");
@@ -419,84 +341,199 @@ class FrontmatterWidget extends WidgetType {
       tr.appendChild(td);
       table.appendChild(tr);
     }
-    return table;
+    return box;
   }
   eq(other: FrontmatterWidget) { return other.text === this.text; }
   ignoreEvent() { return true; }
 }
 
-// --- Block replacements (tables, frontmatter): a state field, because
-// replacing whole lines changes the vertical layout outside the viewport.
-
-function blockDecorations(state: EditorState, ctx: PreviewContext): DecorationSet {
-  const tree: Tree = syntaxTree(state);
-  const spans = selectionLines(state, state.selection);
-  const ranges: Range<Decoration>[] = [];
-  tree.iterate({
-    enter(n: SyntaxNodeRef) {
-      if (n.name === "Table" || n.name === "Frontmatter") {
-        const from = state.doc.lineAt(n.from).from;
-        const to = state.doc.lineAt(Math.max(n.from, n.to - 1)).to;
-        if (!revealed(state, spans, from, to)) {
-          const text = state.doc.sliceString(from, to);
-          let widget: WidgetType;
-          if (n.name === "Table") {
-            // Where each cited file and image leads, and whether it is there:
-            // the table draws again when an answer arrives, the worktree
-            // family changes or the note moves.
-            const known: unknown[] = [];
-            n.node.cursor().iterate((c) => {
-              if (c.name === "Citation") {
-                const path = citedPath(state.doc.sliceString(c.from, c.to));
-                known.push(citationMissing(ctx, path), ctx.citation.resolve(path).tip);
-              } else if (c.name === "Image") {
-                const url = c.node.getChild("URL");
-                if (!url) return;
-                const href = state.doc.sliceString(url.from, url.to).replace(/^<|>$/g, "");
-                const target = ctx.resolve(href, true);
-                known.push(target.url, imageMissing(ctx, href, target));
-              }
-            });
-            widget = new TableWidget(text, from, n.node, known.join(), ctx);
-          } else {
-            widget = new FrontmatterWidget(text, frontmatterRows(state, from, to));
-          }
-          ranges.push(Decoration.replace({ widget, block: true }).range(from, to));
-        }
-        return false;
+/**
+ * A code block's opening fence, drawn as the top of its box with the language
+ * as a label the user can change (RICH-13). A change writes the info string's
+ * bytes and nothing else.
+ */
+class CodeHeadWidget extends WidgetType {
+  constructor(readonly info: string) { super(); }
+  toDOM(view: EditorView) {
+    const head = document.createElement("div");
+    head.className = "cm-lp-code-head";
+    const bar = head.appendChild(document.createElement("div"));
+    bar.className = "cm-lp-code-bar";
+    const input = bar.appendChild(document.createElement("input"));
+    input.className = "cm-lp-code-lang";
+    input.value = this.info;
+    input.placeholder = "plain text";
+    input.title = "The code block's language";
+    input.spellcheck = false;
+    const commit = () => {
+      const range = infoRange(view.state, view.posAtDOM(head));
+      if (!range) return;
+      // An info string is one line, and a backtick fence's cannot hold a backtick.
+      let value = input.value.replace(/[\r\n]/g, "").trim();
+      if (range.fence.startsWith("`")) value = value.replace(/`/g, "");
+      if (value !== view.state.doc.sliceString(range.from, range.to)) {
+        view.dispatch({ changes: { from: range.from, to: range.to, insert: value }, userEvent: "input" });
       }
-      return n.name === "Document" || n.name === "Blockquote" || n.name === "BulletList" || n.name === "OrderedList" || n.name === "ListItem";
-    },
-  });
-  return Decoration.set(ranges, true);
+    };
+    input.addEventListener("change", commit);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") commit();
+      else if (e.key === "Escape") input.value = this.info;
+      else return;
+      e.preventDefault();
+      view.focus();
+    });
+    return head;
+  }
+  eq(other: CodeHeadWidget) { return other.info === this.info; }
+  ignoreEvent() { return true; }
 }
 
-/** Block decorations come from a state field, which reaches the preview's context through this closure. */
-function blockField(ctx: PreviewContext) {
-  return StateField.define<DecorationSet>({
-    create: (state) => blockDecorations(state, ctx),
-    update(value, tr) {
-      if (
-        tr.docChanged || tr.selection || tr.effects.some((e) => e.is(refreshPreview))
-        || tr.state.field(focused) !== tr.startState.field(focused) || syntaxTree(tr.state) !== syntaxTree(tr.startState)
-      ) return blockDecorations(tr.state, ctx);
-      return value;
-    },
-    provide: (f) => EditorView.decorations.from(f),
-  });
+/** A code block's closing fence, drawn as the bottom of its box. */
+class CodeFootWidget extends WidgetType {
+  toDOM() {
+    const foot = document.createElement("div");
+    foot.className = "cm-lp-code-foot";
+    return foot;
+  }
+  eq() { return true; }
 }
+
+// --- Block-level drawing: a state field, because replacing whole lines and
+// hiding line breaks changes the vertical layout outside the viewport.
+
+/** What the field holds: `rich.ts`'s layout, as decorations, atomic ranges and the boxes that hold tables. */
+interface Drawn {
+  exempt: number[];
+  layout: Layout;
+  decorations: DecorationSet;
+  atomic: RangeSet<Decoration>;
+  wrappers: RangeSet<BlockWrapper>;
+}
+
+/**
+ * A table's box. Its rows are CodeMirror's own lines, drawn as table rows
+ * whose cells are marks over each cell's text, so the browser lays out one
+ * table from them and every cell is edited as text (RICH-11).
+ */
+const TABLE_BOX = BlockWrapper.create({ tagName: "div", attributes: { class: "cm-lp-table-wrap" } });
+
+const ATOM = Decoration.mark({});
+
+/**
+ * Ranges the caret never enters, with those that touch joined: the caret
+ * stops at neither side of a join. The pipe between two table cells joins
+ * nothing, since the caret stops on both sides of it.
+ */
+function atoms(ranges: { from: number; to: number; cell?: boolean }[]): RangeSet<Decoration> {
+  const merged: { from: number; to: number; cell?: boolean }[] = [];
+  for (const r of ranges.filter((r) => r.to > r.from).sort((a, b) => a.from - b.from)) {
+    const last = merged[merged.length - 1];
+    if (last && r.from <= last.to && !r.cell && !last.cell) last.to = Math.max(last.to, r.to);
+    else merged.push({ from: r.from, to: r.to, cell: r.cell });
+  }
+  return Decoration.set(merged.map((r) => ATOM.range(r.from, r.to)));
+}
+
+function blockWidget(state: EditorState, b: Block): WidgetType {
+  const { node } = b;
+  if (b.kind === "fence-open") {
+    const info = node.getChild("CodeInfo");
+    return new CodeHeadWidget(info ? state.doc.sliceString(info.from, info.to) : "");
+  }
+  if (b.kind === "fence-close") return new CodeFootWidget();
+  const from = state.doc.lineAt(node.from).from;
+  const to = state.doc.lineAt(Math.max(node.from, node.to - 1)).to;
+  return new FrontmatterWidget(state.doc.sliceString(from, to), frontmatterRows(state, from, to));
+}
+
+function draw(state: EditorState, exempt: number[]): Drawn {
+  const lay = layout(state, exempt);
+  const ranges: Range<Decoration>[] = [];
+  const atomic: { from: number; to: number }[] = [];
+  for (const b of lay.blocks) {
+    ranges.push(Decoration.replace({ widget: blockWidget(state, b), block: true }).range(b.from, b.to));
+    // With the line breaks either side, so the caret passes over the widget in one step.
+    atomic.push({ from: Math.max(0, b.from - 1), to: Math.min(state.doc.length, b.to + 1) });
+  }
+  for (const m of lay.merges) {
+    ranges.push(Decoration.replace({}).range(m.from, m.to));
+    atomic.push(m);
+  }
+  for (const g of lay.gaps) ranges.push(Decoration.line({ class: "cm-lp-gap" }).range(g));
+  const wrappers = BlockWrapper.set(lay.tables.map((t) => TABLE_BOX.range(t.from, t.to)));
+  return { exempt, layout: lay, decorations: Decoration.set(ranges, true), atomic: atoms(atomic), wrappers };
+}
+
+/** Block decorations come from a state field: they change the vertical layout outside the viewport too. */
+const blockField = StateField.define<Drawn>({
+  create: (state) => draw(state, exemptLines(state)),
+  update(value, tr) {
+    const exempt = exemptLines(tr.state);
+    const held = exempt.join() === value.exempt.join();
+    if (tr.docChanged) {
+      // An edit inside one block's text leaves the drawing where it was, moved.
+      if (held && layoutHolds(tr, value.layout)) {
+        return {
+          exempt,
+          layout: mapLayout(value.layout, tr.changes),
+          decorations: value.decorations.map(tr.changes),
+          atomic: value.atomic.map(tr.changes),
+          wrappers: value.wrappers.map(tr.changes),
+        };
+      }
+      return draw(tr.state, exempt);
+    }
+    return held && syntaxTree(tr.state) === syntaxTree(tr.startState) ? value : draw(tr.state, exempt);
+  },
+  provide: (f) => [
+    EditorView.decorations.from(f, (v) => v.decorations),
+    EditorView.atomicRanges.of((view) => view.state.field(f).atomic),
+    EditorView.blockWrappers.from(f, (v) => v.wrappers),
+  ],
+});
 
 // --- Inline decorations: a view plugin over the visible ranges.
 
-function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet {
+/** Constructs the renderer does not draw: each shows its source in a box of its own (RICH-15). */
+const RAW = new Set(["HTMLBlock", "CommentBlock", "ProcessingInstructionBlock", "LinkReference"]);
+
+const BREAK = new BreakWidget();
+
+/** An object's widget: a rule, a line break in a table cell, an image, or a citation — media on a line of its own, a chip anywhere else (CITE-18, CITE-07). */
+function objectWidget(state: EditorState, ctx: PreviewContext, o: Obj, alone: (pos: number) => boolean): WidgetType {
+  const text = state.doc.sliceString(o.from, o.to);
+  if (o.name === "HorizontalRule") return new HrWidget();
+  if (o.name === "HTMLTag") return BREAK;
+  const image = o.name === "Image" ? IMAGE.exec(text) : null;
+  if (image) {
+    const target = ctx.resolve(image[2], true);
+    return new MediaWidget(image[2], image[1], target.url, target.tip, imageMissing(ctx, image[2], target));
+  }
+  const path = citedPath(text);
+  if (mediaKind(path) !== "file" && alone(o.from)) {
+    const target = ctx.resolve(path, false);
+    return new MediaWidget(path, path.split("/").pop() ?? path, target.url, target.tip);
+  }
+  return new ChipWidget(path, citationMissing(ctx, path), ctx.citation);
+}
+
+interface Inline {
+  decorations: DecorationSet;
+  atomic: RangeSet<Decoration>;
+  /** A table cell's mark over each cell's text, outside every other mark so none splits a cell in two. */
+  cells: DecorationSet;
+}
+
+function inlineDecorations(view: EditorView, ctx: PreviewContext, lay: Layout): Inline {
   const { state } = view;
   const tree = syntaxTree(state);
-  const spans = selectionLines(state, state.selection);
   const marks: Range<Decoration>[] = [];
   const lines: Range<Decoration>[] = [];
-  // A plugin may not replace a line break: a link title that runs onto the
-  // next line keeps its syntax visible rather than breaking the pane.
-  const hide = (from: number, to: number) => { if (to > from && !state.doc.sliceString(from, to).includes("\n")) marks.push(Decoration.replace({}).range(from, to)); };
+  const cells: Range<Decoration>[] = [];
+  const atomic: { from: number; to: number }[] = [];
+  /** Each table's column alignments, read once per table however many of its rows are drawn. */
+  const aligned = new Map<number, string[]>();
   const mark = (from: number, to: number, cls: string, attrs?: Record<string, string>) => {
     if (to > from) marks.push(Decoration.mark({ class: cls, attributes: attrs }).range(from, to));
   };
@@ -505,7 +542,16 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
     const b = state.doc.lineAt(Math.max(from, to - 1)).number;
     for (let n = a; n <= b; n++) lines.push(Decoration.line({ class: cls }).range(state.doc.line(n).from));
   };
-  const isRevealed = (n: SyntaxNodeRef) => revealed(state, spans, n.from, n.to);
+  /** A source box: every line in the box's colour, with its first and last lines closing it. */
+  const rawBox = (from: number, to: number) => {
+    const a = state.doc.lineAt(from).number;
+    const b = state.doc.lineAt(Math.max(from, to - 1)).number;
+    for (let n = a; n <= b; n++) {
+      const cls = `cm-lp-raw${n === a ? " cm-lp-raw-first" : ""}${n === b ? " cm-lp-raw-last" : ""}`;
+      lines.push(Decoration.line({ class: cls }).range(state.doc.line(n).from));
+    }
+  };
+  const selected = (o: Obj) => state.selection.ranges.some((r) => !r.empty && r.from <= o.from && r.to >= o.to);
   /** `citationsOnly` for the line at `pos`, worked out once per line however many citations it holds. */
   const own = new Map<number, boolean>();
   const alone = (pos: number) => {
@@ -515,15 +561,56 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
     return only;
   };
 
+  const done = new Set<number>();
   for (const { from, to } of view.visibleRanges) {
+    // What `rich.ts` hides and which objects it draws, line by line.
+    for (let pos = from; pos <= to; ) {
+      const line = state.doc.lineAt(pos);
+      pos = line.to + 1;
+      if (done.has(line.number)) continue;
+      done.add(line.number);
+      const syntax = lineSyntax(state, line, lay);
+      const { objects, row } = syntax;
+      let { pieces } = syntax;
+      if (row) {
+        // A row is a table row; each cell's text is a table cell, and the pipes
+        // between them are hidden pieces outside every cell (RICH-11, ED-50).
+        // Spaces just typed at the end of a cell are drawn in it up to the caret.
+        lines.push(Decoration.line({ class: row.head ? "cm-lp-tr cm-lp-thead" : "cm-lp-tr cm-lp-tbody" }).range(line.from));
+        const table = row.node.parent!;
+        let align = aligned.get(table.from);
+        if (!align) aligned.set(table.from, (align = alignments(state, table)));
+        const { main } = state.selection;
+        const tail = main.empty && main.head >= line.from && main.head <= line.to ? cellTail(state, row, main.head) : null;
+        if (tail) pieces = pieces.map((p) => (p.from === tail.from ? { ...p, from: main.head } : p)).filter((p) => p.to > p.from);
+        row.cells.forEach((c, j) => {
+          const cls = `cm-lp-td${align[j] ?? ""}`;
+          const to = tail?.column === j ? main.head : c.to;
+          // Inclusive, so a chip or an image at either end of the text is drawn inside the cell.
+          if (to > c.from) cells.push(Decoration.mark({ class: cls, inclusive: true }).range(c.from, to));
+          else marks.push(Decoration.widget({ widget: new EmptyCellWidget(cls), side: -1 }).range(c.from));
+        });
+      }
+      for (const p of pieces) {
+        if (p.draw === "hide") marks.push(Decoration.replace({}).range(p.from, p.to));
+        else if (p.draw === "bullet") marks.push(Decoration.replace({ widget: new BulletWidget(p.level ?? 0) }).range(p.from, p.mark ?? p.to));
+        else if (p.draw === "task") marks.push(Decoration.replace({ widget: new TaskWidget(!!p.checked, p.from) }).range(p.from, p.mark ?? p.to));
+        atomic.push(p);
+      }
+      for (const o of objects) {
+        // A citation in a table cell is a chip, never the media (CITE-18).
+        marks.push(Decoration.replace({ widget: objectWidget(state, ctx, o, row ? () => false : alone) }).range(o.from, o.to));
+        // A selected image wears an outline (RICH-14).
+        if (selected(o)) mark(o.from, o.to, "cm-lp-selected");
+        atomic.push(o);
+      }
+    }
+    // How the rest is styled.
     tree.iterate({
       from, to,
       enter(n) {
         const name = n.name;
-        if (name === "Table" || name === "Frontmatter") {
-          if (isRevealed(n)) lineClass(n.from, n.to, "cm-lp-src");
-          return false;
-        }
+        if (name === "Frontmatter") return false;
         if (/^ATXHeading[1-6]$/.test(name)) {
           lineClass(n.from, n.to, `cm-lp-h${name.slice(-1)}`);
           return true;
@@ -532,153 +619,462 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext): DecorationSet
           lineClass(n.from, state.doc.lineAt(n.from).to, `cm-lp-h${name.slice(-1)}`);
           return true;
         }
+        if (RAW.has(name) || isFootnote(state, n)) {
+          rawBox(n.from, n.to);
+          return false;
+        }
         switch (name) {
-          case "HeaderMark": {
-            const parent = n.node.parent?.name ?? "";
-            if (parent.startsWith("ATXHeading")) {
-              if (!isRevealed(n)) hide(n.from, state.doc.sliceString(n.to, n.to + 1) === " " ? n.to + 1 : n.to);
-            } else if (!isRevealed(n)) {
-              mark(n.from, n.to, "cm-lp-dim");
-            }
-            return false;
-          }
           case "Emphasis": mark(n.from, n.to, "cm-lp-em"); return true;
           case "StrongEmphasis": mark(n.from, n.to, "cm-lp-strong"); return true;
           case "Strikethrough": mark(n.from, n.to, "cm-lp-strike"); return true;
-          case "EmphasisMark":
-          case "StrikethroughMark":
-            if (!isRevealed(n)) hide(n.from, n.to);
-            return false;
-          case "InlineCode": mark(n.from, n.to, "cm-lp-code"); return true;
-          case "CodeMark":
-            if (n.node.parent?.name === "InlineCode") { if (!isRevealed(n)) hide(n.from, n.to); }
-            else mark(n.from, n.to, "cm-lp-dim");
-            return false;
-          case "CodeInfo": mark(n.from, n.to, "cm-lp-codeinfo"); return false;
-          case "FencedCode": lineClass(n.from, n.to, "cm-lp-fence"); return true;
-          case "CodeBlock": lineClass(n.from, n.to, "cm-lp-fence"); return true;
-          case "HTMLBlock": lineClass(n.from, n.to, "cm-lp-src"); return false;
-          case "HTMLTag": mark(n.from, n.to, "cm-lp-html"); return false;
+          case "InlineCode": mark(n.from, n.to, "cm-lp-code"); return false;
+          case "FencedCode":
+          case "CodeBlock": lineClass(n.from, n.to, "cm-lp-codeline"); return false;
+          case "HTMLTag":
+          case "Comment": mark(n.from, n.to, "cm-lp-html"); return false;
           case "Blockquote": lineClass(n.from, n.to, "cm-lp-quote"); return true;
-          case "QuoteMark":
-            if (!isRevealed(n)) hide(n.from, state.doc.sliceString(n.to, n.to + 1) === " " ? n.to + 1 : n.to);
+          case "ListMark":
+            if (n.node.parent?.parent?.name === "OrderedList") mark(n.from, n.to, "cm-lp-listmark");
             return false;
-          case "HorizontalRule":
-            if (!isRevealed(n)) marks.push(Decoration.replace({ widget: new HrWidget() }).range(n.from, n.to));
-            return false;
-          case "ListMark": {
-            const item = n.node.parent;
-            const list = item?.parent;
-            if (list?.name === "BulletList" && !isRevealed(n)) {
-              let level = 0;
-              for (let p = list.parent; p; p = p.parent) if (p.name === "BulletList" || p.name === "OrderedList") level++;
-              marks.push(Decoration.replace({ widget: new BulletWidget(level) }).range(n.from, n.to));
-            } else {
-              mark(n.from, n.to, "cm-lp-listmark");
-            }
-            return false;
-          }
-          case "TaskMarker": {
-            if (!isRevealed(n)) {
-              const checked = /x/i.test(state.doc.sliceString(n.from, n.to));
-              marks.push(Decoration.replace({ widget: new TaskWidget(checked, n.from) }).range(n.from, n.to));
-            }
-            return false;
-          }
-          case "Escape":
-            if (!isRevealed(n)) hide(n.from, n.from + 1);
-            return false;
-          // Media being edited stays drawn after its source, so an image on
-          // the only line of a note is still seen while that line is edited.
           case "Image": {
-            const text = state.doc.sliceString(n.from, n.to);
-            const m = /^!\[([^\]]*)\]\(\s*<?([^\s>)]+)>?(?:\s+"[^"]*")?\s*\)$/.exec(text);
-            if (!m) return true;
-            const target = ctx.resolve(m[2], true);
-            const widget = new MediaWidget(m[2], m[1], target.url, target.tip, imageMissing(ctx, m[2], target));
-            // A plugin may not replace a line break, and alt text can hold one.
-            const multiline = state.doc.lineAt(n.from).number !== state.doc.lineAt(n.to).number;
-            if (isRevealed(n) || multiline) { marks.push(Decoration.widget({ widget, side: 1 }).range(n.to)); return true; }
-            marks.push(Decoration.replace({ widget }).range(n.from, n.to));
-            return false;
-          }
-          case "Citation": {
-            // Cited media on a line of its own is the media; anywhere else it
-            // is a chip, as any other cited file is (CITE-18, CITE-07).
-            const path = citedPath(state.doc.sliceString(n.from, n.to));
-            let media: MediaWidget | null = null;
-            if (mediaKind(path) !== "file" && alone(n.from)) {
-              const target = ctx.resolve(path, false);
-              media = new MediaWidget(path, path.split("/").pop() ?? path, target.url, target.tip);
+            // An image whose alt text runs onto another line is no object: a
+            // plugin may not replace a line break, so it is drawn after its source.
+            const m = IMAGE.exec(state.doc.sliceString(n.from, n.to));
+            if (m && state.doc.lineAt(n.from).number !== state.doc.lineAt(n.to).number) {
+              const target = ctx.resolve(m[2], true);
+              marks.push(Decoration.widget({ widget: new MediaWidget(m[2], m[1], target.url, target.tip, imageMissing(ctx, m[2], target)), side: 1 }).range(n.to));
             }
-            if (isRevealed(n)) {
-              if (media) marks.push(Decoration.widget({ widget: media, side: 1 }).range(n.to));
-              return false;
-            }
-            const widget = media ?? new ChipWidget(path, citationMissing(ctx, path), ctx.citation);
-            marks.push(Decoration.replace({ widget }).range(n.from, n.to));
-            return false;
+            return true;
           }
           case "Link": {
-            const node = n.node;
-            const children: { name: string; from: number; to: number }[] = [];
-            for (let c = node.firstChild; c; c = c.nextSibling) children.push({ name: c.name, from: c.from, to: c.to });
-            const open = children.find((c) => c.name === "LinkMark");
-            const close = children.filter((c) => c.name === "LinkMark")[1];
-            const url = children.find((c) => c.name === "URL");
+            const marksOf = n.node.getChildren("LinkMark");
+            const url = n.node.getChild("URL");
+            if (marksOf.length < 2 || (!url && !n.node.getChild("LinkLabel"))) return true;
             const href = url ? state.doc.sliceString(url.from, url.to) : "";
-            if (!open || !close) { mark(n.from, n.to, "cm-lp-link", { "data-href": href }); return false; }
-            const textFrom = open.to;
-            const textTo = close.from;
-            mark(textFrom, textTo, "cm-lp-link", { "data-href": href, title: href });
-            if (!isRevealed(n)) {
-              hide(n.from, textFrom);
-              hide(textTo, n.to);
-            }
+            mark(marksOf[0].to, marksOf[1].from, "cm-lp-link", { "data-href": href, title: href });
+            return true;
+          }
+          case "Autolink": {
+            const url = n.node.getChild("URL");
+            if (url) mark(url.from, url.to, "cm-lp-link", { "data-href": state.doc.sliceString(url.from, url.to) });
             return false;
           }
-          case "Autolink":
-          case "URL": {
-            const href = state.doc.sliceString(n.from, n.to).replace(/^<|>$/g, "");
-            mark(n.from, n.to, "cm-lp-link", { "data-href": href });
+          case "URL":
+            // A bare web address; one inside a link or an image is that construct's target.
+            if (!/^(Link|Image|Autolink|LinkReference)$/.test(n.node.parent?.name ?? "")) mark(n.from, n.to, "cm-lp-link", { "data-href": state.doc.sliceString(n.from, n.to) });
             return false;
-          }
         }
         return true;
       },
     });
   }
-  return Decoration.set([...marks, ...lines], true);
+  return { decorations: Decoration.set([...marks, ...lines], true), atomic: atoms(atomic), cells: Decoration.set(cells, true) };
+}
+
+// --- Editing: the keys, typed text and selections of the rendered view.
+
+/** A transaction whose changes `rich.ts` already made byte-exact, which the filter below leaves alone. */
+const spliced = Annotation.define<boolean>();
+
+/**
+ * The rendered view's keys (ADR-011): the arrows move by visible character
+ * and Ctrl+arrows by word over hidden syntax (RICH-02); Backspace and Delete
+ * take visible text and objects and never leave empty marks behind (RICH-02,
+ * RICH-14); Enter and Shift+Enter make paragraphs and hard breaks (RICH-19).
+ * Enter sits below the Markdown keymap, which continues lists and quotes
+ * first (TYP-13 to TYP-16). Backspace and Delete sit above it, whose Backspace
+ * takes only hidden marks, and below RICH-07's Backspace at a block's start
+ * (`format.ts`), which is installed first; a bracket pair just typed still
+ * goes as one. Each key is one transaction, so one undo (RICH-18).
+ */
+function richKeymap(field: StateField<Drawn>): Extension {
+  const lay = (state: EditorState) => state.field(field).layout;
+  const move = (forward: boolean, extend: boolean, word: boolean): Command => (view) => {
+    const { state } = view;
+    const l = lay(state);
+    const ranges = state.selection.ranges.map((r) => (word ? moveGroup : moveChar)(state, l, r, forward, extend));
+    const selection = EditorSelection.create(ranges, state.selection.mainIndex);
+    if (!selection.eq(state.selection)) view.dispatch({ selection, scrollIntoView: true, userEvent: "select" });
+    return true;
+  };
+  // A key that finds nothing to delete still ends there: the editor's own
+  // deletion would take a hidden mark or a whole widget. The caret lands
+  // where typing continues the text before it.
+  const remove = (forward: boolean, word: boolean): Command => (view) => {
+    const { state } = view;
+    const l = lay(state);
+    const spec = state.changeByRange((range) => deleteBy(state, l, range, forward, word) ?? { range });
+    if (spec.changes.empty) return true;
+    const extra = { scrollIntoView: true, userEvent: forward ? "delete.forward" : "delete.backward", annotations: spliced.of(true) };
+    const tr = state.update(spec, extra);
+    const next = tr.state;
+    const settled = next.selection.ranges.map((r) => (r.empty ? canonical(next, lay(next), r.head, forward ? 1 : -1) : r));
+    view.dispatch(settled.every((r, i) => r.head === next.selection.ranges[i].head) ? tr
+      : state.update({ changes: spec.changes, selection: EditorSelection.create(settled, next.selection.mainIndex) }, extra));
+    return true;
+  };
+  const lineBreak = (hard: boolean): Command => (view) => {
+    const { state } = view;
+    if (state.selection.ranges.length > 1) return false;
+    // A selection goes first, and the break lands where it was: one change, one undo.
+    let base = state;
+    let before: ChangeSet | null = null;
+    if (!state.selection.main.empty) {
+      const { from, to } = state.selection.main;
+      before = mended(state, deletion(state, from, to));
+      base = state.update({ changes: before, selection: EditorSelection.cursor(before.mapPos(from, -1)) }).state;
+    }
+    const range = base.selection.main;
+    let edit = (hard ? hardBreak : enter)(base, lay(base), range);
+    if (!edit) {
+      if (!before) return false;
+      edit = { changes: { from: range.head, insert: "\n" }, range: EditorSelection.cursor(range.head + 1) };
+    }
+    const after = base.changes(edit.changes);
+    if (after.empty && !before) return true;
+    view.dispatch(state.update({
+      changes: before ? before.compose(after) : after,
+      selection: edit.range,
+      scrollIntoView: true,
+      userEvent: "input",
+      // A new paragraph starts a new undo step, as Enter does in the source view.
+      annotations: [spliced.of(true), isolateHistory.of("before")],
+    }));
+    return true;
+  };
+  const back: Command = (view) => deleteBracketPair(view) || remove(false, false)(view);
+  return [
+    Prec.highest(keymap.of([
+      { key: "Backspace", run: back, shift: back },
+      { key: "Delete", run: remove(true, false), shift: remove(true, false) },
+      { key: "Mod-Backspace", run: remove(false, true) },
+      { key: "Mod-Delete", run: remove(true, true) },
+    ])),
+    Prec.high(keymap.of([
+      { key: "ArrowLeft", run: move(false, false, false), shift: move(false, true, false) },
+      { key: "ArrowRight", run: move(true, false, false), shift: move(true, true, false) },
+      { key: "Mod-ArrowLeft", run: move(false, false, true), shift: move(false, true, true) },
+      { key: "Mod-ArrowRight", run: move(true, false, true), shift: move(true, true, true) },
+      { key: "Enter", run: lineBreak(false) },
+      { key: "Shift-Enter", run: lineBreak(true) },
+    ])),
+  ];
+}
+
+/**
+ * Typed text goes where the caret stands in the document, whichever side of a
+ * hidden mark, or of the hidden pipe between two table cells, the page put its
+ * own caret (RICH-03). Text typed on an empty line under a list item or a
+ * quote is given a blank line first, so it starts a paragraph rather than
+ * joining the item above.
+ */
+function typing(field: StateField<Drawn>): Extension {
+  const handler = (view: EditorView, from: number, to: number, text: string): boolean => {
+    const { state } = view;
+    const { main } = state.selection;
+    if (view.composing || state.selection.ranges.length > 1 || !main.empty || from !== to) return false;
+    const lay = state.field(field).layout;
+    const run = runAt(state, lay, main.head);
+    const beside = (forward: boolean) => {
+      const u = step(state, lay, main.head, forward);
+      return !!u && u.char === "\t" && from >= u.from && from <= u.to;
+    };
+    if ((from < run.from || from > run.to) && !beside(true) && !beside(false)) return false;
+    const at = settle(state, lay, main, 0, true).head;
+    const lead = paragraphBreakBefore(state, at) ?? "";
+    if (from === at && !lead) return false;
+    const insert = () => state.update({
+      changes: { from: at, insert: lead + text },
+      selection: EditorSelection.cursor(at + lead.length + text.length),
+      userEvent: "input.type",
+      scrollIntoView: true,
+    });
+    // The other handlers — pending formatting, bracket pairs — see the corrected place.
+    if (!lead && state.facet(EditorView.inputHandler).some((h) => h !== handler && h(view, at, at, text, insert))) return true;
+    view.dispatch(insert());
+    return true;
+  };
+  return Prec.highest(EditorView.inputHandler.of(handler));
+}
+
+/**
+ * Keeps the caret where `rich.ts` says it stands. A caret the pointer, a key
+ * or the other view put down is moved to its run's typing position (RICH-03),
+ * unless it only moved within the run it was in and typing there is safe:
+ * that keeps the caret an edit left after the closing marks of a word just
+ * typed as `**word**`, and leaves the page's own caret alone when it settles
+ * on the other side of a hidden mark. A selection-only change marked as input
+ * keeps its caret. And text typed, pasted, dropped, cut or dragged away keeps
+ * the syntax of whatever it only partly covers (RICH-18): what goes is what
+ * `deletion` takes, text typed over a selection replaces `typedRange`, text
+ * dropped lands where the caret can stand, less the syntax of the constructs
+ * it lands inside (`landing`), and text holding a line break is written as
+ * `pasted` gives it. The whole is written as `mended` gives it, so no mark is
+ * left showing as text; a drop that would leave one lands as plain text.
+ */
+function caretFilter(field: StateField<Drawn>): Extension {
+  return EditorState.transactionFilter.of((tr) => {
+    if (tr.annotation(spliced)) return tr;
+    const start = tr.startState;
+    if (!tr.docChanged) {
+      if (!tr.selection || tr.isUserEvent("input")) return tr;
+      const lay = start.field(field).layout;
+      let moved = false;
+      const ranges = tr.selection.ranges.map((r, i) => {
+        if (!r.empty) return r;
+        const prev = start.selection.ranges[i];
+        const run = prev?.empty ? runAt(start, lay, prev.head) : null;
+        const within = !!run && r.head >= run.from && r.head <= run.to;
+        const at = settle(start, lay, r, prev ? Math.sign(r.head - prev.head) : 0, within);
+        if (at.head !== r.head) moved = true;
+        // A caret moved up or down keeps the column it is heading for.
+        return at === r ? at : EditorSelection.cursor(at.head, at.assoc, undefined, r.goalColumn);
+      });
+      return moved ? [tr, { selection: EditorSelection.create(ranges, tr.selection.mainIndex), sequential: true }] : tr;
+    }
+    const drop = tr.isUserEvent("move.drop") || tr.isUserEvent("input.drop");
+    if (tr.isUserEvent("input.type.compose") || !(drop || tr.isUserEvent("input.type") || tr.isUserEvent("input.paste") || tr.isUserEvent("delete.cut"))) return tr;
+    const changed: { from: number; to: number; text: string }[] = [];
+    tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => { changed.push({ from: fromA, to: toA, text: inserted.toString() }); });
+    // Text typed at the caret, the common case, is already where `typing` put it.
+    if (!drop && changed.every((c) => c.from === c.to && !c.text.includes("\n"))) return tr;
+    const lay = start.field(field).layout;
+    const removed: { from: number; to: number; insert?: string }[] = [];
+    const typed: { at: number; text: string }[] = [];
+    const cuts: number[] = [];
+    for (const c of changed) {
+      if (c.to > c.from) {
+        const range = c.text ? typedRange(start, lay, c.from, c.to) : c;
+        const del = range.to > range.from ? deletion(start, range.from, range.to, !!c.text && !c.text.includes("\n")) : [];
+        // A word dragged out from between two spaces takes one of them with it.
+        const last = del[del.length - 1];
+        if (drop && !c.text && last && del[0].from > 0 && start.doc.sliceString(del[0].from - 1, del[0].from) === " " && start.doc.sliceString(last.to, last.to + 1) === " ") last.to++;
+        removed.push(...del);
+        if (c.text) typed.push({ at: del.length ? del[0].from : range.from, text: c.text });
+        else cuts.push(del.length ? del[0].from : c.from);
+      } else if (c.text) {
+        typed.push({ at: drop ? settle(start, lay, EditorSelection.cursor(c.from), 0, true).head : c.from, text: c.text });
+      }
+    }
+    // Text never lands inside what goes; it takes the place of the first of it there.
+    const outside = (pos: number) => removed.find((r) => r.from < pos && pos < r.to)?.from ?? pos;
+    // Dropped text sheds the syntax of the constructs it lands inside (`landing`), or with `plain` all of it.
+    const build = (plain: boolean) => {
+      const inserts = typed.map((t) => {
+        const at = outside(t.at);
+        const p = pasted(start, at, drop ? landing(start, at, t.text, plain) : t.text);
+        return { at: outside(p.at), insert: p.insert };
+      });
+      const changes: Change[] = removed.map((r) => ({ ...r }));
+      for (const t of inserts) {
+        const joined = changes.find((r) => r.from === t.at && r.insert === undefined);
+        if (joined) joined.insert = t.insert;
+        else changes.push({ from: t.at, to: t.at, insert: t.insert });
+      }
+      return { inserts, changes };
+    };
+    let { inserts, changes } = build(false);
+    // What goes and what lands leave every construct they partly cover whole (`mended`); a drop that would not lands as plain text.
+    let set = drop ? intact(start, changes) : mended(start, changes);
+    if (!set) {
+      ({ inserts, changes } = build(true));
+      set = mended(start, changes);
+    }
+    if (JSON.stringify(set.toJSON()) === JSON.stringify(tr.changes.toJSON())) return tr;
+    const ranges = inserts.length
+      ? inserts.map((t) => {
+        const at = set.mapPos(t.at, -1);
+        return drop ? EditorSelection.range(at, at + t.insert.length) : EditorSelection.cursor(at + t.insert.length);
+      })
+      : cuts.map((at) => EditorSelection.cursor(set.mapPos(at, -1)));
+    return {
+      changes: set,
+      selection: EditorSelection.create(ranges, Math.min(tr.newSelection.mainIndex, ranges.length - 1)),
+      effects: tr.effects,
+      userEvent: tr.annotation(Transaction.userEvent),
+      scrollIntoView: tr.scrollIntoView,
+      annotations: spliced.of(true),
+    };
+  });
+}
+
+/**
+ * A table's keys (RICH-11), ahead of every other binding of theirs, and each
+ * declining outside a table: Tab and Shift+Tab move between cells, Enter to
+ * the same column of the next row, Home and End to the edges of the cell's
+ * text, and Shift+Enter writes a `<br>` in the cell as one undo step.
+ */
+function tableKeymap(field: StateField<Drawn>): Extension {
+  type Move = (state: EditorState, lay: Layout, range: SelectionRange) => SelectionRange | null;
+  const move = (to: Move): Command => (view) => {
+    const { state } = view;
+    if (state.selection.ranges.length > 1) return false;
+    const range = to(state, state.field(field).layout, state.selection.main);
+    if (!range) return false;
+    if (!range.eq(state.selection.main)) view.dispatch({ selection: range, scrollIntoView: true, userEvent: "select" });
+    return true;
+  };
+  const edge = (forward: boolean, extend: boolean): Command => move((s, l, r) => cellEdge(s, l, r, forward, extend));
+  const lineBreak: Command = (view) => {
+    const { state } = view;
+    const edit = state.selection.ranges.length > 1 ? null : cellBreak(state, state.selection.main);
+    if (!edit) return false;
+    view.dispatch({
+      changes: edit.changes,
+      selection: edit.range,
+      scrollIntoView: true,
+      userEvent: "input",
+      annotations: [spliced.of(true), isolateHistory.of("full")],
+    });
+    return true;
+  };
+  return Prec.highest(keymap.of([
+    { key: "Tab", run: move((s, l, r) => cellMove(s, l, r, 1)) },
+    { key: "Shift-Tab", run: move((s, l, r) => cellMove(s, l, r, -1)) },
+    { key: "Enter", run: move(rowMove) },
+    { key: "Shift-Enter", run: lineBreak },
+    { key: "Home", run: edge(false, false), shift: edge(false, true) },
+    { key: "End", run: edge(true, false), shift: edge(true, true) },
+  ]));
+}
+
+/**
+ * Text typed, pasted, dropped or written by a command into a table cell is
+ * written as the cell can hold it (`cellText`): a pipe escaped, a line break
+ * as `<br>`. A deletion that leaves a backslash just before the pipe ending
+ * its cell escapes that backslash, so it does not join the two cells. It runs
+ * after `caretFilter`, and sees the text that filter placed.
+ */
+const cellInput = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || !(tr.isUserEvent("input") || tr.isUserEvent("delete") || tr.isUserEvent("move")) || tr.isUserEvent("input.type.compose") || tr.newSelection.ranges.length > 1) return tr;
+  const start = tr.startState;
+  const changes: { from: number; to: number; insert: string }[] = [];
+  const fixes: { fromB: number; toB: number; before: string; text: string; insert: string }[] = [];
+  tr.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+    const text = inserted.toString();
+    let insert = text;
+    const next = start.doc.sliceString(toA, toA + 1);
+    const at = text || next === "|" ? cellAt(start, fromA) : null;
+    const cell = at?.row.cells[at.column];
+    if (at && cell && fromA >= cell.from && (text ? toA <= cell.to || cellTail(start, at.row, toA)?.column === at.column : toA === cell.to)) {
+      const before = start.doc.sliceString(cell.from, fromA);
+      insert = cellText(before, text, next);
+      if (insert !== text) fixes.push({ fromB, toB, before, text, insert });
+    }
+    changes.push({ from: fromA, to: toA, insert });
+  });
+  if (!fixes.length) return tr;
+  // The selection keeps its place in the text written, past the backslashes added before it.
+  const map = (pos: number) => {
+    let shift = 0;
+    for (const f of fixes) {
+      if (pos < f.fromB) break;
+      if (pos <= f.toB) {
+        const k = pos - f.fromB;
+        return f.fromB + shift + (k >= f.text.length ? f.insert.length : cellText(f.before, f.text.slice(0, k), "").length);
+      }
+      shift += f.insert.length - f.text.length;
+    }
+    return pos + shift;
+  };
+  const { main } = tr.newSelection;
+  const isolate = tr.annotation(isolateHistory);
+  return {
+    changes,
+    selection: EditorSelection.single(map(main.anchor), map(main.head)),
+    effects: tr.effects,
+    userEvent: tr.annotation(Transaction.userEvent),
+    scrollIntoView: tr.scrollIntoView,
+    annotations: [...(tr.annotation(spliced) ? [spliced.of(true)] : []), ...(isolate ? [isolateHistory.of(isolate)] : [])],
+  };
+});
+
+/**
+ * Every caret at the edge of a table cell's text belongs to that cell: at its
+ * end it is drawn, and typed at, before its position, so neither the caret
+ * nor the next letter slips past the hidden pipe into the next cell
+ * (`caretSide`). It runs after every other filter, on whatever caret they
+ * left.
+ */
+function cellCarets(field: StateField<Drawn>): Extension {
+  return Prec.highest(EditorState.transactionFilter.of((tr) => {
+    if (!tr.docChanged && !tr.selection) return tr;
+    const start = tr.startState;
+    const tables = start.field(field).layout.tables;
+    const sel = tr.newSelection;
+    let fixed = false;
+    const ranges = sel.ranges.map((r) => {
+      if (!r.empty) return r;
+      const before = tr.changes.invertedDesc.mapPos(r.head, -1);
+      if (!tables.some((t) => t.from <= before && before <= t.to)) return r;
+      const side = caretSide(start, r.head, tr.changes);
+      if (!side || side === r.assoc) return r;
+      fixed = true;
+      return EditorSelection.cursor(r.head, side, undefined, r.goalColumn);
+    });
+    return fixed ? [tr, { selection: EditorSelection.create(ranges, sel.mainIndex), sequential: true }] : tr;
+  }));
 }
 
 export function livePreview(ctx: PreviewContext): Extension {
   const plugin = ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
-      constructor(view: EditorView) { this.decorations = inlineDecorations(view, ctx); }
+      atomic: RangeSet<Decoration>;
+      cells: DecorationSet;
+      constructor(view: EditorView) {
+        ({ decorations: this.decorations, atomic: this.atomic, cells: this.cells } = inlineDecorations(view, ctx, view.state.field(blockField).layout));
+      }
       update(u: ViewUpdate) {
-        const refreshed = u.transactions.some((tr) => tr.effects.some((e) => e.is(refreshPreview) || e.is(setFocused)));
-        if (u.docChanged || u.viewportChanged || u.selectionSet || refreshed || syntaxTree(u.state) !== syntaxTree(u.startState)) {
-          this.decorations = inlineDecorations(u.view, ctx);
+        const refreshed = u.transactions.some((tr) => tr.effects.some((e) => e.is(refreshPreview)));
+        if (
+          u.docChanged || u.viewportChanged || u.selectionSet || refreshed || syntaxTree(u.state) !== syntaxTree(u.startState)
+          || u.state.field(blockField) !== u.startState.field(blockField)
+        ) {
+          ({ decorations: this.decorations, atomic: this.atomic, cells: this.cells } = inlineDecorations(u.view, ctx, u.state.field(blockField).layout));
         }
       }
     },
-    { decorations: (v) => v.decorations },
+    {
+      decorations: (v) => v.decorations,
+      provide: (p) => [
+        EditorView.atomicRanges.of((view) => view.plugin(p)?.atomic ?? Decoration.none),
+        EditorView.outerDecorations.of((view) => view.plugin(p)?.cells ?? Decoration.none),
+      ],
+    },
   );
   return [
-    focused,
-    EditorView.focusChangeEffect.of((_, focusing) => setFocused.of(focusing)),
-    blockField(ctx),
+    blockField,
     plugin,
+    cellCarets(blockField),
+    tableKeymap(blockField),
+    richKeymap(blockField),
+    typing(blockField),
+    cellInput,
+    caretFilter(blockField),
     EditorView.editorAttributes.of({ class: "cm-lp" }),
     EditorView.contentAttributes.of({ spellcheck: "true" }),
     EditorView.domEventHandlers({
-      mousedown(e) {
-        const target = (e.target as HTMLElement).closest?.(".cm-lp-link") as HTMLElement | null;
-        if (target && (e.ctrlKey || e.metaKey) && target.dataset.href) {
+      mousedown(e, view) {
+        const target = e.target as HTMLElement;
+        const link = target.closest?.(".cm-lp-link") as HTMLElement | null;
+        if (link && (e.ctrlKey || e.metaKey) && link.dataset.href) {
           e.preventDefault();
-          ctx.openLink(target.dataset.href);
+          ctx.openLink(link.dataset.href);
           return true;
+        }
+        // A click on an image selects it, so Delete removes it (RICH-14); a
+        // player's own controls keep their clicks.
+        const media = target.closest?.(".cm-lp-media") as HTMLElement | null;
+        if (media && e.button === 0 && !target.closest("audio, video")) {
+          const pos = view.posAtDOM(media);
+          const obj = lineSyntax(view.state, view.state.doc.lineAt(pos)).objects.find((o) => o.from <= pos && o.to >= pos);
+          if (obj) {
+            e.preventDefault();
+            view.focus();
+            view.dispatch({ selection: EditorSelection.range(obj.from, obj.to), userEvent: "select.pointer" });
+            return true;
+          }
         }
         return false;
       },

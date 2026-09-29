@@ -1,12 +1,13 @@
 {
   "name": "agentic-workspace",
   "private": true,
-  "version": "0.3.2",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\"",
     "tauri": "tauri",
     "release": "NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 tauri build"
   },

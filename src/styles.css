@@ -274,7 +274,10 @@ main { flex: 1; display: flex; min-height: 0; }
   flex: none;
   height: 30px;
 }
+/* Positioned so a tab's `offsetLeft` is read against its strip: a dragged tab
+   finds its slot by where the tabs stand, not where they are drawn. */
 .tabs {
+  position: relative;
   display: flex;
   align-items: stretch;
   overflow-x: auto;
@@ -318,10 +321,36 @@ main { flex: 1; display: flex; min-height: 0; }
 .tabs-overflow-count { font-size: 10px; margin-left: 3px; }
 
 
-/* A dragged terminal tab lands before the tab it is dropped on, or last when
-   dropped on the empty strip after the tabs (FIX-16). The mark is a still
-   frame, like the panel strip's: `box-shadow` is not animated. */
-.terminal-main .tabs .drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+/* A dragged editor or terminal tab (TAB-09 to TAB-15): the copy of it that
+   follows the pointer, above every strip and group, and the insertion line
+   standing at the start of the gap it would land in. Both sit on the page,
+   not in a strip, so no strip clips them; `dragTab` in tabs.tsx places them
+   by `transform`. */
+.tab.tab-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: var(--z-overlay);
+  pointer-events: none;
+  background: var(--bg-raised);
+}
+.tab.tab-ghost.active { background: var(--bg); }
+/* The lift is a pseudo-element's shadow, so it can fade as the tab lands. */
+.tab.tab-ghost::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.tab-drop-line {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: var(--z-overlay);
+  width: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
 .tab-list button.selected { color: var(--accent); }
 .tab-list .menu-hint { margin-left: 12px; }
 .tab-add { padding: 0 10px; color: var(--fg-dim); }
@@ -526,6 +555,11 @@ main { flex: 1; display: flex; min-height: 0; }
 .breadcrumbs .crumb:hover { background: transparent; color: var(--fg); }
 .breadcrumbs .crumb:focus-visible { outline-offset: 0; }
 .breadcrumbs .crumb.heading { color: var(--fg); }
+/* The deepest heading, and the file's crumb once nothing else can fold,
+   shorten with an ellipsis (ED-56); every other crumb and the mode switch keep
+   their width, and the row folds instead. */
+.breadcrumbs .crumb.fit { display: flex; min-width: 0; overflow: hidden; }
+.breadcrumbs .crumb.fit > span { overflow: hidden; text-overflow: ellipsis; }
 .mode-switch { margin-left: auto; display: flex; gap: 2px; }
 .mode-switch button { padding: 0 8px; font-size: 11px; color: var(--fg-dim); text-transform: capitalize; }
 .mode-switch button.active { color: var(--fg); background: var(--bg-hover); }
@@ -573,33 +607,60 @@ main { flex: 1; display: flex; min-height: 0; }
 .binary-notice { padding: 24px; color: var(--fg-dim); text-align: center; }
 .binary-notice button { border: 1px solid var(--border); }
 
-/* Rendered markdown (ADR-011) */
-.cm-lp .cm-content { font-family: var(--prose); font-size: var(--prose-size); max-width: var(--prose-width); margin: 0 auto; padding: 16px 24px 40vh; }
+/* Rendered markdown (ADR-011). Vertical space here is padding, never margin:
+   the editor's height map does not count a line's or a block widget's
+   margins, and a click lands lower than the line under the pointer by as much
+   as they add up to above it (FIX-20). */
+.cm-lp .cm-content { font-family: var(--prose); font-size: var(--prose-size); max-width: var(--prose-width); margin: 0 auto; padding: 16px 24px 40vh; --lp-gap: calc(var(--prose-size) * 0.75); }
 .cm-lp .cm-line { padding: 0 2px; }
+/* The blank line between two paragraphs is hidden, and the line after it opens with this space instead (RICH-19). */
+.cm-lp .cm-lp-gap { padding-top: var(--lp-gap); }
 /* Rich mode draws a heading in the text colour, as VSCode's preview does; source mode keeps the theme's heading colour (ED-54). */
 .cm-lp { --syn-heading: var(--fg); }
 .cm-lp .cm-lp-h1, .cm-lp .cm-lp-h2, .cm-lp .cm-lp-h3, .cm-lp .cm-lp-h4, .cm-lp .cm-lp-h5, .cm-lp .cm-lp-h6 { font-weight: 700; line-height: 1.3; }
 .cm-lp .cm-lp-h1, .cm-lp .cm-lp-h2 { padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
-.cm-lp .cm-lp-h1 { font-size: 1.9em; margin-top: 0.6em; }
-.cm-lp .cm-lp-h2 { font-size: 1.5em; margin-top: 0.5em; }
-.cm-lp .cm-lp-h3 { font-size: 1.25em; margin-top: 0.4em; }
+.cm-lp .cm-lp-h1 { font-size: 1.9em; padding-top: 0.3em; }
+.cm-lp .cm-lp-h2 { font-size: 1.5em; padding-top: 0.25em; }
+.cm-lp .cm-lp-h3 { font-size: 1.25em; padding-top: 0.2em; }
 .cm-lp .cm-lp-h4 { font-size: 1.1em; }
+.cm-lp .cm-lp-h1.cm-lp-gap { padding-top: calc(var(--lp-gap) + 0.3em); }
+.cm-lp .cm-lp-h2.cm-lp-gap { padding-top: calc(var(--lp-gap) + 0.25em); }
+.cm-lp .cm-lp-h3.cm-lp-gap { padding-top: calc(var(--lp-gap) + 0.2em); }
 .cm-lp .cm-lp-em { font-style: italic; }
 .cm-lp .cm-lp-strong { font-weight: 700; }
 .cm-lp .cm-lp-strike { text-decoration: line-through; color: var(--fg-dim); }
 /* Some themes' code background sits a shade off the page; a tenth of the text colour makes inline code read as code in every theme (ED-55). */
 .cm-lp .cm-lp-code { font-family: var(--mono); font-size: 0.9em; background: color-mix(in srgb, var(--fg) 10%, var(--code-bg)); border-radius: 4px; padding: 0.1em 0.35em; }
-.cm-lp .cm-lp-fence, .cm-lp .cm-lp-src { font-family: var(--mono); font-size: var(--editor-size); background: var(--code-bg); }
+/* A code block is a box without its fences (RICH-13): the opening fence draws
+   as the box's top with the language as a small label, the closing fence as
+   its bottom, and the lines between keep their highlighting. */
+.cm-lp .cm-lp-codeline { font-family: var(--mono); font-size: var(--editor-size); background: var(--code-bg); padding: 0 14px; }
+.cm-lp-code-head { padding-top: var(--lp-gap); }
+.cm-lp-code-bar { display: flex; justify-content: flex-end; padding: 4px 8px 0; background: var(--code-bg); border-radius: 6px 6px 0 0; }
+.cm-lp-code-lang { width: 12ch; padding: 0 4px; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); text-align: right; background: transparent; border: 1px solid transparent; border-radius: 4px; }
+.cm-lp-code-lang:hover, .cm-lp-code-lang:focus { color: var(--fg); background: var(--bg-raised); border-color: var(--border); }
+.cm-lp-code-foot { height: 8px; background: var(--code-bg); border-radius: 0 0 6px 6px; }
+/* What the renderer does not draw — an HTML block, a footnote, a link
+   reference — shows its source in a box of its own (RICH-15). A gap before it
+   is a border in the page's colour, so the box's own colour stays inside it. */
+.cm-lp .cm-lp-raw { font-family: var(--mono); font-size: var(--editor-size); color: var(--fg-dim); background: var(--code-bg); background-clip: padding-box; padding: 0 12px; border-left: 2px solid var(--border); }
+.cm-lp .cm-lp-raw-first { padding-top: 4px; }
+.cm-lp .cm-lp-raw-last { padding-bottom: 4px; }
+.cm-lp .cm-lp-raw.cm-lp-gap { padding-top: 4px; border-top: var(--lp-gap) solid var(--bg); }
 .cm-lp .cm-lp-html { font-family: var(--mono); font-size: 0.9em; color: var(--fg-dim); }
-.cm-lp .cm-lp-codeinfo { color: var(--fg-dim); font-size: 0.85em; }
-.cm-lp .cm-lp-dim { color: var(--fg-faint); }
 .cm-lp .cm-lp-quote { border-left: 3px solid var(--border); padding-left: 12px; color: var(--fg-dim); }
 .cm-lp .cm-lp-link { color: var(--syn-link); text-decoration: underline; text-decoration-color: var(--border); cursor: pointer; }
 .cm-lp .cm-lp-listmark { color: var(--fg-dim); }
 .cm-lp-bullet { color: var(--fg-dim); display: inline-block; width: 1em; text-align: center; }
 .cm-lp-task { vertical-align: -2px; margin: 0 4px 0 0; accent-color: var(--accent); }
-.cm-lp-hr { display: block; border-top: 1px solid var(--border); margin: 10px 0; height: 1px; }
+/* A rule is a one-pixel line drawn in the middle of its own padding. It is an
+   inline box the line's width, not a block: a block would push the editor's
+   spacers either side of it onto empty lines of their own, and ArrowDown
+   would stop on the one below it for good. */
+.cm-lp-hr { display: inline-block; width: 100%; vertical-align: middle; box-sizing: content-box; height: 1px; padding: 10px 0; background: var(--border); background-clip: content-box; }
 .cm-lp-media { display: inline-block; max-width: 100%; vertical-align: top; }
+/* An image the click selected, which Delete removes (RICH-14). */
+.cm-lp-selected .cm-lp-media, .cm-lp-selected .cm-lp-chip { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
 .cm-lp-media img { max-width: 100%; max-height: 70vh; border-radius: 4px; display: block; }
 .cm-lp-media audio { display: block; width: min(480px, 100%); }
 .cm-lp-media video { max-width: 100%; max-height: 70vh; display: block; }
@@ -621,23 +682,66 @@ main { flex: 1; display: flex; min-height: 0; }
 .image-preview-size { flex: none; }
 .image-preview .cm-lp-broken, .image-preview-tip { max-width: 480px; overflow-wrap: anywhere; }
 .image-preview-tip { display: block; margin-top: 4px; font-size: 11px; color: var(--fg-dim); }
-/* A table is laid out as VSCode's preview lays it out (ED-50). Its box scrolls
-   sideways by itself, and its inline-size containment keeps its width out of
-   the document's, so the document never scrolls sideways (ED-51). The table
-   drops CodeMirror's `overflow-wrap: anywhere`, which sizes every column down
-   to one letter; a word breaks only past the box's width (ED-48). */
-.cm-lp-table-wrap { overflow-x: auto; container-type: inline-size; padding: 6px 0; }
-.cm-lp-table { border-collapse: collapse; font-size: 0.95em; white-space: normal; word-break: normal; overflow-wrap: normal; }
-.cm-lp-table th, .cm-lp-table td { padding: 5px 10px; text-align: left; vertical-align: middle; }
-.cm-lp-table th { font-weight: 700; border-bottom: 1px solid var(--fg-dim); }
-.cm-lp-table tbody tr + tr td { border-top: 1px solid var(--border); }
-.cm-lp-cell { max-width: calc(100cqw - 20px); overflow-wrap: break-word; }
-.cm-lp-frontmatter { border-collapse: collapse; margin: 4px 0 12px; font-size: 0.9em; width: 100%; }
+/* A table is its own lines, edited in place (RICH-11): each row is a table row
+   and each cell's text a table cell, so the browser lays the rows out as one
+   table, the way VSCode's preview draws it (ED-50). The hidden syntax after
+   each cell — a pipe, the delimiter row folded into the header — is a cell of
+   no width: a box the row's height at the start of the next cell, where the
+   editor's hit-testing and vertical motion look for the row's edges. Every row
+   has one after each cell, so they stack into columns of no width. The syntax
+   before the first cell, which a row may lack, and the editor's spacers are
+   taken out of the flow instead, so they make no column; the box is their
+   containing block, and a row cannot be, since WebKitGTK computes
+   `position: relative` on a table row to static. The box scrolls sideways by
+   itself, and its inline-size containment keeps its width out of the
+   document's, so the document never scrolls sideways (ED-51). The cells drop
+   CodeMirror's `overflow-wrap: anywhere`, which sizes every column down to one
+   letter, so no column is narrower than its longest word (ED-48). */
+.cm-lp-table-wrap { position: relative; overflow-x: auto; container-type: inline-size; padding: 6px 0; font-size: 0.95em; border-collapse: collapse; }
+.cm-lp .cm-line.cm-lp-tr { display: table-row; }
+.cm-lp-tr > span:not(.cm-lp-td) { display: table-cell; }
+.cm-lp-tr > :not(span), .cm-lp-tr > span:first-of-type:not(.cm-lp-td) { position: absolute; width: 0; overflow: hidden; }
+.cm-lp-td { display: table-cell; padding: 5px 10px; text-align: left; vertical-align: middle; white-space: pre-wrap; word-break: normal; overflow-wrap: normal; }
+.cm-lp-td.cm-lp-align-center { text-align: center; }
+.cm-lp-td.cm-lp-align-right { text-align: right; }
+.cm-lp-br { display: contents; }
+.cm-lp-thead > .cm-lp-td { font-weight: 700; border-bottom: 1px solid var(--fg-dim); }
+.cm-lp-tbody + .cm-lp-tbody > .cm-lp-td { border-top: 1px solid var(--border); }
+.cm-lp-frontmatter-wrap { padding: 4px 0 12px; }
+.cm-lp-frontmatter { border-collapse: collapse; font-size: 0.9em; width: 100%; }
 .cm-lp-frontmatter th { text-align: left; color: var(--fg-dim); font-weight: 500; padding: 3px 12px 3px 0; white-space: nowrap; vertical-align: top; width: 1%; }
 .cm-lp-frontmatter td { padding: 2px 0; }
 .cm-lp-frontmatter input { width: 100%; font: inherit; background: transparent; border: 1px solid transparent; padding: 1px 4px; }
 .cm-lp-frontmatter input:hover, .cm-lp-frontmatter input:focus { border-color: var(--border); background: var(--bg-raised); }
 .cm-lp-frontmatter pre { margin: 0; font-family: var(--mono); font-size: 0.9em; color: var(--fg-dim); white-space: pre-wrap; }
+/* The formatting toolbar (RICH-10): a row of the rendered pane's own, so
+   source mode has none. Its controls drop the borders a panel's fields wear;
+   a pressed one says the selection already has its formatting. The row wraps
+   rather than hide a control in a narrow group. */
+.cm-editor.cm-lp .cm-lp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 3px 8px; font-family: var(--ui); font-size: 12px; }
+.cm-editor.cm-lp .cm-lp-toolbar .cm-lp-tool { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 26px; height: 24px; padding: 0 4px; color: var(--fg-dim); background: transparent; border: 1px solid transparent; border-radius: 4px; }
+.cm-editor.cm-lp .cm-lp-toolbar .cm-lp-tool:hover { color: var(--fg); background: var(--bg-hover); }
+.cm-editor.cm-lp .cm-lp-toolbar .cm-lp-tool.on { color: var(--accent); background: var(--bg-hover); border-color: var(--border); }
+.cm-editor.cm-lp .cm-lp-toolbar .cm-lp-style { justify-content: space-between; width: 112px; padding: 0 4px 0 8px; color: var(--fg); border-color: var(--border); }
+.cm-editor.cm-lp .cm-lp-toolbar .cm-lp-style.open { border-color: var(--accent); }
+.cm-lp-style-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cm-lp-style-caret { color: var(--fg-dim); }
+.cm-lp-tool-divider { width: 1px; height: 16px; margin: 0 4px; background: var(--border); }
+/* Each style names itself in its own weight and size, as a word processor's menu does. */
+.cm-lp-style-menu { min-width: 210px; }
+.cm-lp-style-menu button.focused { background: var(--bg-hover); }
+.cm-lp-style-1, .cm-lp-style-2, .cm-lp-style-3 { font-weight: 700; }
+.cm-lp-style-1 { font-size: 1.35em; }
+.cm-lp-style-2 { font-size: 1.2em; }
+.cm-lp-style-3 { font-size: 1.05em; }
+/* The link popover (RICH-09), under the text it links. */
+.cm-editor.cm-lp .cm-tooltip.cm-lp-linkpop { display: flex; flex-direction: column; gap: 6px; width: min(320px, calc(100vw - 32px)); padding: 8px; font-family: var(--ui); font-size: 12px; color: var(--fg); background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+.cm-lp-linkpop-field { display: flex; align-items: center; gap: 8px; }
+.cm-lp-linkpop-field > span { flex: none; width: 44px; color: var(--fg-dim); }
+.cm-lp-linkpop-field input { flex: 1; min-width: 0; padding: 3px 6px; border-radius: 4px; }
+.cm-lp-linkpop-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.cm-lp-linkpop-actions button { border-color: var(--border); }
+.cm-lp-linkpop-apply { color: var(--accent); }
 
 .dialog {
   width: min(640px, 92vw);
@@ -1111,6 +1215,19 @@ input, textarea {
 
 .dropdown-caret { transition: transform var(--d-fast) var(--e-out); }
 .dropdown.open .dropdown-caret { transform: rotate(180deg); }
+.cm-lp-style-caret { transition: transform var(--d-fast) var(--e-out); }
+.cm-lp-style.open .cm-lp-style-caret { transform: rotate(180deg); }
+
+/* The link popover arrives as a menu does. It leaves at once: what closes it
+   is an action whose result is the acknowledgement, or a press elsewhere. */
+.cm-lp-linkpop {
+  transition:
+    opacity   var(--d-quick) var(--e-out),
+    transform var(--d-quick) var(--e-out);
+}
+@starting-style {
+  .cm-lp-linkpop { opacity: 0; transform: translateY(calc(-4px * var(--travel))); }
+}
 
 /* The tooltip's own delay is in `src/tooltip.ts`, and the image preview's in
    `src/editor/citation.ts`; this is only their arrival. Each is a `[hidden]`
@@ -1321,6 +1438,51 @@ input, textarea {
   transition: opacity var(--d-instant) var(--e-out), color var(--d-instant) var(--e-out);
 }
 
+/* --- A dragged tab (TAB-09 to TAB-15) ------------------------------------ */
+
+/* `dragTab` in tabs.tsx marks each strip a dragged tab passes over with
+   `data-dragging`. Its tabs slide aside to open the gap the tab would land
+   in, and back to close it; on release the tab slides from under the pointer
+   into its gap (`.settling`), or back to its own place, and the shadow that
+   lifted it fades on the way, so it lands as a plain tab. Each slide starts
+   and ends on screen, so it takes the reorder curve at the card-sized
+   duration, and one under way retargets when the gap moves on. The insertion
+   line fades in where it first stands and slides with its gap. These
+   translates are where a tab stands, not a distance it travels, so they are
+   not written through `--travel`: under reduced motion the slide goes and the
+   place stays. There each moved tab, the landing tab and the line fade in at
+   their new place instead. `data-moved` flips between two values whenever one
+   of them moves, and each value names its own copy of the fade, which
+   restarts it. */
+.tabs[data-dragging] > .tab {
+  transition:
+    transform        var(--d-quick)   var(--e-in-out),
+    background-color var(--d-instant) var(--e-out),
+    color            var(--d-instant) var(--e-out);
+}
+.tab.tab-ghost.settling { transition: transform var(--d-quick) var(--e-in-out); }
+.tab.tab-ghost::before { transition: opacity var(--d-quick) var(--e-in-out); }
+.tab.tab-ghost.settling::before { opacity: 0; }
+.tab-drop-line {
+  transition:
+    transform var(--d-quick) var(--e-in-out),
+    opacity   var(--d-fast)  var(--e-out);
+}
+@starting-style { .tab-drop-line { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .tabs[data-dragging] > .tab {
+    transition:
+      background-color var(--d-instant) var(--e-out),
+      color            var(--d-instant) var(--e-out);
+  }
+  .tab.tab-ghost.settling { transition: none; }
+  .tab-drop-line { transition: opacity var(--d-fast) var(--e-out); }
+  .tab[data-moved="a"], .tab-drop-line[data-moved="a"] { animation: fade-in-a var(--d-fast) var(--e-out); }
+  .tab[data-moved="b"], .tab-drop-line[data-moved="b"] { animation: fade-in-b var(--d-fast) var(--e-out); }
+}
+@keyframes fade-in-a { from { opacity: 0; } }
+@keyframes fade-in-b { from { opacity: 0; } }
+
 /* --- Reduced motion (§10) ------------------------------------------------ */
 
 /* Every distance above is written through `--travel`, which the token block
@@ -1331,7 +1493,7 @@ input, textarea {
   .palette, .dialog,
   .overlay.is-closing .palette, .overlay.is-closing .dialog,
   button:active, .cm-lp-chip:active, .hunk-action:active, .crumb:active { transform: none; }
-  .tree-chevron, .git-chevron, .row-disclose, .dropdown-caret { transition: none; }
+  .tree-chevron, .git-chevron, .row-disclose, .dropdown-caret, .cm-lp-style-caret { transition: none; }
   .tab::after, .sidebar-tabs [role="tab"]::after, .settings-tabs [role="tab"]::after { transform: none; }
   @starting-style {
     .menu, .palette, .dialog { transform: none; }

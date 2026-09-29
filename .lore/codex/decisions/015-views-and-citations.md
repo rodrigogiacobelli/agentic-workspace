@@ -94,8 +94,10 @@ citation of a path that does not exist and is drawn as missing. The older
 dropped because `@path` is what the owner types to an agent. `citedPath`
 gives the path exactly as written, leading slash included, and the resolution
 order below decides what it names. The node is a decoration over the source
-text, so moving the cursor into it shows the `@path` that is in the file
-(CITE-09).
+text, so the file keeps the `@path` byte for byte (CITE-09). Rich mode never
+shows the `@path`: `src/editor/rich.ts` makes the citation one object, which
+one arrow press steps over and one deletion removes whole. Source mode shows
+the `@path` as the file holds it.
 
 **Every path a document writes resolves in one order.** A citation's path, a
 Markdown image's target and a Markdown link's target all go through

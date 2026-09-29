@@ -4,8 +4,8 @@ title: Motion standard
 summary: How this codebase writes the rules in design-motion — the token scale in
   src/styles.css that every duration and easing is named from, the calc form that
   makes the reduced-motion switch work, the pseudo-element that carries the tab
-  indicator, the hook that lets a surface React unmounts still play its exit, and
-  what checks the result.
+  indicator, the positions a dragged tab and its neighbours take, the hook that
+  lets a surface React unmounts still play its exit, and what checks the result.
 related:
   - design-motion
   - standards-code
@@ -15,6 +15,7 @@ related:
 binds:
   - src/styles.css
   - src/motion.ts
+  - src/components/tabs.tsx
 ---
 
 # Motion standard
@@ -59,6 +60,28 @@ wrapper that carries it clips its child downwards only, with
 `overflow: visible clip`, so a name longer than the panel still scrolls into
 view rather than being cut off.
 
+## A dragged tab's translates are positions
+
+`dragTab` in `src/components/tabs.tsx` places the copy of a dragged tab, the
+insertion line and the tabs pushed aside to open its gap by writing
+`transform` from script, in pixels measured from the strips. Those translates
+say where a tab stands rather than how far something travels, so they are not
+written through `--travel`: a zeroed multiplier would close the gap that shows
+where the tab lands (TAB-14).
+
+The stylesheet attaches the slide only while a strip carries `data-dragging`,
+and to the landing copy only once it is released (`.tab-ghost.settling`): both
+run on `--d-quick` with `--e-in-out`, and the insertion line slides with its
+gap on the same pair after fading in on `--d-fast`. The copy's lifting shadow
+sits on a `::before` whose opacity fades as it lands, because `box-shadow` is
+not animated. The reduced-motion query
+takes `transform` out of those transitions. There each moved tab, the line and
+the landing copy fade in at their new place instead: `dragTab` flips
+`data-moved` between `a` and `b` whenever one of them moves, and each value
+names its own copy of the fade keyframes, which restarts the fade. `dragTab`
+reads `--d-quick` through `duration()` to make the move once the copy has
+landed.
+
 ## `useDismiss` holds a surface React would unmount
 
 A CSS transition needs the element in the document, and a conditionally
@@ -80,6 +103,12 @@ return while `closing` is true.
 A toast is keyed by an id rather than by its index, because each carries the
 state of its own exit and an index hands that state to whichever message moves
 up into the slot.
+
+The rich-mode toolbar's paragraph style menu, in `src/editor/toolbar.ts`, is
+built outside React. It wears `.menu` and plays the same exit: dismissed, it
+takes `is-closing`, stops listening for keys, and removes its element after
+`duration("--d-fast")`. Each opening builds a new element, so no pending exit
+lands on a menu shown again.
 
 ## What checks it
 

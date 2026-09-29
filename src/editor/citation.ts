@@ -82,7 +82,7 @@ export interface CitationContext {
  * file without moving the caret. An image chip previews the image on hover
  * (CITE-19) and carries no tooltip to show beside it.
  */
-export function chipElement(path: string, missing: boolean | undefined, ctx: CitationContext): HTMLElement {
+function chipElement(path: string, missing: boolean | undefined, ctx: CitationContext): HTMLElement {
   const file = path.replace(/\/$/, "").split("/").pop() || path;
   const icon = fileIcon(file, path.endsWith("/"));
   const el = document.createElement("span");
@@ -191,7 +191,7 @@ function showPreview(chip: HTMLElement, path: string, ctx: CitationContext): voi
 }
 
 /** A chip inside `dom` is going away: its preview goes with it rather than floating over whatever is drawn in its place. */
-export function releasePreview(dom: HTMLElement): void {
+function releasePreview(dom: HTMLElement): void {
   if (hovered && dom.contains(hovered)) closePreview();
 }
 

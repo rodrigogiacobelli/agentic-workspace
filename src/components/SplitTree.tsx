@@ -105,6 +105,22 @@ interface ZoneOptions {
 }
 
 /**
+ * The zone of a box a point falls in: the nearest edge within a quarter of
+ * the box's size of it, otherwise the centre. A dragged editor tab, which is
+ * not a native drag, is placed by this too (`dragTab` in `tabs.tsx`).
+ */
+export function zoneAt(r: DOMRect, clientX: number, clientY: number, edgesOnly = false): Zone {
+  const x = (clientX - r.left) / Math.max(1, r.width);
+  const y = (clientY - r.top) / Math.max(1, r.height);
+  const band = 0.25;
+  const inBand = x < band || x > 1 - band || y < band || y > 1 - band;
+  if (!inBand && !edgesOnly) return "center";
+  const edges: [Zone, number][] = [["left", x], ["right", 1 - x], ["top", y], ["bottom", 1 - y]];
+  edges.sort((a, b) => a[1] - b[1]);
+  return edges[0][0];
+}
+
+/**
  * Turns an element into a drop target with five zones. `accepts` looks at the
  * drag's MIME types, since its data is unreadable until the drop; a tree
  * drag is known from the router instead (`tree`).
@@ -116,18 +132,8 @@ export function useDropZone(accepts: (types: readonly string[]) => boolean, onDr
   // A drop, or a drag given up, can come after the last dragleave or in its place.
   useEffect(() => onDropEnd(() => { depth.current = 0; setZone(null); }), []);
 
-  const compute = (e: React.DragEvent): Zone => {
-    if (options.centerOver?.(e.target as Element)) return "center";
-    const r = ref.current!.getBoundingClientRect();
-    const x = (e.clientX - r.left) / Math.max(1, r.width);
-    const y = (e.clientY - r.top) / Math.max(1, r.height);
-    const band = 0.25;
-    const inBand = x < band || x > 1 - band || y < band || y > 1 - band;
-    if (!inBand && !options.edgesOnly) return "center";
-    const edges: [Zone, number][] = [["left", x], ["right", 1 - x], ["top", y], ["bottom", 1 - y]];
-    edges.sort((a, b) => a[1] - b[1]);
-    return edges[0][0];
-  };
+  const compute = (e: React.DragEvent): Zone =>
+    options.centerOver?.(e.target as Element) ? "center" : zoneAt(ref.current!.getBoundingClientRect(), e.clientX, e.clientY, options.edgesOnly);
 
   const treeOf = () => (options.tree ? treeDrag() : null);
   const takes = (e: React.DragEvent) => !!treeOf() || accepts(e.dataTransfer.types);
@@ -181,6 +187,5 @@ export function useDropZone(accepts: (types: readonly string[]) => boolean, onDr
   return { ref, zone, handlers, overlay };
 }
 
-export const TAB_MIME = "application/x-agentic-tab";
 export const FILE_MIME = "application/x-agentic-file";
 export const PANEL_MIME = "application/x-agentic-panel";

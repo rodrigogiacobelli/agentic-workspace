@@ -64,6 +64,19 @@ Diagnostic tests — ones that print what the machine reports rather than
 asserting an outcome — are also `#[ignore]`d. They exist for failures that are
 otherwise silent, and they are not assertions.
 
+## How the tests run
+
+Rust tests run with `cargo test --lib` in `src-tauri/`.
+
+Frontend tests are `*.test.ts` files beside the module they test, under
+`src/`. `pnpm test` runs every one with Node's own test runner, `node --test`;
+Node 22.18 and later run TypeScript by stripping its types, with no flag, so
+the project has no frontend test dependency. A module under test is one Node can load: plain `.ts` with no JSX,
+no `@tauri-apps/*` import and no browser object touched at module level. A test
+names the file it imports with its `.ts` extension. `pnpm typecheck` leaves the
+test files out (`tsconfig.json`), since the project installs no type
+declarations for Node's modules.
+
 ## Rules
 
 - **Test at the level the defect lives at.** A splice bug is a unit test, not

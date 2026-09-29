@@ -3,7 +3,8 @@ id: standards-linux-desktop
 title: Linux desktop standard
 summary: The Arch, KDE and Wayland rules this application complies with — the
   four-way application identity chain, the WebKitGTK NVIDIA workaround, the CSS
-  a declaration is silently dropped for, window placement limits, the focus that
+  a declaration is silently dropped for, the table row that is never a
+  positioned child's containing block, window placement limits, the focus that
   gates a clipboard read, global shortcut binding through the portal, overlay
   scrollbars over app-drawn menus, the main loop a synchronous command blocks,
   the scheduling class an auto-nice daemon hands down, the identity a development
@@ -155,6 +156,25 @@ function: `min-width: min(120px, max-content)` is dropped whole, and a
 browser support table answers for Safari, which is versioned separately from
 WebKitGTK and is not the same build.
 
+## WebKitGTK never sizes a positioned box by its table row
+
+Measured on WebKitGTK 2.52: `position: relative` on an element displayed as
+`table-row` computes to `static`. An absolutely positioned child of the row
+therefore takes its offsets and its size from a positioned ancestor outside
+the table, and `top: 0; bottom: 0` puts it at that ancestor's top, as tall as
+that ancestor. A `transform` on the row or on a row group moves the child's
+origin to the row's top but still sizes it against the table, so the same
+declarations give a box as tall as all the table's rows. Chromium sizes the
+child by a relatively positioned row, so a layout checked only in Chromium
+passes.
+
+Two things do hold in both engines. An absolutely positioned child whose
+`top` and `left` stay `auto` sits at its static position: the row's top, at
+its place along the row. And an empty element displayed as `table-cell` is a
+box of no width exactly as tall as its row. A row child that needs its row's
+height is a cell; the rendered view's table rows are drawn that way
+(`011-live-preview-over-codemirror`).
+
 ## WebKitGTK paints overlay scrollbars above every layer
 
 WebKitGTK draws the overlay scrollbar of a scrolling element after everything
@@ -302,7 +322,9 @@ Measured on WebKitGTK 2.52 under both backends:
   Tauri takes a native drop, read live for a DOM drop.
 
 `src/dropRoute.ts` is built on these facts, and `014-one-layout-tree` holds
-how a drop target uses it.
+how a drop target uses it. An editor tab and a terminal tab are not native
+drags: `dragTab` in `src/components/tabs.tsx` moves them on pointer events
+with pointer capture, and none of these facts applies to them.
 
 ## WebKitGTK reports Shift+Tab with key "Unidentified"
 

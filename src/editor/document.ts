@@ -6,7 +6,7 @@ import {
   EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection,
   dropCursor, highlightActiveLine, gutter, GutterMarker, scrollPastEnd,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, isolateHistory, redo, undo } from "@codemirror/commands";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting, HighlightStyle, syntaxTree } from "@codemirror/language";
 import { diff, unifiedMergeView } from "@codemirror/merge";
@@ -18,6 +18,7 @@ import { languageExtension, type LanguageId } from "./languages";
 import type { BlameLine, StoredAsset, Workspace } from "../types";
 import { livePreview, mediaKind, refreshPreview, type PreviewContext, type Resolved } from "./preview";
 import { typingHelpers } from "./typing";
+import { richFormatting } from "./toolbar";
 import { MARKS_LIMIT, changeField, changeGutter, changeRuler, setBase } from "./changes";
 
 export type Mode = "source" | "split" | "rich";
@@ -283,7 +284,7 @@ export class Doc {
     };
     const source = this.source;
     const follow = () => {
-      this.rich?.dispatch({ selection: source.state.selection, scrollIntoView: true });
+      this.rich?.dispatch({ selection: source.state.selection, scrollIntoView: true, annotations: forwarded.of(true) });
       return true;
     };
     return [
@@ -295,6 +296,9 @@ export class Doc {
         ...defaultKeymap, ...searchKeymap, indentWithTab,
       ]),
       ...this.common(),
+      // Before the preview: its shortcuts, pending formatting and Backspace at
+      // a block's start come first, and every other key falls through.
+      richFormatting(),
       livePreview(ctx),
       // Built later than the source view, it starts from the chunks the source already holds.
       changeField.init(() => this.source.state.field(changeField)),
@@ -305,9 +309,19 @@ export class Doc {
 
   private onUpdate(u: { docChanged: boolean; selectionSet: boolean; changes: import("@codemirror/state").ChangeSet; transactions: readonly import("@codemirror/state").Transaction[] }, origin: EditorView): void {
     if (this.disposed) return;
-    if (u.docChanged && !u.transactions.some((tr) => tr.annotation(forwarded))) {
+    const echo = u.transactions.some((tr) => tr.annotation(forwarded));
+    // In rich mode the source view, which holds the only history, keeps the
+    // rich view's caret, so an undo puts the caret back where the edit was. A
+    // split's panes each keep their own.
+    const caret = origin === this.rich && this.mode === "rich" ? origin.state.selection : undefined;
+    if (u.docChanged && !echo) {
       const other = origin === this.source ? this.rich : this.source;
-      other?.dispatch({ changes: u.changes, annotations: forwarded.of(true) });
+      // A rich-mode command is one entry in the source's history, never
+      // joined with the typing beside it (RICH-18).
+      const isolate = u.transactions.map((tr) => tr.annotation(isolateHistory)).find((v) => v);
+      other?.dispatch({ changes: u.changes, selection: caret, annotations: isolate ? [forwarded.of(true), isolateHistory.of(isolate)] : forwarded.of(true) });
+    } else if (caret && u.selectionSet && !echo) {
+      this.source.dispatch({ selection: caret, annotations: forwarded.of(true) });
     }
     if (u.docChanged) {
       // A scroll kept for later names a place in the text, and an edit that
@@ -326,7 +340,8 @@ export class Doc {
       if (dirty && !fromDisk) this.scheduleAutosave();
       this.scheduleDraft();
     }
-    if (u.docChanged || u.selectionSet) this.emit();
+    // The source view taking the rendered view's caret is news already told.
+    if (u.docChanged || (u.selectionSet && !(echo && origin === this.source))) this.emit();
   }
 
   private ensureRich(): EditorView {
