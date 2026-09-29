@@ -6,15 +6,16 @@
 
 import { deleteBracketPair } from "@codemirror/autocomplete";
 import { isolateHistory } from "@codemirror/commands";
-import { syntaxTree } from "@codemirror/language";
-import { Annotation, type ChangeSet, EditorSelection, EditorState, Prec, type RangeSet, type SelectionRange, StateEffect, StateField, Transaction, type Extension, type Line, type Range } from "@codemirror/state";
+import { highlightingFor, syntaxTree } from "@codemirror/language";
+import { Annotation, type ChangeDesc, type ChangeSet, EditorSelection, EditorState, Prec, RangeSet, type SelectionRange, StateEffect, StateField, Transaction, type Extension, type Line, type Range } from "@codemirror/state";
 import { BlockWrapper, type Command, Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType, keymap } from "@codemirror/view";
 import type { SyntaxNode, Tree } from "@lezer/common";
+import { highlightTree } from "@lezer/highlight";
 import { ChipWidget, citedPath, type CitationContext } from "./citation";
 import {
   type Block, type Change, type Layout, type Obj, IMAGE, canonical, cellAt, cellBreak, cellEdge, cellMove, cellText, deleteBy, deletion, enter, exemptLines,
   caretSide, cellTail, hardBreak, infoRange, intact, isFootnote, landing, layout, layoutHolds, lineSyntax, mapLayout, mended, moveChar, moveGroup, paragraphBreakBefore, pasted,
-  rowMove, runAt, settle, step, typedRange,
+  rowMove, runAt, settle, step, tableRow, typedRange,
 } from "./rich";
 
 /**
@@ -250,14 +251,15 @@ class BreakWidget extends WidgetType {
 
 /**
  * A table cell with nothing at all between its pipes (`||`), which has no
- * text to mark as a cell: it is drawn as an empty cell, and a click on it puts
- * the caret between the pipes.
+ * text to mark as a cell: it is drawn as an empty cell, held at its column's
+ * width, and a click on it puts the caret between the pipes.
  */
 class EmptyCellWidget extends WidgetType {
-  constructor(readonly cls: string) { super(); }
+  constructor(readonly cls: string, readonly style: string) { super(); }
   toDOM(view: EditorView) {
     const el = document.createElement("span");
     el.className = this.cls;
+    if (this.style) el.setAttribute("style", this.style);
     el.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -266,7 +268,7 @@ class EmptyCellWidget extends WidgetType {
     });
     return el;
   }
-  eq(other: EmptyCellWidget) { return other.cls === this.cls; }
+  eq(other: EmptyCellWidget) { return other.cls === this.cls && other.style === this.style; }
   // The caret stands at the start of the cell's content, one line tall, in the middle of the row.
   coordsAt(dom: HTMLElement) {
     const box = dom.getBoundingClientRect();
@@ -525,15 +527,21 @@ interface Inline {
   cells: DecorationSet;
 }
 
-function inlineDecorations(view: EditorView, ctx: PreviewContext, lay: Layout): Inline {
+/**
+ * The inline drawing of `ranges`, the view's visible ranges or a table's
+ * lines. `widths` gives the widths a table's columns are held at, if any.
+ */
+function inlineDecorations(
+  view: EditorView, ctx: PreviewContext, lay: Layout, ranges: readonly { from: number; to: number }[], widths: (table: SyntaxNode) => number[] | undefined,
+): Inline {
   const { state } = view;
   const tree = syntaxTree(state);
   const marks: Range<Decoration>[] = [];
   const lines: Range<Decoration>[] = [];
   const cells: Range<Decoration>[] = [];
   const atomic: { from: number; to: number }[] = [];
-  /** Each table's column alignments, read once per table however many of its rows are drawn. */
-  const aligned = new Map<number, string[]>();
+  /** Each table's column alignments and widths, worked out once per table however many of its rows are drawn. */
+  const tables = new Map<number, { align: string[]; widths?: number[] }>();
   const mark = (from: number, to: number, cls: string, attrs?: Record<string, string>) => {
     if (to > from) marks.push(Decoration.mark({ class: cls, attributes: attrs }).range(from, to));
   };
@@ -562,7 +570,7 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext, lay: Layout): 
   };
 
   const done = new Set<number>();
-  for (const { from, to } of view.visibleRanges) {
+  for (const { from, to } of ranges) {
     // What `rich.ts` hides and which objects it draws, line by line.
     for (let pos = from; pos <= to; ) {
       const line = state.doc.lineAt(pos);
@@ -577,18 +585,20 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext, lay: Layout): 
         // between them are hidden pieces outside every cell (RICH-11, ED-50).
         // Spaces just typed at the end of a cell are drawn in it up to the caret.
         lines.push(Decoration.line({ class: row.head ? "cm-lp-tr cm-lp-thead" : "cm-lp-tr cm-lp-tbody" }).range(line.from));
-        const table = row.node.parent!;
-        let align = aligned.get(table.from);
-        if (!align) aligned.set(table.from, (align = alignments(state, table)));
+        const node = row.node.parent!;
+        let table = tables.get(node.from);
+        if (!table) tables.set(node.from, (table = { align: alignments(state, node), widths: widths(node) }));
         const { main } = state.selection;
         const tail = main.empty && main.head >= line.from && main.head <= line.to ? cellTail(state, row, main.head) : null;
         if (tail) pieces = pieces.map((p) => (p.from === tail.from ? { ...p, from: main.head } : p)).filter((p) => p.to > p.from);
         row.cells.forEach((c, j) => {
-          const cls = `cm-lp-td${align[j] ?? ""}`;
+          const cls = `cm-lp-td${table.align[j] ?? ""}`;
+          const w = table.widths?.[j];
+          const style = w === undefined ? "" : `min-width: ${w}px; max-width: ${w}px`;
           const to = tail?.column === j ? main.head : c.to;
           // Inclusive, so a chip or an image at either end of the text is drawn inside the cell.
-          if (to > c.from) cells.push(Decoration.mark({ class: cls, inclusive: true }).range(c.from, to));
-          else marks.push(Decoration.widget({ widget: new EmptyCellWidget(cls), side: -1 }).range(c.from));
+          if (to > c.from) cells.push(Decoration.mark({ class: cls, inclusive: true, attributes: style ? { style } : undefined }).range(c.from, to));
+          else marks.push(Decoration.widget({ widget: new EmptyCellWidget(cls, style), side: -1 }).range(c.from));
         });
       }
       for (const p of pieces) {
@@ -669,6 +679,249 @@ function inlineDecorations(view: EditorView, ctx: PreviewContext, lay: Layout): 
     });
   }
   return { decorations: Decoration.set([...marks, ...lines], true), atomic: atoms(atomic), cells: Decoration.set(cells, true) };
+}
+
+/**
+ * What CodeMirror draws: the visible ranges, and the lines holding the main
+ * selection's ends, which it draws wherever they are. Left undecorated, a
+ * heading holding the caret would lose its size each time it left the
+ * viewport, and the text below it would move.
+ */
+function drawnRanges(view: EditorView): { from: number; to: number }[] {
+  const ranges = [...view.visibleRanges];
+  const { main } = view.state.selection;
+  for (const pos of new Set([main.anchor, main.head])) {
+    if (pos >= view.viewport.from && pos <= view.viewport.to) continue;
+    const { from, to } = view.lineBlockAt(pos);
+    if (!ranges.some((r) => r.from <= to && from <= r.to)) ranges.push({ from, to });
+  }
+  return ranges.sort((a, b) => a.from - b.from);
+}
+
+// --- Table columns: sized from every row, not only the drawn ones.
+
+/** Draws the tables' columns again: one was measured anew, or the box they share out changed width. */
+const redrawColumns = StateEffect.define<null>();
+
+/** How long edits to a table, or news of what it draws, settle before its columns are measured again. */
+const SETTLE_MS = 400;
+
+/**
+ * A table's columns over all its rows: each one's narrowest and widest layout
+ * in px, padding included, and what its rows draw beside the cells — a
+ * quote's bar.
+ */
+interface Measured { from: number; to: number; min: number[]; max: number[]; beside: number; stale: boolean }
+
+/**
+ * The widths columns take in a box `box` px wide, as CSS's automatic table
+ * layout shares it out: the widest layout of each when they all fit, the
+ * narrowest when even those do not (and the table's box scrolls, ED-51), and
+ * otherwise each column's narrowest plus a share of the room left in
+ * proportion to how much wider it could be.
+ */
+function share(min: number[], max: number[], box: number): number[] {
+  const sum = (ws: number[]) => ws.reduce((a, b) => a + b, 0);
+  const low = sum(min);
+  const high = sum(max);
+  if (high <= box) return max;
+  if (low >= box) return min;
+  return min.map((w, j) => w + Math.floor(((box - low) * (max[j] - w)) / (high - low)));
+}
+
+/** The width of an element's content box, which a table's box fills. */
+function contentWidth(el: HTMLElement): number {
+  const s = getComputedStyle(el);
+  return Math.floor(el.getBoundingClientRect().width - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight));
+}
+
+/** What a measure depends on besides the text: the prose font and size, and the code font. */
+function fontOf(el: HTMLElement): string {
+  const s = getComputedStyle(el);
+  return `${s.fontFamily} ${s.fontSize} ${s.getPropertyValue("--mono")}`;
+}
+
+/** `node`, inside a span carrying the classes of the marks over it, as CodeMirror would draw it. */
+function marked(node: Node, active: readonly Decoration[]): Node {
+  const cls = active.map((d) => d.spec.class).filter(Boolean).join(" ");
+  if (!cls) return node;
+  const span = document.createElement("span");
+  span.className = cls;
+  span.append(node);
+  return span;
+}
+
+/**
+ * The widths every table's columns are held at (ED-48, ED-50). CodeMirror
+ * draws only the rows near the viewport, and the browser sizes a table's
+ * columns from the rows it is given, so left to itself a column widens and
+ * narrows as rows scroll in and out, and the rows below it wrap anew. A
+ * table's cells are instead laid out once, all of its rows, off screen in the
+ * page's own styles, which gives each column's narrowest and widest layout;
+ * every drawn cell is then held at its column's width (`share`) with an equal
+ * `min-width` and `max-width`, which WebKitGTK honours on a table cell. A
+ * table is measured when it is first drawn; again when edits to it, an image
+ * loading in it or a cited file's news settle, keeping its widths meanwhile;
+ * and whenever the fonts change. A change of the box's width only shares the
+ * room out again.
+ */
+class TableColumns {
+  /** Each measured table, by where its syntax node starts. */
+  private tables = new Map<number, Measured>();
+  /** The width a table's box has: the content's. */
+  private box = 0;
+  /** The content's width as last observed; 0 while the view is hidden. */
+  private shown = 0;
+  private font = "";
+  /** Images a measure has waited for, so one that never reports itself loaded measures once more, not forever. */
+  private readonly loading = new Set<string>();
+  private timer = 0;
+  private frame = 0;
+  private readonly resize: ResizeObserver;
+
+  constructor(private readonly view: EditorView, private readonly ctx: PreviewContext) {
+    this.resize = new ResizeObserver((entries) => this.resized(entries[entries.length - 1].contentRect.width));
+    this.resize.observe(view.contentDOM);
+  }
+
+  /** The widths `table`'s columns are drawn at, measuring it first when it has no measure; none while the view has no layout. */
+  widths(table: SyntaxNode, lay: Layout): number[] | undefined {
+    let m = this.tables.get(table.from);
+    // A table that grew or shrank with no edit to it was cut short by a parse still under way.
+    if (!m || (m.to !== table.to && !m.stale)) m = this.measure(table, lay);
+    return m && share(m.min, m.max, this.box - m.beside);
+  }
+
+  /** An edit moves every measure with its table; one the edit touched is kept until the edits settle. */
+  map(changes: ChangeDesc): void {
+    const moved = new Map<number, Measured>();
+    let touched = false;
+    for (const m of this.tables.values()) {
+      if (changes.touchesRange(m.from, m.to)) m.stale = touched = true;
+      m.from = changes.mapPos(m.from, -1);
+      m.to = changes.mapPos(m.to, 1);
+      moved.set(m.from, m);
+    }
+    this.tables = moved;
+    if (touched) this.settle();
+  }
+
+  /** A cited file appeared or vanished, which changes what its chip draws. */
+  refresh(): void {
+    for (const m of this.tables.values()) m.stale = true;
+    if (this.tables.size) this.settle();
+  }
+
+  destroy(): void {
+    this.resize.disconnect();
+    clearTimeout(this.timer);
+    cancelAnimationFrame(this.frame);
+  }
+
+  /** Measures the stale tables again once things settle: each as it is next drawn. */
+  private settle(): void {
+    clearTimeout(this.timer);
+    this.timer = window.setTimeout(() => {
+      for (const [from, m] of this.tables) if (m.stale) this.tables.delete(from);
+      this.view.dispatch({ effects: redrawColumns.of(null) });
+    }, SETTLE_MS);
+  }
+
+  /**
+   * The content changed size. A new width shares every table's room out
+   * again, new fonts measure every table again, and a view shown again draws
+   * the tables it could not measure while hidden. The redraw waits a frame:
+   * a view updated inside a resize observer resizes what it observes.
+   */
+  private resized(width: number): void {
+    const box = Math.floor(width);
+    const font = fontOf(this.view.contentDOM);
+    if (box === this.shown && font === this.font) return;
+    this.shown = box;
+    if (!box) return;
+    if (font !== this.font) this.tables.clear();
+    this.box = box;
+    this.font = font;
+    cancelAnimationFrame(this.frame);
+    this.frame = requestAnimationFrame(() => this.view.dispatch({ effects: redrawColumns.of(null) }));
+  }
+
+  /**
+   * Lays every row of `table` out off screen, each column once as narrow and
+   * once as wide as its cells allow, with the classes CodeMirror would draw
+   * them with: the rendered view's marks and widgets, and the syntax
+   * highlighting's. None when the view is not laid out.
+   */
+  private measure(table: SyntaxNode, lay: Layout): Measured | undefined {
+    const { view } = this;
+    if (!this.box) {
+      this.box = contentWidth(view.contentDOM);
+      this.font = fontOf(view.contentDOM);
+      if (!this.box) return undefined;
+    }
+    const { state } = view;
+    const { doc } = state;
+    const first = doc.lineAt(table.from);
+    const last = doc.lineAt(Math.max(table.from, table.to - 1));
+    const { decorations } = inlineDecorations(view, this.ctx, lay, [{ from: first.from, to: last.to }], () => undefined);
+    const highlights: Range<Decoration>[] = [];
+    highlightTree(syntaxTree(state), { style: (tags) => highlightingFor(state, tags) }, (from, to, cls) => highlights.push(Decoration.mark({ class: cls }).range(from, to)), first.from, last.to);
+    const sets = [Decoration.set(highlights, true), decorations];
+    const columns: HTMLElement[] = [];
+    for (let n = first.number; n <= last.number; n++) {
+      const row = tableRow(state, doc.line(n).from);
+      row?.cells.forEach((c, j) => {
+        const cell = document.createElement("span");
+        cell.className = "cm-lp-td";
+        RangeSet.spans(sets, c.from, c.to, {
+          span: (from, to, active) => cell.append(marked(document.createTextNode(doc.sliceString(from, to)), active)),
+          point: (_from, _to, deco, active) => {
+            const widget = deco.spec.widget as WidgetType | undefined;
+            if (widget && !(widget instanceof EmptyCellWidget)) cell.append(marked(widget.toDOM(view), active));
+          },
+        });
+        const column = (columns[j] ??= document.createElement("div"));
+        // A header cell sits in a header row, which draws it bold.
+        if (row.head) {
+          const head = column.appendChild(document.createElement("div"));
+          head.className = "cm-lp-thead";
+          head.appendChild(cell);
+        } else {
+          column.appendChild(cell);
+        }
+      });
+    }
+    const offscreen = document.createElement("div");
+    offscreen.className = "cm-lp-measure";
+    for (const narrow of columns) {
+      const wide = narrow.cloneNode(true) as HTMLElement;
+      narrow.style.width = "min-content";
+      wide.style.width = "max-content";
+      offscreen.append(narrow, wide);
+    }
+    // A quoted table's rows draw the quote's bar as their border, which the table adds to its cells' widths.
+    let quoted = false;
+    for (let n = table.parent; n; n = n.parent) if (n.name === "Blockquote") quoted = true;
+    const quote = quoted ? offscreen.appendChild(document.createElement("div")) : null;
+    if (quote) quote.className = "cm-line cm-lp-quote";
+    view.dom.appendChild(offscreen);
+    const px = (el: Element) => Math.ceil(el.getBoundingClientRect().width);
+    const min = columns.map(px);
+    const max = columns.map((c, j) => Math.max(min[j], px(c.nextElementSibling!)));
+    const beside = quote ? Math.ceil(parseFloat(getComputedStyle(quote).borderLeftWidth)) : 0;
+    const m: Measured = { from: table.from, to: table.to, min, max, beside, stale: false };
+    // An image sizes its column once it has loaded; each one is waited for once.
+    for (const img of offscreen.querySelectorAll("img")) {
+      if (img.complete || this.loading.has(img.src)) continue;
+      this.loading.add(img.src);
+      img.addEventListener("load", () => { m.stale = true; this.settle(); }, { once: true });
+    }
+    offscreen.remove();
+    // A hidden view lays nothing out; a cell is at least its padding wide.
+    if (!min[0]) return undefined;
+    this.tables.set(m.from, m);
+    return m;
+  }
 }
 
 // --- Editing: the keys, typed text and selections of the rendered view.
@@ -1022,17 +1275,29 @@ export function livePreview(ctx: PreviewContext): Extension {
       decorations: DecorationSet;
       atomic: RangeSet<Decoration>;
       cells: DecorationSet;
+      readonly columns: TableColumns;
       constructor(view: EditorView) {
-        ({ decorations: this.decorations, atomic: this.atomic, cells: this.cells } = inlineDecorations(view, ctx, view.state.field(blockField).layout));
+        this.columns = new TableColumns(view, ctx);
+        ({ decorations: this.decorations, atomic: this.atomic, cells: this.cells } = this.draw(view));
       }
       update(u: ViewUpdate) {
-        const refreshed = u.transactions.some((tr) => tr.effects.some((e) => e.is(refreshPreview)));
+        const effects = u.transactions.flatMap((tr) => tr.effects);
+        const refreshed = effects.some((e) => e.is(refreshPreview));
+        if (u.docChanged) this.columns.map(u.changes);
+        if (refreshed) this.columns.refresh();
         if (
-          u.docChanged || u.viewportChanged || u.selectionSet || refreshed || syntaxTree(u.state) !== syntaxTree(u.startState)
-          || u.state.field(blockField) !== u.startState.field(blockField)
+          u.docChanged || u.viewportChanged || u.selectionSet || refreshed || effects.some((e) => e.is(redrawColumns))
+          || syntaxTree(u.state) !== syntaxTree(u.startState) || u.state.field(blockField) !== u.startState.field(blockField)
         ) {
-          ({ decorations: this.decorations, atomic: this.atomic, cells: this.cells } = inlineDecorations(u.view, ctx, u.state.field(blockField).layout));
+          ({ decorations: this.decorations, atomic: this.atomic, cells: this.cells } = this.draw(u.view));
         }
+      }
+      draw(view: EditorView): Inline {
+        const lay = view.state.field(blockField).layout;
+        return inlineDecorations(view, ctx, lay, drawnRanges(view), (table) => this.columns.widths(table, lay));
+      }
+      destroy() {
+        this.columns.destroy();
       }
     },
     {

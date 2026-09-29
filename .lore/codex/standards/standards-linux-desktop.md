@@ -4,7 +4,9 @@ title: Linux desktop standard
 summary: The Arch, KDE and Wayland rules this application complies with — the
   four-way application identity chain, the WebKitGTK NVIDIA workaround, the CSS
   a declaration is silently dropped for, the table row that is never a
-  positioned child's containing block, window placement limits, the focus that
+  positioned child's containing block, the table cell held at its min-width
+  and max-width, the query container that moves a scroller back as it is
+  redrawn, window placement limits, the focus that
   gates a clipboard read, global shortcut binding through the portal, overlay
   scrollbars over app-drawn menus, the main loop a synchronous command blocks,
   the scheduling class an auto-nice daemon hands down, the identity a development
@@ -174,6 +176,32 @@ its place along the row. And an empty element displayed as `table-cell` is a
 box of no width exactly as tall as its row. A row child that needs its row's
 height is a cell; the rendered view's table rows are drawn that way
 (`011-live-preview-over-codemirror`).
+
+## WebKitGTK holds a table cell at its `min-width` and `max-width`
+
+CSS leaves `min-width` and `max-width` on a table cell undefined. WebKitGTK
+2.52 applies both: a cell whose two values are equal holds its column at that
+width, as a border box under the stylesheet's `box-sizing: border-box`,
+whatever the column's cells hold, and content wider than that overflows the
+cell. `width` on a cell does not hold it: the automatic table layout still
+shares out the room the columns leave, and a column given `width: 150px` is
+drawn between 134 and 142 px wide. The rendered view holds its tables' columns
+with equal values (`011-live-preview-over-codemirror`).
+
+## WebKitGTK moves a scroller back when a query container inside it is redrawn
+
+Measured on WebKitGTK 2.52: while a box with `container-type: inline-size`
+sits inside a scrolling element, a script that replaces what the box holds can
+leave the scroller's `scrollTop` lower than it was, with no scroll event, at
+the value it would stop at if the document ended a few hundred pixels into the
+box. CodeMirror replaces a table's drawn rows inside the table's box as the
+rendered view scrolls, reads `scrollTop` in the same frame and writes its
+scroll correction on top of the lowered value, so the text jumps back 1,000
+to 1,400 px. `contain: inline-size` gives the same containment, the box's
+width never counting toward its container's, without making the box a query
+container, and leaves the scroller where it is. A box inside a scroller takes
+its inline-size containment from `contain`; `container-type` stays on boxes
+that enclose the scroller, such as `.region` and `.work-panel`.
 
 ## WebKitGTK paints overlay scrollbars above every layer
 

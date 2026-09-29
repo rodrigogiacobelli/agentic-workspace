@@ -692,12 +692,17 @@ main { flex: 1; display: flex; min-height: 0; }
    before the first cell, which a row may lack, and the editor's spacers are
    taken out of the flow instead, so they make no column; the box is their
    containing block, and a row cannot be, since WebKitGTK computes
-   `position: relative` on a table row to static. The box scrolls sideways by
-   itself, and its inline-size containment keeps its width out of the
-   document's, so the document never scrolls sideways (ED-51). The cells drop
-   CodeMirror's `overflow-wrap: anywhere`, which sizes every column down to one
-   letter, so no column is narrower than its longest word (ED-48). */
-.cm-lp-table-wrap { position: relative; overflow-x: auto; container-type: inline-size; padding: 6px 0; font-size: 0.95em; border-collapse: collapse; }
+   `position: relative` on a table row to static. `preview.ts` holds each cell
+   at its column's width, measured over all the table's rows, with an equal
+   `min-width` and `max-width` on the cell, so no column changes width as rows
+   are drawn. The box scrolls sideways by itself, and its inline-size
+   containment keeps its width out of the document's, so the document never
+   scrolls sideways (ED-51); it is `contain`, not a query container, which
+   WebKitGTK lets move the scroller back as the rows inside it are redrawn
+   (`standards-linux-desktop`). The cells drop CodeMirror's
+   `overflow-wrap: anywhere`, which sizes every column down to one letter, so
+   no column is narrower than its longest word (ED-48). */
+.cm-lp-table-wrap { position: relative; overflow-x: auto; contain: inline-size; padding: 6px 0; font-size: 0.95em; border-collapse: collapse; }
 .cm-lp .cm-line.cm-lp-tr { display: table-row; }
 .cm-lp-tr > span:not(.cm-lp-td) { display: table-cell; }
 .cm-lp-tr > :not(span), .cm-lp-tr > span:first-of-type:not(.cm-lp-td) { position: absolute; width: 0; overflow: hidden; }
@@ -707,6 +712,13 @@ main { flex: 1; display: flex; min-height: 0; }
 .cm-lp-br { display: contents; }
 .cm-lp-thead > .cm-lp-td { font-weight: 700; border-bottom: 1px solid var(--fg-dim); }
 .cm-lp-tbody + .cm-lp-tbody > .cm-lp-td { border-top: 1px solid var(--border); }
+/* Where `preview.ts` lays out every row of a table, off screen, to size its
+   columns: each column once as narrow and once as wide as its cells allow, in
+   the cells' font — the prose font, at the table box's 0.95em of the prose
+   size. Nothing in it is ever painted or scrolls anything. */
+.cm-lp-measure { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; visibility: hidden; font-family: var(--prose); font-size: calc(var(--prose-size) * 0.95); }
+.cm-lp-measure > div { position: absolute; }
+.cm-lp-measure .cm-lp-td { display: block; }
 .cm-lp-frontmatter-wrap { padding: 4px 0 12px; }
 .cm-lp-frontmatter { border-collapse: collapse; font-size: 0.9em; width: 100%; }
 .cm-lp-frontmatter th { text-align: left; color: var(--fg-dim); font-weight: 500; padding: 3px 12px 3px 0; white-space: nowrap; vertical-align: top; width: 1%; }

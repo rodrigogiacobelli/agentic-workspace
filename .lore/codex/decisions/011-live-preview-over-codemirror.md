@@ -71,7 +71,21 @@ CodeMirror line drawn as a table row, and each cell's text is a mark drawn as a
 table cell; the pipes and the spaces around each cell are hidden syntax, and
 the delimiter row is folded into the header row's line. The rows sit in a
 CodeMirror block wrapper, a box of their own, so the browser lays them out as
-one table. The syntax hidden after each cell is a cell of no width, a box the
+one table. CodeMirror draws only the rows near the viewport, and the browser
+sizes a table's columns from the rows it is given, so the rendered view sizes
+them itself: `TableColumns` in `preview.ts` lays every row of a table out off
+screen, in the page's own styles, for each column's narrowest and widest
+layout, and holds every drawn cell at its column's width with an equal
+`min-width` and `max-width` (`standards-linux-desktop`). The widths are CSS's
+automatic table layout over all the rows: each column's widest layout when
+they all fit the box, its narrowest when even those do not, and otherwise its
+narrowest plus a share of the room left in proportion to how much wider it
+could be. A column keeps its width whichever rows are drawn. A table is
+measured when it is first drawn, again once edits to it, an image loading in
+it or news of a cited file have settled for 400 ms, keeping its widths
+meanwhile, and again when the fonts change; a new width of the box shares the
+room out again without measuring. The syntax hidden after each cell is a cell
+of no width, a box the
 row's height at the start of the next cell: CodeMirror's hit-testing and
 vertical motion find a row's top and bottom, and which cell lies under the
 pointer, from those boxes. Every row has one after each cell, so they make
@@ -85,7 +99,10 @@ rule between body rows, no vertical rules and no outer box, cells padded 5 px
 by 10 px and centred vertically, and a column's `:---:` or `---:` alignment
 honoured, in the active theme's colours. The box scrolls sideways when the
 table is wider than the pane; its inline-size containment keeps the table's
-width out of the document's, so the document never scrolls sideways. The cells
+width out of the document's, so the document never scrolls sideways. The
+containment is `contain: inline-size` rather than a query container, which
+WebKitGTK lets move the scroller back as CodeMirror redraws the rows inside
+it (`standards-linux-desktop`). The cells
 do not inherit CodeMirror's `overflow-wrap: anywhere`, which lets the browser
 size every column down to one letter, so no column is narrower than its
 longest word. A cell's text is decorated as a paragraph's is: emphasis, inline
@@ -447,9 +464,14 @@ which a drag's is and CodeMirror's own copy of a caret's line is not.
   line, so a line break inside a cell is a `<br>` and a table is never a
   freeform grid; a paragraph wraps where the source wraps only when the source
   is hard-wrapped.
-- CodeMirror draws only the lines near the viewport, and a table's columns are
-  as wide as the rows drawn need: in a long table a column can widen as rows
-  scroll into view.
+- CodeMirror draws only the lines near the viewport, so a table's columns are
+  sized apart from the rows drawn: every row of the table is laid out a second
+  time, off screen, when the table is first drawn and after an edit to it
+  settles, about 35 ms for a table of 200 rows.
+- CodeMirror also draws the lines holding the selection's ends when they lie
+  outside the viewport. The rendered view decorates those lines as well as the
+  visible ones; a heading drawn plain there would change height each time it
+  crossed the viewport's edge, and move the text beside it.
 - A caret beside a hidden table pipe belongs to one cell only by the side it
   is drawn on, so the rendered view sets that side on every caret it leaves
   there.
