@@ -81,10 +81,12 @@ automatic table layout over all the rows: each column's widest layout when
 they all fit the box, its narrowest when even those do not, and otherwise its
 narrowest plus a share of the room left in proportion to how much wider it
 could be. A column keeps its width whichever rows are drawn. A table is
-measured when it is first drawn, again once edits to it, an image loading in
-it or news of a cited file have settled for 400 ms, keeping its widths
-meanwhile, and again when the fonts change; a new width of the box shares the
-room out again without measuring. The syntax hidden after each cell is a cell
+measured while the view is still — 200 ms with no scroll and no update — the
+nearest the viewport first, ahead of its drawing, or else when it is first
+drawn; again once edits to it, an image loading in it or news of a cited file
+have settled for 400 ms and the view is still, keeping its widths meanwhile
+and drawing them again only when a column moved; and again when the fonts
+change; a new width of the box shares the room out again without measuring. The syntax hidden after each cell is a cell
 of no width, a box the
 row's height at the start of the next cell: CodeMirror's hit-testing and
 vertical motion find a row's top and bottom, and which cell lies under the
@@ -466,8 +468,14 @@ which a drag's is and CodeMirror's own copy of a caret's line is not.
   is hard-wrapped.
 - CodeMirror draws only the lines near the viewport, so a table's columns are
   sized apart from the rows drawn: every row of the table is laid out a second
-  time, off screen, when the table is first drawn and after an edit to it
-  settles, about 35 ms for a table of 200 rows.
+  time, off screen, while the view is still or when the table is first drawn,
+  and after an edit to it settles, about 35 ms for a table of 200 rows.
+- `@codemirror/view` carries a patch, `patches/@codemirror__view@6.43.12.patch`.
+  Its tile builder made a new element for a table's box whenever the
+  viewport's edge moved into the table, and moved every drawn row into it,
+  which WebKit then styled and laid out again from scratch; patched, the new
+  box takes over the element its kept rows already sit in. An upgrade of
+  CodeMirror re-applies the patch or drops it.
 - CodeMirror also draws the lines holding the selection's ends when they lie
   outside the viewport. The rendered view decorates those lines as well as the
   visible ones; a heading drawn plain there would change height each time it

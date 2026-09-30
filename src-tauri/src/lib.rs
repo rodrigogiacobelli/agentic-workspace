@@ -98,6 +98,12 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         session::notice(&handle, format!("No tray icon: {e:#}. Closing the last window quits instead."));
     }
     windows::show_all(&handle);
+    // The protocol error kills a launch as its windows first draw; one still
+    // running ten seconds on has drawn them.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        gpu_survived();
+    });
 
     let active = handle.state::<AppState>().session.lock().active.clone();
     if let Some(id) = active {
@@ -166,17 +172,90 @@ fn on_close_requested(app: &AppHandle, label: &str) {
     }
 }
 
-/// WebKitGTK's DMA-BUF renderer trips a Wayland explicit-sync protocol error
-/// on the NVIDIA driver and the process dies before any window appears. Must
-/// run before GTK initialises; setting the variable yourself opts out.
+/// linuxdeploy's GTK hook exports `GDK_BACKEND=x11` inside an AppImage, so the
+/// installed build ran on XWayland. There the NVIDIA driver leaves WebKit's GPU
+/// renderer painting nothing, every scrolled frame was painted in software,
+/// and drags followed X11's rules rather than the ones a development build is
+/// checked under (`standards-linux-desktop`). On a Wayland session the
+/// AppImage takes Wayland, as a development build does. Must run before GTK
+/// initialises.
+fn run_appimage_on_wayland() {
+    let set = |name| std::env::var_os(name).is_some();
+    if set("APPDIR") && set("WAYLAND_DISPLAY") && std::env::var("GDK_BACKEND").as_deref() == Ok("x11") {
+        std::env::remove_var("GDK_BACKEND");
+    }
+}
+
+/// Where a launch on NVIDIA's GPU path keeps the driver's version until it has
+/// lived to draw its windows; set by `apply_webkit_workaround`.
+static GPU_PROBE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// WebKitGTK's DMA-BUF renderer composites and scrolls on the GPU; without it
+/// every scrolled frame is repainted in software. It fails two ways where the
+/// NVIDIA driver drives the screen (`standards-linux-desktop`). Under Wayland
+/// it trips an explicit-sync protocol error and the process dies before any
+/// window appears (WebKit bug 280210); NVIDIA's Wayland EGL library leaves
+/// explicit sync out when `__NV_DISABLE_EXPLICIT_SYNC` is set, and a library
+/// too old to read it dies all the same, so a launch that does not live to
+/// draw its windows turns the renderer off for every later launch on that
+/// driver version. Under XWayland the page paints nothing, so the renderer
+/// goes. A plain X11 session and every other driver keep WebKit's default.
+/// Must run before GTK initialises; setting `WEBKIT_DISABLE_DMABUF_RENDERER`
+/// yourself opts out.
 fn apply_webkit_workaround() {
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
+    let set = |name| std::env::var_os(name).is_some();
+    if set("WEBKIT_DISABLE_DMABUF_RENDERER") || !set("WAYLAND_DISPLAY") || !nvidia_drives_the_screen() {
         return;
     }
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        desktop::WEBKIT_VAR_SET.store(true, std::sync::atomic::Ordering::Relaxed);
+    let driver = std::fs::read_to_string("/sys/module/nvidia/version").unwrap_or_default();
+    let probe = data_home().join(desktop::APP_ID).join("gpu-probe");
+    let died = std::fs::read_to_string(&probe).is_ok_and(|v| v == driver);
+    let xwayland = std::env::var("GDK_BACKEND").is_ok_and(|b| b.starts_with("x11"));
+    let name = if xwayland || died {
+        "WEBKIT_DISABLE_DMABUF_RENDERER"
+    } else {
+        let _ = probe.parent().map(std::fs::create_dir_all);
+        let _ = std::fs::write(&probe, driver);
+        let _ = GPU_PROBE.set(probe);
+        "__NV_DISABLE_EXPLICIT_SYNC"
+    };
+    if !set(name) {
+        std::env::set_var(name, "1");
+        let _ = desktop::EXPORTED_VAR.set(name);
     }
+}
+
+/// The launch drew its windows, or a second launch reached it: the probe goes.
+fn gpu_survived() {
+    if let Some(probe) = GPU_PROBE.get() {
+        let _ = std::fs::remove_file(probe);
+    }
+}
+
+/// Whether an NVIDIA card drives a connected screen. A hybrid laptop loads the
+/// NVIDIA driver for its discrete card while the integrated one drives the
+/// panel, unless a program is offloaded onto the NVIDIA card.
+fn nvidia_drives_the_screen() -> bool {
+    if std::env::var_os("__NV_PRIME_RENDER_OFFLOAD").is_some() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else { return false };
+    entries.flatten().any(|e| {
+        let name = e.file_name();
+        // A connector is `card<N>-<output>`, beside its card's `card<N>`.
+        let Some((card, _)) = name.to_str().and_then(|n| n.split_once('-')) else { return false };
+        std::fs::read_to_string(e.path().join("status")).is_ok_and(|s| s.trim() == "connected")
+            && std::fs::read_link(format!("/sys/class/drm/{card}/device/driver")).is_ok_and(|d| d.ends_with("nvidia"))
+    })
+}
+
+/// `$XDG_DATA_HOME`, as `setup` later resolves it through Tauri: before GTK
+/// initialises there is no application to ask.
+fn data_home() -> std::path::PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"))
 }
 
 /// Auto-nice daemons match `node` by name and put it in the idle scheduling
@@ -226,6 +305,7 @@ pub fn run() {
     credentials::forget_inherited_env();
     restore_scheduling();
     set_application_id();
+    run_appimage_on_wayland();
     apply_webkit_workaround();
 
     tauri::Builder::default()
@@ -236,7 +316,10 @@ pub fn run() {
         // build instead of raising that one and exiting.
         .plugin(
             tauri_plugin_single_instance::Builder::new()
-                .callback(|app, _argv, _cwd| windows::raise_last_focused(app))
+                .callback(|app, _argv, _cwd| {
+                    gpu_survived();
+                    windows::raise_last_focused(app)
+                })
                 .dbus_id(desktop::APP_ID)
                 .build(),
         )
@@ -292,7 +375,6 @@ pub fn run() {
             session::view_remove,
             session::view_reorder,
             session::set_active_view,
-            desktop::gpu_accelerated,
             settings::get_settings,
             settings::update_settings,
             credentials::credentials_status,
@@ -389,6 +471,7 @@ pub fn run() {
         .expect("error while building Agentic Workspace")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                gpu_survived();
                 windows::save(app);
                 pty::shutdown(app);
             }

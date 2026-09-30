@@ -11,7 +11,7 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   scrollbars over app-drawn menus, the main loop a synchronous command blocks,
   the scheduling class an auto-nice daemon hands down, the identity a development
   build carries so it runs beside an installed one, the X11 backend an AppImage
-  runs on, the environment every child process is cleaned of, what WebKitGTK
+  is handed and gives back, the environment every child process is cleaned of, what WebKitGTK
   does to a drag and to Shift+Tab, the directories the asset protocol serves
   and the hidden ones it refuses, the AppImage strip flag and the Cargo version
   floor. Each fails silently when broken.
@@ -126,22 +126,62 @@ component: `settings.rs` defaults a development build to `CTRL+ALT+d` against an
 installed build's `CTRL+ALT+a`, since the second component to ask for a key that
 is taken is told it has none.
 
-## WebKitGTK needs the DMA-BUF renderer disabled on Wayland
+## WebKitGTK's DMA-BUF renderer fails two ways on NVIDIA
 
-WebKitGTK's DMA-BUF renderer trips a Wayland explicit-sync protocol error on
-the NVIDIA proprietary driver and kills the process before any window appears.
-The application sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` under Wayland unless
-the variable is already set.
+WebKitGTK's DMA-BUF renderer composites and scrolls the page on the GPU.
+Without it the page is not composited at all: scrolling repaints the whole
+scroller into a shared-memory bitmap every frame, and the UI process copies it
+and draws it with cairo. Measured on 2026-09-30 in a 2560 × 1040 window, that
+costs about 18 ms of processor time per scrolled frame against about 10 on the
+GPU, and the application's share of a core while scrolling halves with the
+renderer on.
 
-That variable decides how the terminal draws. With the DMA-BUF renderer off
-the webview has no GPU path, and a WebGL canvas is presented through software:
-xterm's WebGL renderer repaints its canvas for every character, and a keystroke
-then waits about a second to appear on screen. Nothing reports it — the addon
-loads, reports success, and draws correct output slowly. `desktop::gpu_accelerated`
-reads the variable back, and a terminal takes the DOM renderer whenever it is
-set. Read that before turning GPU drawing on anywhere: the measurement that
-finds this is keystroke-to-pixel, and every measurement of the round trip
-underneath it comes back at 6 ms whether the fault is present or not.
+Where the NVIDIA proprietary driver drives the screen, the renderer fails two
+ways:
+
+- **Under Wayland** it trips an explicit-sync protocol error (WebKit bug 280210)
+  and the process exits before any window appears, with `Error 71 (Protocol
+  error) dispatching to Wayland display` on its terminal. NVIDIA's Wayland EGL
+  library leaves explicit sync out when `__NV_DISABLE_EXPLICIT_SYNC=1` is set —
+  egl-wayland from 1.1.15 and egl-wayland2 read it — and the renderer then runs.
+- **Under XWayland** the page paints nothing: the window stays one flat colour
+  and no animation frame ever runs. A plain X11 session, with no Wayland
+  compositor underneath, has not been measured.
+
+`apply_webkit_workaround` in `src-tauri/src/lib.rs` acts only on a Wayland
+session where an NVIDIA card drives a connected screen: a connector under
+`/sys/class/drm` reads `connected` and its card's driver is `nvidia`. A hybrid
+laptop loads the NVIDIA driver for its discrete card while the integrated one
+drives the panel, so the driver being loaded decides nothing; a program
+offloaded onto the NVIDIA card carries `__NV_PRIME_RENDER_OFFLOAD` and counts.
+There it sets `__NV_DISABLE_EXPLICIT_SYNC=1`, or
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` under XWayland. A plain X11 session and
+every other driver get WebKit's default. A `WEBKIT_DISABLE_DMABUF_RENDERER`
+already in the environment opts out of all of it. WebKit reads `0` as
+"renderer on" and any other value as "renderer off".
+
+An EGL library too old to read `__NV_DISABLE_EXPLICIT_SYNC` — egl-wayland 1.1.14
+and earlier, with no egl-wayland2 — still dies of the protocol error, and does
+so before any window draws. A launch on the GPU path therefore writes the
+driver's version to `gpu-probe` in its data directory before GTK starts, and
+removes it once it has run ten seconds, when it exits, or when a second launch
+reaches it. A launch that finds the probe holding the running driver's version
+takes it as the last one's death and turns the renderer off instead, and keeps
+it off for that driver version; a new driver version tries the GPU again, and
+deleting the file does too.
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` also avoids the crash and saves nothing:
+it reads every composited frame back from the GPU.
+
+The renderer also decides how the terminal can draw. With it off, a WebGL
+canvas is presented through software: xterm's WebGL renderer repaints its
+canvas for every character, and a keystroke then waits about a second to
+appear on screen. Nothing reports it — the addon loads, reports success, and
+draws correct output slowly. A terminal therefore draws into the DOM unless the
+`terminalGpu` setting asks for WebGL. Read that before choosing WebGL anywhere:
+the measurement that finds this is keystroke-to-pixel, and every measurement of
+the round trip underneath it comes back at 6 ms whether the fault is present or
+not.
+
 ## WebKitGTK drops a CSS declaration it cannot parse
 
 A declaration whose value the engine does not understand is discarded, and
@@ -320,15 +360,24 @@ On KDE the assignment is readable directly:
 grep -A4 '\[<app-id>\]' ~/.config/kglobalshortcutsrc
 ```
 
-## The AppImage runs under X11
+## The AppImage is handed X11 and gives it back
 
-linuxdeploy's GTK hook exports `GDK_BACKEND=x11` inside the AppImage, so the
-installed application runs on XWayland while a development build runs on
-Wayland. Nothing on screen says which. The two backends have different drag
-stacks — what reaches the page mid-drag, when a drop is cancelled, whether a
-key pressed during a drag is seen — so a drag behaviour checked on a
-development build is checked on Wayland only, and has to be checked again on
-an AppImage build.
+linuxdeploy's GTK hook exports `GDK_BACKEND=x11` inside the AppImage, citing
+Tauri issue 8541, a crash on the Wayland backend. On XWayland the NVIDIA driver
+leaves WebKit's GPU renderer painting nothing, so the installed application
+scrolled on the software path, and its drags followed X11's rules while a
+development build was checked under Wayland's. Nothing on screen says which
+backend runs.
+
+`run_appimage_on_wayland` in `src-tauri/src/lib.rs` removes the hook's value
+before GTK starts whenever `APPDIR` and `WAYLAND_DISPLAY` are both set, so on a
+Wayland session the AppImage runs on Wayland like a development build, and a
+drag behaviour checked on one holds for the other. On an X11 session it runs on
+X11. The crash the hook guards against comes from the bundle's own
+`libwayland-client` and `libwayland-egl` meeting a host that differs from the
+build host. An AppImage built on this machine drew both windows on Wayland
+with the GPU renderer on 2026-09-30; one built elsewhere and run here, or built
+here and run on another distribution, has not been checked.
 
 ## A child process runs in the user's environment
 
@@ -340,8 +389,8 @@ terminal inherits all of it and loads the bundle's libraries in place of the
 system's, or opens under X11. `desktop::clean_child_env` removes those
 variables and the bundle's entries from those search paths — the hook's own
 leading `/usr/share` in `XDG_DATA_DIRS` included — when `APPDIR` is set, and
-removes `WEBKIT_DISABLE_DMABUF_RENDERER` whenever the application set it
-itself. Every child the application starts goes through it: shells, git,
+removes the renderer variable `apply_webkit_workaround` exported whenever the
+application set it itself. Every child the application starts goes through it: shells, git,
 ssh and ssh-keygen, `gio` and `rg`. The binary needs none of those variables to
 run again as a helper, since its RUNPATH finds every bundled library.
 

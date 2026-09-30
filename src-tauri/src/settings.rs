@@ -49,8 +49,7 @@ pub struct Settings {
     /// the desktop's own terminal would start.
     pub terminal_shell: String,
     /// Which renderer a terminal draws with: `auto`, `webgl` or `dom`. `auto`
-    /// takes WebGL only where the webview composites on the GPU — see
-    /// `desktop::gpu_accelerated`.
+    /// draws into the DOM — see `useWebgl` in `src/terminals.ts`.
     pub terminal_gpu: String,
     /// Where each docked mode's panels sit around its working area: one dock
     /// tree per mode, `{ editor, scm }`, as the frontend lays them out and

@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 /// The one name every desktop surface keys off: the desktop entry's filename,
 /// its `Icon=` and `StartupWMClass`, the installed icon files, the Wayland
@@ -120,23 +120,9 @@ fn entry_contents(exec: &str) -> String {
     )
 }
 
-/// Whether the webview composites through the GPU.
-///
-/// `apply_webkit_workaround` turns WebKit's DMA-BUF renderer off on Wayland,
-/// because leaving it on is a protocol error on the NVIDIA driver
-/// (`standards-linux-desktop`). With it off, a WebGL canvas is presented
-/// through software, and xterm's WebGL renderer — which repaints the canvas
-/// for every character — becomes far slower than drawing the same cells into
-/// the DOM. Slow enough to stall typing for about a second. The terminal asks
-/// this before choosing a renderer.
-#[tauri::command]
-pub fn gpu_accelerated() -> bool {
-    std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-}
-
-/// Set when the application exported `WEBKIT_DISABLE_DMABUF_RENDERER` itself,
-/// so its children do not inherit a variable the user never set.
-pub static WEBKIT_VAR_SET: AtomicBool = AtomicBool::new(false);
+/// The renderer variable `apply_webkit_workaround` exported, if any, so the
+/// application's children do not inherit a variable the user never set.
+pub static EXPORTED_VAR: OnceLock<&'static str> = OnceLock::new();
 
 /// What an AppImage's AppRun and its GTK hook export, overwriting any value
 /// the user had, so the bundle finds its own Python, GIO modules and GTK
@@ -203,10 +189,10 @@ impl ChildEnv for portable_pty::CommandBuilder {
 /// Python in place of their own, and a GUI program started from a terminal
 /// would run under X11 (CRED-06). The binary needs none of it to start again:
 /// its RUNPATH finds every bundled library. `APPDIR` marks an AppImage run;
-/// without it only the WebKit variable goes.
+/// without it only the renderer variable goes.
 pub fn clean_child_env(cmd: &mut impl ChildEnv) {
-    if WEBKIT_VAR_SET.load(Ordering::Relaxed) {
-        cmd.remove_var("WEBKIT_DISABLE_DMABUF_RENDERER");
+    if let Some(name) = EXPORTED_VAR.get() {
+        cmd.remove_var(name);
     }
     let Some(appdir) = std::env::var_os("APPDIR").map(PathBuf::from).filter(|d| d.is_absolute()) else { return };
     for name in APPIMAGE_VARS {

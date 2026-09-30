@@ -41,10 +41,9 @@ decided the shape of the answer:
   body stays on the direct path up to 8192. The view refuses to hand a message
   to the terminal until every earlier one has arrived, so one message on the
   slower path holds up every message behind it.
-- **A WebGL canvas needs a GPU path to be worth having.** WebKitGTK's DMA-BUF
-  renderer is off on every Wayland session here, which
-  `standards-linux-desktop` requires; without it the canvas is presented
-  through software.
+- **A WebGL canvas needs a GPU path to be worth having.** Without WebKitGTK's
+  DMA-BUF renderer the canvas is presented through software
+  (`standards-linux-desktop`).
 
 ## Decision
 
@@ -67,11 +66,13 @@ taking bytes from the pseudoterminal past 100 000 outstanding characters and
 resumes below 5000, so the kernel's buffer fills and the writing program
 blocks.
 
-A terminal **draws into the DOM unless `desktop::gpu_accelerated` reports that
-the webview reaches the GPU**, which it decides by reading back the variable
-`standards-linux-desktop` sets. A setting overrides the choice, and a WebGL
-context that fails or is lost drops every later terminal to the DOM for the
-life of the process.
+A terminal **draws into the DOM unless the `terminalGpu` setting asks for
+WebGL**. Until 2026-09-30 `auto` took WebGL wherever the webview reached the
+GPU; that day the application turned GPU compositing on for NVIDIA under
+Wayland and for every other driver, and WebGL's keystroke-to-pixel latency on
+that path has not been measured, so `auto` draws into the DOM. A WebGL context
+that fails or is lost drops every later terminal to the DOM for the life of
+the process.
 
 ## Rationale
 
@@ -130,7 +131,7 @@ life of the process.
   past 6000 bytes of output puts terminal traffic back on the fetch path.
 - **The acknowledgement size stays at or below the low-water mark.** A larger
   one leaves the reader parked with an acknowledgement that never arrives.
-- **GPU drawing is asked for, not assumed.** A terminal reads
-  `desktop::gpu_accelerated` before choosing, and the answer is settled before
-  the emulator opens, so one terminal never draws its first frame with one
-  renderer and the rest with another.
+- **GPU drawing is asked for, not assumed.** A terminal reads the setting
+  before choosing, and the answer is settled before the emulator opens, so one
+  terminal never draws its first frame with one renderer and the rest with
+  another.

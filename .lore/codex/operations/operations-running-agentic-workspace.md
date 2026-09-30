@@ -140,7 +140,8 @@ deb, `webkit2gtk4.1`, `libayatana-appindicator-gtk3` and `openssh-clients` for
 rpm, all in `src-tauri/tauri.conf.json`. The AppImage resolves no library from
 the host: it carries WebKitGTK, GTK and their dependencies inside the bundle,
 and runs the host's `git`, `ssh`, `ssh-keygen` and the other binaries above.
-Its GTK hook runs it under X11 (`standards-linux-desktop`).
+Its GTK hook asks for X11, and the application takes Wayland back on a Wayland
+session (`standards-linux-desktop`).
 
 ## Where the app keeps its state
 
@@ -157,7 +158,13 @@ Each entry below is one per build.
 | `drafts/` | `files::save_draft` | unsaved editor buffers, one file per document |
 | `themes/` | `themes::import_themes` | imported VS Code colour themes |
 
-Each of those writers puts a temporary file beside the target and renames it, so
+`gpu-probe` appears only where NVIDIA drives the screen under Wayland. It holds
+the driver's version from before GTK starts until the launch has drawn its
+windows, and it stays behind after a launch that died of the explicit-sync
+error, keeping the renderer off for that driver version
+(`standards-linux-desktop`).
+
+Each of the table's writers puts a temporary file beside the target and renames it, so
 an interrupted write leaves the previous contents intact. `session::quit` saves
 the session and the window geometry on the way out, and a thread started in
 `setup` publishes the session and saves the window geometry every 30 seconds,
@@ -412,11 +419,17 @@ assignment and may alter it; `standards-linux-desktop` carries the
 launched from carries a Wayland protocol error.** WebKitGTK's DMA-BUF renderer
 trips a Wayland explicit-sync protocol error on the NVIDIA proprietary driver.
 `apply_webkit_workaround` in `src-tauri/src/lib.rs` sets
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` when `WAYLAND_DISPLAY` is present and the
-variable is not already in the environment. A variable that is already set is an
-opt-out, so a shell profile or a desktop entry exporting
-`WEBKIT_DISABLE_DMABUF_RENDERER=0` reinstates the crash. Clear it, or set it to
-`1` explicitly:
+`__NV_DISABLE_EXPLICIT_SYNC=1` where NVIDIA drives the screen under Wayland,
+which NVIDIA's Wayland EGL library reads from egl-wayland 1.1.15 on;
+egl-wayland 1.1.14 uses explicit sync and ignores it. The launch that dies of
+it leaves `gpu-probe` in the data directory, and the next launch on the same
+driver version starts on the software path by itself. Launch once more. A
+`WEBKIT_DISABLE_DMABUF_RENDERER` already in the environment opts out of the
+workaround, so on NVIDIA a shell profile or a desktop entry exporting
+`WEBKIT_DISABLE_DMABUF_RENDERER=0` reinstates the crash under Wayland, and
+gives a window that paints nothing under XWayland. Setting it to `1` puts the
+page back on the software path, which starts on every driver and scrolls at
+twice the processor cost:
 
 ```fish
 set -x WEBKIT_DISABLE_DMABUF_RENDERER 1

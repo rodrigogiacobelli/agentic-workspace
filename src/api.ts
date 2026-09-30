@@ -140,7 +140,6 @@ export const api = {
   terminalAttach: (id: string, cols: number, rows: number, onOutput: Channel<OutputChunk>) =>
     invoke<ArrayBuffer>("terminal_attach", { id, cols, rows, onOutput }),
   terminalDetach: (id: string) => invoke<void>("terminal_detach", { id }),
-  gpuAccelerated: () => invoke<boolean>("gpu_accelerated"),
   terminalAck: (id: string, chars: number) => invoke<void>("terminal_ack", { id, chars }),
   terminalWrite: (id: string, data: string) => invoke<void>("terminal_write", { id, data }),
   terminalResize: (id: string, cols: number, rows: number) =>

@@ -1,0 +1,98 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 33ce13edd738442db3ce382dcf8a87f0648b7f81..95066e4aea76c9d82f54cc5e77c07c02b2e696c4 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -2663,8 +2663,44 @@ class TileUpdate {
+         }
+         if (this.builder.curLine)
+             this.builder.endLine();
++        this.adoptWrappers(this.builder.root, null);
+         return this.builder.root;
+     }
++    // A block wrapper built afresh around lines kept from the old tree
++    // takes over the DOM element those lines already sit in, when that
++    // element belongs to an equal old wrapper nothing else reused.
++    // Otherwise syncing moves every kept line into a new element, and
++    // the browser styles and lays each one out again from scratch.
++    adoptWrappers(parent, owned) {
++        if (!owned) {
++            owned = new Set;
++            let collect = (tile) => {
++                for (let ch of tile.children)
++                    if (ch instanceof BlockWrapperTile) {
++                        owned.add(ch.dom);
++                        collect(ch);
++                    }
++            };
++            collect(parent);
++        }
++        for (let tile of parent.children) {
++            if (!(tile instanceof BlockWrapperTile))
++                continue;
++            if (!tile.dom.parentNode)
++                for (let child of tile.children) {
++                    if (this.cache.reused.get(child) != 1 /* Reused.Full */)
++                        continue;
++                    let dom = child.dom.parentNode, old = dom && Tile.get(dom);
++                    if (old instanceof BlockWrapperTile && !owned.has(dom) && !this.cache.reused.has(old) && old.wrapper.eq(tile.wrapper)) {
++                        owned.add(dom);
++                        this.cache.reused.set(old, 2 /* Reused.DOM */);
++                        tile.setDOM(dom);
++                    }
++                    break;
++                }
++            this.adoptWrappers(tile, owned);
++        }
++    }
+     preserve(length, incStart, incEnd) {
+         let activeMarks = getMarks(this.old), openMarks = this.openMarks;
+         this.old.advance(length, incEnd ? 1 : -1, {
+diff --git a/dist/index.js b/dist/index.js
+index e4718ac9294dd51740fc9f3095da45e777265505..7f12a498ecb573880471ca3e2815d2d34c468292 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -2659,8 +2659,44 @@ class TileUpdate {
+         }
+         if (this.builder.curLine)
+             this.builder.endLine();
++        this.adoptWrappers(this.builder.root, null);
+         return this.builder.root;
+     }
++    // A block wrapper built afresh around lines kept from the old tree
++    // takes over the DOM element those lines already sit in, when that
++    // element belongs to an equal old wrapper nothing else reused.
++    // Otherwise syncing moves every kept line into a new element, and
++    // the browser styles and lays each one out again from scratch.
++    adoptWrappers(parent, owned) {
++        if (!owned) {
++            owned = new Set;
++            let collect = (tile) => {
++                for (let ch of tile.children)
++                    if (ch instanceof BlockWrapperTile) {
++                        owned.add(ch.dom);
++                        collect(ch);
++                    }
++            };
++            collect(parent);
++        }
++        for (let tile of parent.children) {
++            if (!(tile instanceof BlockWrapperTile))
++                continue;
++            if (!tile.dom.parentNode)
++                for (let child of tile.children) {
++                    if (this.cache.reused.get(child) != 1 /* Reused.Full */)
++                        continue;
++                    let dom = child.dom.parentNode, old = dom && Tile.get(dom);
++                    if (old instanceof BlockWrapperTile && !owned.has(dom) && !this.cache.reused.has(old) && old.wrapper.eq(tile.wrapper)) {
++                        owned.add(dom);
++                        this.cache.reused.set(old, 2 /* Reused.DOM */);
++                        tile.setDOM(dom);
++                    }
++                    break;
++                }
++            this.adoptWrappers(tile, owned);
++        }
++    }
+     preserve(length, incStart, incEnd) {
+         let activeMarks = getMarks(this.old), openMarks = this.openMarks;
+         this.old.advance(length, incEnd ? 1 : -1, {

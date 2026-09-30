@@ -706,12 +706,19 @@ const redrawColumns = StateEffect.define<null>();
 /** How long edits to a table, or news of what it draws, settle before its columns are measured again. */
 const SETTLE_MS = 400;
 
+/** How long the view stays still — no scrolling, no update — before a table is measured ahead of its drawing. */
+const STILL_MS = 200;
+
 /**
  * A table's columns over all its rows: each one's narrowest and widest layout
  * in px, padding included, and what its rows draw beside the cells — a
- * quote's bar.
+ * quote's bar. `stale` while edits or news are settling, `due` once they have.
  */
-interface Measured { from: number; to: number; min: number[]; max: number[]; beside: number; stale: boolean }
+interface Measured { from: number; to: number; min: number[]; max: number[]; beside: number; stale: boolean; due?: boolean }
+
+function sameColumns(a: Measured, b: Measured): boolean {
+  return a.beside === b.beside && a.min.join() === b.min.join() && a.max.join() === b.max.join();
+}
 
 /**
  * The widths columns take in a box `box` px wide, as CSS's automatic table
@@ -760,10 +767,10 @@ function marked(node: Node, active: readonly Decoration[]): Node {
  * page's own styles, which gives each column's narrowest and widest layout;
  * every drawn cell is then held at its column's width (`share`) with an equal
  * `min-width` and `max-width`, which WebKitGTK honours on a table cell. A
- * table is measured when it is first drawn; again when edits to it, an image
- * loading in it or a cited file's news settle, keeping its widths meanwhile;
- * and whenever the fonts change. A change of the box's width only shares the
- * room out again.
+ * table is measured while the view is still, ahead of its drawing, or else
+ * when it is first drawn; again when edits to it, an image loading in it or a
+ * cited file's news settle, keeping its widths meanwhile; and whenever the
+ * fonts change. A change of the box's width only shares the room out again.
  */
 class TableColumns {
   /** Each measured table, by where its syntax node starts. */
@@ -777,12 +784,21 @@ class TableColumns {
   private readonly loading = new Set<string>();
   private timer = 0;
   private frame = 0;
+  private still = 0;
   private readonly resize: ResizeObserver;
 
   constructor(private readonly view: EditorView, private readonly ctx: PreviewContext) {
     this.resize = new ResizeObserver((entries) => this.resized(entries[entries.length - 1].contentRect.width));
     this.resize.observe(view.contentDOM);
+    view.scrollDOM.addEventListener("scroll", this.moved, { passive: true });
+    this.moved();
   }
+
+  /** The view scrolled or updated: measuring ahead waits until it is still again. */
+  readonly moved = (): void => {
+    clearTimeout(this.still);
+    this.still = window.setTimeout(() => this.ahead(), STILL_MS);
+  };
 
   /** The widths `table`'s columns are drawn at, measuring it first when it has no measure; none while the view has no layout. */
   widths(table: SyntaxNode, lay: Layout): number[] | undefined {
@@ -814,17 +830,46 @@ class TableColumns {
 
   destroy(): void {
     this.resize.disconnect();
+    this.view.scrollDOM.removeEventListener("scroll", this.moved);
     clearTimeout(this.timer);
+    clearTimeout(this.still);
     cancelAnimationFrame(this.frame);
   }
 
-  /** Measures the stale tables again once things settle: each as it is next drawn. */
+  /** Measures the stale tables again once things settle, ahead of their drawing. */
   private settle(): void {
     clearTimeout(this.timer);
     this.timer = window.setTimeout(() => {
-      for (const [from, m] of this.tables) if (m.stale) this.tables.delete(from);
-      this.view.dispatch({ effects: redrawColumns.of(null) });
+      for (const m of this.tables.values()) if (m.stale) m.due = true;
+      this.moved();
     }, SETTLE_MS);
+  }
+
+  /**
+   * Measures one table while the view is still, then waits for stillness
+   * again: the nearest the viewport with no measure, with settled edits or
+   * news, or cut short by a parse. A measure lays every row out twice, which in
+   * the frame that draws a table stalls the scroll under way; ahead of it, the
+   * drawing finds the widths ready. Only a measure that moves a column draws
+   * them again.
+   */
+  private ahead(): void {
+    const { state, viewport } = this.view;
+    const lay = state.field(blockField).layout;
+    const tree = syntaxTree(state);
+    const away = (t: { from: number; to: number }) => Math.max(0, viewport.from - t.to, t.from - viewport.to);
+    for (const t of [...lay.tables].sort((a, b) => away(a) - away(b))) {
+      let table: SyntaxNode | null = tree.resolveInner(t.to, -1);
+      while (table && table.name !== "Table") table = table.parent;
+      if (!table) continue;
+      const old = this.tables.get(table.from);
+      if (old && (old.stale ? !old.due : old.to === table.to)) continue;
+      const next = this.measure(table, lay);
+      if (!next) return;
+      if (!old || !sameColumns(old, next)) this.view.dispatch({ effects: redrawColumns.of(null) });
+      this.moved();
+      return;
+    }
   }
 
   /**
@@ -1281,6 +1326,7 @@ export function livePreview(ctx: PreviewContext): Extension {
         ({ decorations: this.decorations, atomic: this.atomic, cells: this.cells } = this.draw(view));
       }
       update(u: ViewUpdate) {
+        this.columns.moved();
         const effects = u.transactions.flatMap((tr) => tr.effects);
         const refreshed = effects.some((e) => e.is(refreshPreview));
         if (u.docChanged) this.columns.map(u.changes);

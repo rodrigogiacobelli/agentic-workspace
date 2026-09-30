@@ -115,7 +115,7 @@ export async function mount(id: string, container: HTMLElement): Promise<void> {
     // Settled before the terminal is opened, so it never draws a frame with
     // one renderer and the rest with another. The WebGL renderer's module is
     // fetched only by a terminal that draws with it.
-    const webgl = useWebgl(settings.get()?.terminalGpu, await gpuAccelerated())
+    const webgl = useWebgl(settings.get()?.terminalGpu)
       ? (await import("@xterm/addon-webgl").catch(() => null))?.WebglAddon
       : undefined;
     // The container moved on to another tab while this one waited; this tab
@@ -225,31 +225,18 @@ function create(id: string): Instance {
   return inst;
 }
 
-/** Whether the webview composites on the GPU. Asked once; every terminal that
- * follows waits on the same answer. */
-let gpu: Promise<boolean> | null = null;
-function gpuAccelerated(): Promise<boolean> {
-  if (!gpu) gpu = api.gpuAccelerated().catch(() => false);
-  return gpu;
-}
-
 /** Set when WebGL has failed once. xterm cannot be asked twice in one process
  * without the same failure, so every later terminal draws into the DOM. */
 let webglBroken = false;
 
-/** Which renderer this terminal draws with.
- *
- * WebGL is the faster of the two only where the webview reaches the GPU. Where
- * it does not — the NVIDIA workaround turns WebKit's DMA-BUF renderer off, and
- * this application does that on every Wayland session — the canvas is
- * presented through software, and repainting it for each character costs far
- * more than writing the same cells into the DOM: enough to hold a keystroke
- * for about a second. `auto` is what decides; the setting overrides it. */
-function useWebgl(setting: string | undefined, accelerated: boolean): boolean {
-  if (webglBroken) return false;
-  if (setting === "webgl") return true;
-  if (setting === "dom") return false;
-  return accelerated;
+/** Which renderer this terminal draws with: WebGL only when the setting asks
+ * for it. Where the webview cannot reach the GPU — WebKit's DMA-BUF renderer
+ * off, as on NVIDIA under X11 — a WebGL canvas is presented through software, and
+ * repainting it for each character held a keystroke for about a second. Where
+ * it can, WebGL's keystroke-to-pixel latency has not been measured, so `auto`
+ * draws into the DOM either way. */
+function useWebgl(setting: string | undefined): boolean {
+  return !webglBroken && setting === "webgl";
 }
 
 function loadWebgl(term: Terminal, Addon: typeof WebglAddon): void {
