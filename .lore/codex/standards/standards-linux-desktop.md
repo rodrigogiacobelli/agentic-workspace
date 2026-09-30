@@ -30,6 +30,9 @@ binds:
   - src/dropRoute.ts
   - src-tauri/tauri.conf.json
   - src-tauri/src/tree.rs
+  - src/styles.css
+rites:
+  - check-layering
 ---
 
 # Linux desktop standard
@@ -276,6 +279,23 @@ Layering is one scale of custom properties at the top of the stylesheet, from
 `--z-drop` to `--z-tooltip`, and every floating layer sits above the window's
 own resize band: the band is invisible but takes clicks, so a menu opened
 against the edge of the screen would otherwise have five unclickable pixels.
+
+The scale holds only if nothing else competes with it. In the page's root
+stacking context a z-index at or above `--z-drop` is written `var(--z-*)`;
+anything lower stays local. Libraries do not follow the scale, and their
+numbers arrive at runtime in stylesheets this one never shows: CodeMirror's
+theme sets its panels at 300, its tooltips at 500 and its gutters at 200, and
+xterm's stylesheet sets its helpers, decorations and scrollbar from 5 to 11.
+Nothing reports a collision. CodeMirror's panels at 300 drew the rich view's
+formatting toolbar over every menu opened across it, and took the menu's
+clicks. Each library number is taken off a layer when its element overlaps
+nothing (`.cm-panels` gets `z-index: auto`), put on the scale when it floats
+above the page (`.cm-tooltip` gets `var(--z-tooltip)`), or kept inside its host
+by a stacking context (`.terminal-host` isolates xterm; CodeMirror's scroller
+already holds its gutters). The `check-layering` rite audits every stylesheet
+the page loads against this rule and probes each floating layer over each
+library surface; run it when a floating layer, a library or a library's
+extension is added.
 
 ## An auto-nice daemon demotes the whole application
 

@@ -1,0 +1,97 @@
+id: check-layering
+title: Check that every floating layer is drawn above whatever it opens over
+summary: Audit the z-index every stylesheet sets, the libraries' injected ones included, against the page's layering scale, then open each floating layer over each library surface and check the layer is topmost across its whole box.
+trigger: >-
+  A menu, dialog, tooltip or notice is drawn beneath something, or a click on
+  it lands on what lies underneath. Also before shipping a change that adds a
+  floating layer, a CodeMirror panel, tooltip or extension, an xterm addon, or
+  any library's stylesheet.
+
+nodes:
+  - id: start-headless
+    use: run-the-app-headless
+    then: open-every-surface
+
+  - id: open-every-surface
+    do: >-
+      Put every surface a library draws on screen before auditing, since an
+      element that is not drawn is not checked: a document in rich mode, whose
+      formatting toolbar is a CodeMirror panel; a document in source mode, which
+      has gutters; and a terminal in the Terminal window, through
+      `terminal_open` with `{workspaceId, cwd: null}`. Connect to the
+      inspector no sooner than fifteen seconds after launch.
+    then: audit-the-scale
+
+  - id: audit-the-scale
+    do: |
+      Evaluate this in both pages and read `flagged`:
+
+          (() => {
+            const floor = Number(getComputedStyle(document.documentElement).getPropertyValue("--z-drop"));
+            const context = (el) => { const cs = getComputedStyle(el); return (cs.zIndex !== "auto" && cs.position !== "static") || cs.position === "fixed" || cs.position === "sticky" || cs.isolation === "isolate" || cs.opacity !== "1" || cs.transform !== "none" || cs.filter !== "none" || cs.willChange !== "auto" || cs.mixBlendMode !== "normal" || /paint|layout|strict|content/.test(cs.contain); };
+            const inRoot = (el) => { let a = el.parentElement; while (a && a !== document.body && !context(a)) a = a.parentElement; return !a || a === document.body; };
+            const flagged = [];
+            const walk = (list, where) => { for (const r of list) {
+              const z = r.style?.zIndex;
+              if (z && /^-?\d+$/.test(z) && +z >= floor) {
+                let els = []; try { els = [...document.querySelectorAll(r.selectorText)]; } catch {}
+                const live = els.filter((e) => getComputedStyle(e).zIndex === z);
+                flagged.push({ z: +z, selector: r.selectorText, where, drawn: live.length, inRootContext: live.filter(inRoot).length });
+              }
+              if (r.cssRules) walk(r.cssRules, where);
+            } };
+            for (const s of document.styleSheets) walk(s.cssRules, s.href || "style element");
+            for (const s of document.adoptedStyleSheets || []) walk(s.cssRules, "adopted");
+            return JSON.stringify(flagged);
+          })()
+
+      A rule is flagged when it sets a raw number at or above `--z-drop`. The
+      page's own layers write `var(--z-*)` and are never flagged; CodeMirror
+      injects its theme as style elements and xterm's stylesheet is bundled, so
+      theirs are. Walk `cssRules` inside a style rule as well as inside a
+      grouping rule: WebKit gives every style rule a nested list.
+    then:
+      - if: a flagged rule has an element drawn in the root stacking context
+        goto: bring-under-scale
+      - if: every flagged rule's elements sit inside a stacking context of their own, or none is drawn
+        goto: probe-every-layer
+
+  - id: probe-every-layer
+    do: >-
+      Open each floating layer over each surface: the workspace switcher and
+      every other `.menu` over the rich toolbar, the source gutters and a
+      terminal; a dialog; the palette; a notice; a CodeMirror tooltip. For each,
+      sample `document.elementFromPoint` on a grid across the layer's
+      `getBoundingClientRect()` and check that every hit lies inside the
+      layer. Hit-testing follows the same stacking as painting, so a point
+      that misses the layer is also a click that misses it.
+    then:
+      - if: some sampled point is topmost outside the layer
+        goto: layer-beneath
+      - if: every point of every layer lands inside it
+        goto: layering-holds
+
+conclusions:
+  bring-under-scale:
+    audience: whoever is changing the stylesheet
+    response: >-
+      A library's layer competes with the page's scale in the root stacking
+      context. Take it off a layer when it overlaps nothing (CodeMirror's
+      panels get `z-index: auto`), put it on the scale when it floats above the
+      page (CodeMirror's tooltips get `var(--z-tooltip)`), or isolate its host
+      when every layer it has stays inside its box (`.terminal-host` isolates
+      xterm). Then audit again. `standards-linux-desktop` holds the rule.
+  layer-beneath:
+    audience: whoever is changing the stylesheet
+    response: >-
+      Name the element on top at the missed points and the stacking context it
+      sits in. An element of the page's own on a raw number goes on the scale;
+      a floating layer rendered inside a stacking context lower than its scale
+      value is moved out, into `document.body` as `src/components/Menu.tsx`
+      does, since no z-index lifts it above its own context.
+  layering-holds:
+    audience: the owner
+    response: >-
+      Every floating layer is drawn and clicked above whatever it opened over,
+      and no library number competes with the scale. Report the surfaces and
+      layers covered.

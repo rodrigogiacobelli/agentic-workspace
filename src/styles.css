@@ -356,7 +356,10 @@ main { flex: 1; display: flex; min-height: 0; }
 .tab-add { padding: 0 10px; color: var(--fg-dim); }
 .tab-rename { width: 140px; padding: 1px 4px; }
 
-.terminal-host { flex: 1; min-height: 0; position: relative; padding: 4px; }
+/* xterm stacks its own layers — helpers, decorations, its scrollbar — from
+   z-index 5 to 11, across the bottom of this stylesheet's scale and above the
+   window's resize band; isolated here, they stack inside the terminal only. */
+.terminal-host { flex: 1; min-height: 0; position: relative; padding: 4px; isolation: isolate; }
 .term { height: 100%; width: 100%; }
 
 .searchbar {
@@ -726,6 +729,13 @@ main { flex: 1; display: flex; min-height: 0; }
 .cm-lp-frontmatter input { width: 100%; font: inherit; background: transparent; border: 1px solid transparent; padding: 1px 4px; }
 .cm-lp-frontmatter input:hover, .cm-lp-frontmatter input:focus { border-color: var(--border); background: var(--bg-raised); }
 .cm-lp-frontmatter pre { margin: 0; font-family: var(--mono); font-size: 0.9em; color: var(--fg-dim); white-space: pre-wrap; }
+/* CodeMirror stacks its panels at z-index 300 and its tooltips at 500, over
+   this stylesheet's scale: a menu opened over the toolbar was drawn beneath it
+   and its clicks went to the toolbar. A panel sits beside the scroller, never
+   over the text, and needs no layer of its own; a tooltip takes the scale's.
+   Its gutters stack inside its scroller, which keeps them there. */
+.cm-editor .cm-panels { z-index: auto; }
+.cm-editor .cm-tooltip { z-index: var(--z-tooltip); }
 /* The formatting toolbar (RICH-10): a row of the rendered pane's own, so
    source mode has none. Its controls drop the borders a panel's fields wear;
    a pressed one says the selection already has its formatting. The row wraps
