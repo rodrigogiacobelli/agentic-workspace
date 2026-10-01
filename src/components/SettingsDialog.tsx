@@ -14,6 +14,9 @@ import { notify, report } from "../notice";
 interface Props {
   current: Settings;
   workspace: Workspace | undefined;
+  /** The root of the workspace's family, whose settings govern the
+   *  family's terminals (AGT-12, CRED-16). */
+  root: Workspace | undefined;
   onClose: () => void;
 }
 
@@ -34,7 +37,7 @@ const PAGES = [
  */
 let writes: Promise<void> = Promise.resolve();
 
-export function SettingsDialog({ current, workspace, onClose }: Props) {
+export function SettingsDialog({ current, workspace, root, onClose }: Props) {
   const [hotkey, setHotkey] = useState<HotkeyStatus | null>(null);
   // As stored, not as shown: a workspace page with no workspace to show opens
   // General, and stays remembered for when there is one again.
@@ -93,8 +96,8 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
       const imported = await api.importThemes(picked);
       await settings.reloadImported();
       bump((n) => n + 1);
-      // A report of what did not map stays until it is read; a clean import
-      // is a confirmation, and leaves by itself.
+      // A report of what did not map is a failure, one line per item; a
+      // clean import is a confirmation.
       for (const t of imported) {
         if (t.report.length) report(`Imported theme "${t.name}".\n${t.report.map((r) => `• ${r}`).join("\n")}`);
         else notify(`Imported theme "${t.name}". Everything mapped.`);
@@ -177,6 +180,7 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
             {toggle("Autosave", current.autosave, (v) => set({ autosave: v }))}
             {number("Autosave delay (ms)", current.autosaveDelayMs, (v) => set({ autosaveDelayMs: v }), 200, 60000, 100)}
             {number("Warn for assets above (MB)", current.assetWarnMb, (v) => set({ assetWarnMb: v }), 1, 1000)}
+            {toggle("Ask before moving files to the trash", current.confirmDelete, (v) => set({ confirmDelete: v }))}
             <label className="setting">
               <span>Asset links — what paste and drop write</span>
               <Dropdown
@@ -194,6 +198,14 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
             {number("Font size", current.terminalFontSize, (v) => set({ terminalFontSize: v }), 8, 32)}
             {number("Line height", current.terminalLineHeight, (v) => set({ terminalLineHeight: v }), 1, 2, 0.05)}
             {text("Shell", current.terminalShell, (v) => set({ terminalShell: v }), "$SHELL — applies to the next terminal")}
+            <label className="setting">
+              <span>New terminals open in</span>
+              <Dropdown
+                value={current.terminalOpenIn}
+                options={[{ id: "root", label: "The root workspace" }, { id: "workspace", label: "The workspace on screen" }]}
+                onChange={(id) => set({ terminalOpenIn: id as "root" | "workspace" })}
+              />
+            </label>
             <label className="setting">
               <span>Renderer — GPU drawing is slower where the webview cannot reach the GPU</span>
               <Dropdown
@@ -231,8 +243,12 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
         );
       case "credentials":
         return <CredentialsPage current={current} />;
-      case "workspace":
+      case "workspace": {
         if (!workspace) return null;
+        // A member's terminals are its family's, on the root: the root's
+        // setting governs their notifications, and this folder's value —
+        // shared with any other entry on it — reaches none of them (AGT-12).
+        const family = root && root.id !== workspace.id ? root : undefined;
         // Keyed by the workspace: another becoming active while the page is
         // open must not leave the last one's values in the fields.
         return (
@@ -241,18 +257,23 @@ export function SettingsDialog({ current, workspace, onClose }: Props) {
               <span>Theme for this workspace</span>
               <Dropdown value={wsSettings.theme ?? ""} options={[{ id: "", label: "Global theme" }, ...allThemes().map((t) => ({ id: t.id, label: t.name }))]} onChange={(id) => setWs({ theme: id || null })} />
             </label>
-            <label className="setting">
-              <span>Notifications</span>
-              <Dropdown
-                value={wsSettings.notifications === null ? "inherit" : wsSettings.notifications ? "on" : "off"}
-                options={[{ id: "inherit", label: "Follow the global setting" }, { id: "on", label: "On" }, { id: "off", label: "Off" }]}
-                onChange={(id) => setWs({ notifications: id === "inherit" ? null : id === "on" })}
-              />
-            </label>
+            {family ? (
+              <p className="settings-note">Desktop notifications for the shells of {family.name}'s family follow {family.name}'s setting.</p>
+            ) : (
+              <label className="setting">
+                <span>Notifications</span>
+                <Dropdown
+                  value={wsSettings.notifications === null ? "inherit" : wsSettings.notifications ? "on" : "off"}
+                  options={[{ id: "inherit", label: "Follow the global setting" }, { id: "on", label: "On" }, { id: "off", label: "Off" }]}
+                  onChange={(id) => setWs({ notifications: id === "inherit" ? null : id === "on" })}
+                />
+              </label>
+            )}
             {text("Clipboard folder (relative to the workspace)", wsSettings.clipboardDir ?? "", (v) => setWs({ clipboardDir: v || null }), "clipboard")}
-            <WorkspaceCredentials current={current} workspace={workspace} />
+            <WorkspaceCredentials current={current} workspace={workspace} family={family} />
           </Fragment>
         );
+      }
       default:
         return null;
     }

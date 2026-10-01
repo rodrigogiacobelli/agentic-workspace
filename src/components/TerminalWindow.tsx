@@ -3,7 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { actionFor } from "../hotkeys";
 import { modalOpen } from "../modal";
-import { pick } from "../modes";
+import { familyOf, familyRoot, memberHolding, pick } from "../modes";
 import { useDismiss } from "../motion";
 import { report } from "../notice";
 import * as terminals from "../terminals";
@@ -26,37 +26,58 @@ function labelOf(tab: TerminalTab): string {
   return tab.name ?? (terminals.get(tab.id)?.title || basename(tab.cwd));
 }
 
+/** `path` from the folder `root`: `.`, `./sub`, or itself when outside. */
+function relative(root: string, path: string): string {
+  const r = root.replace(/\/+$/, "");
+  return path === r ? "." : path.startsWith(`${r}/`) ? `./${path.slice(r.length + 1)}` : path;
+}
+
+/** Where in the family a shell is, said after its tab's label: nothing in
+ *  the root's folder, a child's name in its folder, `⑂ name` in a worktree's
+ *  (TERM-19). The deepest member holding the directory says. */
+function placeOf(family: Workspace[], cwd: string): { member: Workspace | undefined; mark: string } {
+  const member = memberHolding(family, cwd);
+  const mark = !member ? "" : member.worktreeOf ? `⑂ ${member.name}` : member.childOf ? member.name : "";
+  return { member, mark };
+}
+
 export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
   const ws = session.workspaces.find((w) => w.id === session.active);
+  // Every member of a family shows its root's list: one list, one tab in
+  // front, whichever member is on screen (TERM-16).
+  const home = familyRoot(session.workspaces, ws);
   const host = useRef<HTMLDivElement>(null);
   const [, bump] = useState(0);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const shownRef = useRef<string | null>(null);
 
-  // The tab strip names the shown workspace's shells; a title from a
-  // terminal in another workspace changes nothing here.
+  // The tab strip names the shown family's shells; a title from a terminal
+  // of another family changes nothing here.
   useEffect(() => terminals.onTitles((id) => {
-    if (ws?.terminals.some((t) => t.id === id)) bump((n) => n + 1);
-  }), [ws]);
+    if (home?.terminals.some((t) => t.id === id)) bump((n) => n + 1);
+  }), [home]);
 
   // A path printed in a terminal is resolved against that terminal's working
-  // directory, then opened in the Workspace window at its line.
+  // directory, then opened in the Workspace window at its line, in the member
+  // of the terminal's family holding it: the one on screen when it does, else
+  // the deepest (TERM-24).
   useEffect(() => {
     terminals.setLinkHandler((terminalId, target) => {
       const owner = session.workspaces.find((w) => w.terminals.some((t) => t.id === terminalId));
       const tab = owner?.terminals.find((t) => t.id === terminalId);
       if (!owner || !tab) return;
-      const root = owner.path.replace(/\/+$/, "");
       let abs = target.path;
-      if (abs.startsWith("~/")) abs = `${root}/${abs.slice(2)}`;
+      if (abs.startsWith("~/")) abs = `${owner.path.replace(/\/+$/, "")}/${abs.slice(2)}`;
       else if (!abs.startsWith("/")) abs = `${tab.cwd.replace(/\/+$/, "")}/${abs}`;
       const parts: string[] = [];
       for (const p of abs.split("/")) { if (p === "..") parts.pop(); else if (p && p !== ".") parts.push(p); }
       abs = `/${parts.join("/")}`;
-      if (abs !== root && !abs.startsWith(`${root}/`)) { report(`${abs} is outside the workspace ${owner.name}`); return; }
+      const member = memberHolding(familyOf(session.workspaces, owner), abs, session.active);
+      if (!member) { report(`${abs} is in no workspace of ${owner.name}'s family`); return; }
+      const root = member.path.replace(/\/+$/, "");
       const rel = abs === root ? "" : abs.slice(root.length + 1);
-      void api.openAt({ workspaceId: owner.id, path: rel, line: target.line, column: target.column });
+      void api.openAt({ workspaceId: member.id, path: rel, line: target.line, column: target.column });
       void api.focusWindow("workspace");
     });
   }, [session]);
@@ -66,7 +87,7 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
     terminals.retain(new Set(session.workspaces.flatMap((w) => w.terminals.map((t) => t.id))));
   }, [session]);
 
-  const activeId = ws?.activeTerminal ?? null;
+  const activeId = home?.activeTerminal ?? null;
   useEffect(() => {
     const container = host.current;
     if (!container) return;
@@ -84,11 +105,11 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
   }, []);
 
   const cycle = useCallback((delta: number) => {
-    if (!ws || ws.terminals.length === 0) return;
-    const i = ws.terminals.findIndex((t) => t.id === ws.activeTerminal);
-    const next = ws.terminals[(i + delta + ws.terminals.length) % ws.terminals.length];
+    if (!ws || !home || home.terminals.length === 0) return;
+    const i = home.terminals.findIndex((t) => t.id === home.activeTerminal);
+    const next = home.terminals[(i + delta + home.terminals.length) % home.terminals.length];
     void api.setActiveTerminal(ws.id, next.id);
-  }, [ws]);
+  }, [ws, home]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -127,7 +148,7 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [ws, activeId, cycle, openSwitcher, openSettings]);
 
-  if (!ws) {
+  if (!ws || !home) {
     return <main className="empty">Add a folder to start.</main>;
   }
 
@@ -135,12 +156,14 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
     <main className="terminal-main">
       <TabStrip
         ws={ws}
+        home={home}
+        family={familyOf(session.workspaces, home)}
         renaming={renaming}
         onRename={(id) => setRenaming(id)}
         onRenamed={() => setRenaming(null)}
       />
       <div className="terminal-host" ref={host}>
-        {ws.terminals.length === 0 && (
+        {home.terminals.length === 0 && (
           <div className="empty">No terminals. Press Ctrl+Shift+T to open one.</div>
         )}
       </div>
@@ -153,36 +176,44 @@ export function TerminalWindow({ session, openSwitcher, openSettings }: Props) {
 
 /**
  * The status bar's facts for the Terminal window: the shell on screen, what
- * it runs, where, and how many others there are.
+ * it runs, where, and how many others there are — of the family on screen,
+ * whose root holds them. The directory reads from the member holding it,
+ * marked as its tab is (TERM-19).
  */
-export function TerminalFacts({ ws }: { ws: Workspace }) {
+export function TerminalFacts({ ws, session }: { ws: Workspace; session: Session }) {
   const [, bump] = useState(0);
-  const shown = ws.activeTerminal;
+  const home = familyRoot(session.workspaces, ws) ?? ws;
+  const shown = home.activeTerminal;
   useEffect(() => terminals.onTitles((id) => { if (id === shown) bump((n) => n + 1); }), [shown]);
-  const tab = ws.terminals.find((t) => t.id === shown);
-  const root = ws.path.replace(/\/+$/, "");
-  const cwd = tab ? (tab.cwd === root ? "." : tab.cwd.startsWith(`${root}/`) ? `./${tab.cwd.slice(root.length + 1)}` : tab.cwd) : null;
-  const waiting = ws.terminals.filter((t) => t.attention).length;
+  const tab = home.terminals.find((t) => t.id === shown);
+  const place = tab && placeOf(familyOf(session.workspaces, home), tab.cwd);
+  const cwd = tab && place ? `${place.mark ? `${place.mark} ` : ""}${relative(place.member?.path ?? home.path, tab.cwd)}` : null;
+  const waiting = home.terminals.filter((t) => t.attention).length;
   return (
     <>
       {tab && <span className="statusbar-mono">{terminals.get(tab.id)?.title || tab.name || "shell"}</span>}
       {cwd && <span className="statusbar-mono" title={tab?.cwd}>{cwd}</span>}
       <span>
-        {ws.terminals.length} tab{ws.terminals.length === 1 ? "" : "s"}
+        {home.terminals.length} tab{home.terminals.length === 1 ? "" : "s"}
         {waiting > 0 && ` · ${waiting} with output`}
       </span>
     </>
   );
 }
 
-function TabStrip({ ws, renaming, onRename, onRenamed }: {
+/** The family's tabs. Every call names `ws`, the member on screen: the
+ *  backend finds the family's list from it, and ＋ opens where it says. */
+function TabStrip({ ws, home, family, renaming, onRename, onRenamed }: {
   ws: Workspace;
+  home: Workspace;
+  family: Workspace[];
   renaming: string | null;
   onRename: (id: string) => void;
   onRenamed: () => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
-  const strip = useTabStrip(ws.activeTerminal, ws.terminals.length);
+  const strip = useTabStrip(home.activeTerminal, home.terminals.length);
+  const marks = new Map(home.terminals.map((t) => [t.id, placeOf(family, t.cwd).mark]));
 
   // A tab dragged along the strip lands in the slot under the pointer; off
   // the strip there is nowhere to land, and a release puts it back (TAB-15).
@@ -195,10 +226,10 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
     drop: (to) => ("order" in to ? api.reorderTerminals(ws.id, to.order).catch(report) : Promise.resolve()),
   });
   // The strip's tabs changing is a dropped tab's move arriving.
-  useLayoutEffect(settleTabDrag, [ws.terminals.map((t) => t.id).join("\n")]);
+  useLayoutEffect(settleTabDrag, [home.terminals.map((t) => t.id).join("\n")]);
 
   const restart = async (id: string) => {
-    const tab = ws.terminals.find((t) => t.id === id);
+    const tab = home.terminals.find((t) => t.id === id);
     if (!tab) return;
     const yes = await ask(`Restart the shell in “${labelOf(tab)}”? Whatever runs in it now stops.`, {
       title: "Restart shell",
@@ -212,11 +243,11 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
   return (
     <div className="tab-bar">
       <div className="tabs" ref={strip.ref} onWheel={strip.onWheel}>
-      {ws.terminals.map((tab) => (
+      {home.terminals.map((tab) => (
         <div
           key={tab.id}
           data-tab={tab.id}
-          className={`tab${tab.id === ws.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}`}
+          className={`tab${tab.id === home.activeTerminal ? " active" : ""}${tab.attention ? " attention" : ""}`}
           onPointerDown={drag}
           onClick={() => void api.setActiveTerminal(ws.id, tab.id)}
           onDoubleClick={() => onRename(tab.id)}
@@ -236,7 +267,10 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
               }}
             />
           ) : (
-            <span className="tab-label">{labelOf(tab)}</span>
+            <>
+              <span className="tab-label">{labelOf(tab)}</span>
+              {marks.get(tab.id) && <span className="tab-where">{marks.get(tab.id)}</span>}
+            </>
           )}
           <button className="tab-close" onClick={(e) => { e.stopPropagation(); void api.terminalClose(tab.id); }} title="Close (Ctrl+Shift+W)">×</button>
         </div>
@@ -245,7 +279,7 @@ function TabStrip({ ws, renaming, onRename, onRenamed }: {
       </div>
       <TabOverflow
         strip={strip}
-        entries={ws.terminals.map((t) => ({ id: t.id, label: labelOf(t), active: t.id === ws.activeTerminal }))}
+        entries={home.terminals.map((t) => ({ id: t.id, label: labelOf(t), active: t.id === home.activeTerminal }))}
         onPick={(id) => void api.setActiveTerminal(ws.id, id)}
       />
       <button className="tab-add" onClick={() => void api.terminalOpen(ws.id).catch(report)} title="New terminal (Ctrl+Shift+T)">＋</button>

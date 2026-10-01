@@ -1,5 +1,6 @@
 //! Session state: the workspace list, and the one function that publishes it.
 
+use crate::family;
 use crate::pty;
 use crate::state::{AppState, Area, DiffSpec, EditorGroup, EditorTab, Layout, Session, TerminalTab, Workspace};
 use crate::store;
@@ -7,7 +8,7 @@ use crate::tree;
 use crate::watch;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const EVENT_CHANGED: &str = "session-changed";
@@ -33,43 +34,35 @@ pub fn persist(app: &AppHandle) -> Session {
         .collect();
     let (snapshot, moved, served) = {
         let mut session = state.session.lock();
-        let mut attention = state.attention.lock();
-        let git = state.git.lock();
-        let active = session.active.clone();
-        // The open workspace on each repository, by its common git directory:
-        // the first in session order that is not a linked worktree.
-        let mut repositories: HashMap<PathBuf, String> = HashMap::new();
-        for ws in session.workspaces.iter() {
-            if let Some(common) = git.get(&ws.id).filter(|g| g.is_repo && !g.is_worktree).and_then(|g| g.common_dir.clone()) {
-                repositories.entry(common).or_insert_with(|| ws.id.clone());
+        family::normalise(&mut session);
+        // ADR-016's foreground: the active terminal of the family on screen,
+        // which its root holds (TERM-16).
+        let foreground = session.active.as_deref().and_then(|a| session.family_root(a)).and_then(|r| r.active_terminal.clone());
+        // A background terminal's output takes `attention` and `seen`
+        // (`agent::on_output`), so they are copied and let go before the
+        // loop, whose stat per workspace can wait on a slow mount (PERF-04).
+        let (attention, seen) = {
+            let mut attention = state.attention.lock();
+            // The tab on screen cannot need attention.
+            if let Some(t) = &foreground {
+                attention.remove(t);
             }
-        }
-        let mut foreground = None;
+            let mut seen = state.seen.lock();
+            seen.retain(|t| attention.contains(t));
+            (attention.clone(), seen.clone())
+        };
+        let git = state.git.lock();
         for ws in session.workspaces.iter_mut() {
             ws.ensure_groups();
             ws.available = ws.path.is_dir();
             ws.git = git.get(&ws.id).cloned();
-            ws.worktree_of = ws
-                .git
-                .as_ref()
-                .filter(|g| g.is_worktree)
-                .and_then(|g| g.common_dir.as_ref())
-                .and_then(|c| repositories.get(c))
-                .cloned();
-            // The tab on screen cannot need attention.
-            if active.as_deref() == Some(&ws.id) {
-                if let Some(t) = ws.active_terminal.as_deref() {
-                    attention.remove(t);
-                    foreground = Some(t.to_string());
-                }
-            }
             ws.attention = false;
             for tab in ws.terminals.iter_mut() {
                 if let Some(cwd) = cwds.get(&tab.id) {
                     tab.cwd = cwd.clone();
                 }
                 tab.attention = attention.contains(&tab.id);
-                ws.attention |= tab.attention;
+                ws.attention |= tab.attention && !seen.contains(&tab.id);
             }
         }
         let mut current = state.foreground.lock();
@@ -123,9 +116,9 @@ pub fn notice(app: &AppHandle, message: String) {
     }
 }
 
-/// A notice that dismisses itself, such as ssh asking for a touch of a
-/// security key. One no window heard is dropped rather than kept: it is
-/// stale by the time a window shows it.
+/// A notice that reports no failure, such as ssh asking for a touch of a
+/// security key, drawn in the neutral colour. One no window heard is dropped
+/// rather than kept: it is stale by the time a window shows it.
 pub fn inform(app: &AppHandle, message: String) {
     eprintln!("agentic-workspace: {message}");
     let _ = app.emit(EVENT_INFO, &message);
@@ -142,27 +135,52 @@ fn moved(path: &str, from: &str, to: &str) -> Option<String> {
         .map(|rest| format!("{to}{rest}"))
 }
 
-/// A file or directory moved inside the workspace: every open tab, recent file
-/// and view entry naming it names where it went instead, and the unsaved draft
-/// of each moved tab goes with it.
+/// A file or directory moved, from one absolute path to another: in every
+/// open workspace whose folder holds both — the one it was moved in, and any
+/// other on the same files, such as a repository inside a plain folder that is
+/// open on its own as well (TREE-26c) — every tab, recent file and view entry
+/// naming it names where it went instead, and the unsaved draft of each moved
+/// tab goes with it. A workspace the file left keeps its tabs on the old path,
+/// which show the file deleted.
 ///
 /// The session is the only record of what is open, so doing this here reaches
 /// tabs in every group of both working areas, whether or not one is on screen.
 /// A tab left on the old path would show the file as deleted the moment the
 /// watcher reported the directory.
-pub fn relocate(app: &AppHandle, workspace_id: &str, from: &str, to: &str) {
+pub fn relocate(app: &AppHandle, from: &Path, to: &Path) {
     if from == to {
         return;
     }
     let state = app.state::<AppState>();
     let mut session = state.session.lock();
-    let Some(ws) = session.workspace_mut(workspace_id) else { return };
+    let mut changed = false;
+    for ws in session.workspaces.iter_mut() {
+        let (Ok(old), Ok(new)) = (from.strip_prefix(&ws.path), to.strip_prefix(&ws.path)) else { continue };
+        if old.as_os_str().is_empty() || new.as_os_str().is_empty() {
+            continue;
+        }
+        changed |= relocate_in(&state, ws, &old.to_string_lossy(), &new.to_string_lossy());
+    }
+    drop(session);
+    if changed {
+        // The moved tabs are in new directories, and those are what the
+        // watcher has to be looking at now.
+        watch::sync(app);
+        publish(app);
+    }
+}
+
+/// Renames `from` to `to`, both relative to the workspace's folder, wherever
+/// the workspace names it. Answers whether anything did.
+fn relocate_in(state: &AppState, ws: &mut Workspace, from: &str, to: &str) -> bool {
     let root = ws.path.clone();
     let mut changed = false;
     for group in ws.editor.groups.iter_mut().chain(ws.review.groups.iter_mut()) {
         for tab in group.editors.iter_mut() {
             let Some(next) = moved(&tab.path, from, to) else { continue };
-            crate::files::move_draft(&state, &root.join(&tab.path), &root.join(&next));
+            // Drafts are filed by absolute path, so a second workspace on the
+            // same file finds its draft already moved.
+            crate::files::move_draft(state, &root.join(&tab.path), &root.join(&next));
             tab.path = next;
             changed = true;
         }
@@ -181,27 +199,25 @@ pub fn relocate(app: &AppHandle, workspace_id: &str, from: &str, to: &str) {
             }
         }
     }
-    // A renamed directory keeps whatever the tree had open under it; left
+    // A renamed directory keeps whatever the trees had open under it; left
     // alone, the old name stays expanded forever and the new one arrives shut.
-    for dir in ws.expanded.iter_mut() {
+    for dir in ws.expanded.iter_mut().chain(ws.views.iter_mut().flat_map(|v| v.expanded.iter_mut())) {
         if let Some(next) = moved(dir, from, to) {
             *dir = next;
             changed = true;
         }
     }
-    drop(session);
-    if changed {
-        // The moved tabs are in new directories, and those are what the
-        // watcher has to be looking at now.
-        watch::sync(app);
-        publish(app);
-    }
+    changed
 }
 
 /// Drops workspaces the selector opened from a worktree whose directory has
 /// since gone. Nothing the user named by hand is touched, and the one on
 /// screen is never pulled out from under them: a worktree removed while its
-/// workspace is active keeps the "unavailable" mark instead.
+/// workspace is active keeps the "unavailable" mark instead. Neither is one
+/// holding shells — a worktree that is a root of its own keeps its shells
+/// running in the deleted folder (assumption 28) — nor one with workspaces
+/// listed under it. A child is never pruned: the owner did not open it from
+/// a worktree list.
 ///
 /// This is the other half of detection. A worktree that appears is offered
 /// without being added; one that disappears takes its workspace with it.
@@ -213,46 +229,60 @@ pub fn prune_worktrees(app: &AppHandle) {
             .workspaces
             .iter()
             .filter(|w| w.from_worktree && !w.path.is_dir() && session.active.as_deref() != Some(&w.id))
+            .filter(|w| w.terminals.is_empty() && session.listed_under(&w.id).is_empty())
             .map(|w| (w.id.clone(), w.name.clone()))
             .collect()
     };
     for (id, name) in gone {
         notice(app, format!("Closed workspace \"{name}\": its worktree is gone."));
-        drop_workspace(app, &state, &id);
+        if let Err(e) = drop_workspace(app, &id) {
+            notice(app, format!("Could not open the next workspace: {e:#}"));
+        }
     }
 }
 
-/// Takes a workspace out of the session and hangs up its shells, putting the
-/// most recent one in its place if it was the one on screen.
-fn drop_workspace(app: &AppHandle, state: &AppState, id: &str) {
+/// Takes a workspace out of the session with everything listed under it — a
+/// root its family, a child its worktrees (WS-21) — and hangs up their
+/// shells. When the one on screen went with them, the most recently used
+/// workspace left takes its place, or the first left, or none.
+fn drop_workspace(app: &AppHandle, id: &str) -> Result<()> {
+    let state = app.state::<AppState>();
     let next = {
         let mut session = state.session.lock();
-        let Some(pos) = session.workspaces.iter().position(|w| w.id == id) else { return };
-        let removed = session.workspaces.remove(pos);
-        session.recent.retain(|r| r != id);
+        if session.workspace(id).is_none() {
+            anyhow::bail!("no workspace {id}");
+        }
+        let mut gone = session.listed_under(id);
+        gone.push(id.to_string());
         let mut ptys = state.ptys.lock();
-        for tab in &removed.terminals {
+        for tab in session.workspaces.iter().filter(|w| gone.contains(&w.id)).flat_map(|w| w.terminals.iter()) {
             if let Some(mut live) = ptys.remove(&tab.id) {
                 live.hangup();
             }
-            crate::agent::forget(state, &tab.id);
+            crate::agent::forget(&state, &tab.id);
         }
         drop(ptys);
-        state.git.lock().remove(id);
-        if session.active.as_deref() == Some(id) {
+        session.workspaces.retain(|w| !gone.contains(&w.id));
+        session.recent.retain(|r| !gone.contains(r));
+        let mut git = state.git.lock();
+        for g in &gone {
+            git.remove(g);
+        }
+        drop(git);
+        family::normalise(&mut session);
+        if session.active.as_ref().is_some_and(|a| gone.contains(a)) {
             session.active = None;
-            session.recent.first().cloned()
+            session.recent.first().or(session.workspaces.first().map(|w| &w.id)).cloned()
         } else {
             None
         }
     };
     match next {
-        Some(next) => {
-            if let Err(e) = activate(app, &next) {
-                notice(app, format!("Could not open the next workspace: {e:#}"));
-            }
+        Some(next) => activate(app, &next),
+        None => {
+            watch::sync(app);
+            Ok(())
         }
-        None => watch::sync(app),
     }
 }
 
@@ -271,11 +301,13 @@ pub fn reorder<T>(items: &mut Vec<T>, ids: &[String], id_of: impl Fn(&T) -> &str
 
 pub fn activate(app: &AppHandle, id: &str) -> Result<()> {
     let state = app.state::<AppState>();
-    // The shells start before the workspace is made active: any publish from
-    // then on may carry it, and the Terminal window attaches to the terminals
-    // of the active workspace as soon as it hears.
-    let spawned = pty::ensure_live(app, id);
-    {
+    // The family's shells start before the workspace is made active: any
+    // publish from then on may carry it, and the Terminal window attaches to
+    // the terminals of the family on screen as soon as it hears.
+    if let Some(message) = pty::ensure_live(app, id) {
+        notice(app, message);
+    }
+    let root = {
         let mut session = state.session.lock();
         if session.workspace(id).is_none() {
             anyhow::bail!("no workspace {id}");
@@ -283,10 +315,25 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<()> {
         session.active = Some(id.to_string());
         session.recent.retain(|r| r != id);
         session.recent.insert(0, id.to_string());
+        let root = session.family_root(id);
+        // Coming to any member is coming to the family's shells: its root's
+        // `●` clears (AGT-11), while each tab that printed keeps its own mark
+        // until it is in front.
+        if let Some(r) = root {
+            let attention = state.attention.lock();
+            state.seen.lock().extend(r.terminals.iter().filter(|t| attention.contains(&t.id)).map(|t| t.id.clone()));
+        }
+        root.map(|r| r.id.clone())
+    };
+    // A folder that became a repository inside the root's — `git init` — has
+    // no event at the root to announce it; a member coming on screen looks
+    // (WS-16). The caller's publish carries what the scan found.
+    if let Some(root) = root {
+        family::settle(app, family::scan(app, &root).pending);
     }
     // The shells started before the summary was in, so their terminal
-    // configuration was resolved from the files git keeps; once `persist`
-    // has matched the worktree to its repository, it is resolved again.
+    // configuration was resolved from the files git keeps; the summary can
+    // name another common directory, and the include patterns follow it.
     if crate::git::refresh_summary(app, id) {
         persist(app);
         crate::credentials::write_terminal_configs(app);
@@ -295,7 +342,7 @@ pub fn activate(app: &AppHandle, id: &str) -> Result<()> {
     // Every way a workspace comes to the screen — the selector, the tray, a
     // notification, the removal of the one before it — passes through here.
     watch::catch_up(app, id);
-    spawned
+    Ok(())
 }
 
 #[tauri::command]
@@ -308,11 +355,25 @@ pub fn take_notices(state: tauri::State<AppState>) -> Vec<String> {
     std::mem::take(&mut *state.notices.lock())
 }
 
-/// Opens a folder as a workspace, or switches to the one already on it.
-/// `from_worktree` marks a workspace the selector derived from a repository's
-/// worktree list rather than one the user named.
+/// Taken once, by the Workspace window: the Terminal window, which may load
+/// first, never asks, so it cannot take them where they go unseen (NTF-04).
 #[tauri::command]
-pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String, name: Option<String>, from_worktree: Option<bool>) -> Result<String, String> {
+pub fn take_set_aside(state: tauri::State<AppState>) -> Vec<String> {
+    std::mem::take(&mut *state.set_aside.lock())
+}
+
+/// Opens a folder as a workspace, or switches to the one already on it: a
+/// root on that folder, a child on it not counting (WS-14), or for a linked
+/// worktree any entry on it, since a worktree folder is open at most once
+/// (assumption 29). A root starts one shell and, as it comes on screen, lists
+/// the repositories inside its folder (WS-12). A linked worktree goes under
+/// a row on its repository — `opened_under` when that is one — and starts
+/// none (WS-25, TERM-20). `from_worktree` marks a workspace the selector
+/// derived from a repository's worktree list rather than one the user named.
+/// Off the main thread: it reads the disk, scans and runs git.
+#[tauri::command(async)]
+pub fn add_workspace(app: AppHandle, path: String, name: Option<String>, from_worktree: Option<bool>, opened_under: Option<String>) -> Result<String, String> {
+    let state = app.state::<AppState>();
     let path = PathBuf::from(path);
     let path = std::fs::canonicalize(&path)
         .with_context(|| format!("resolving {}", path.display()))
@@ -320,40 +381,34 @@ pub fn add_workspace(app: AppHandle, state: tauri::State<AppState>, path: String
     if !path.is_dir() {
         return Err(format!("{} is not a directory", path.display()));
     }
+    let repository = family::facts(&path);
+    let linked = repository.as_ref().is_some_and(|r| r.linked);
     let id = {
         let mut session = state.session.lock();
-        match session.workspaces.iter().find(|w| w.path == path) {
+        let existing = session
+            .workspaces
+            .iter()
+            .find(|w| w.path == path && (linked || (!family::is_child(&w.id) && w.worktree_of.is_none())));
+        match existing {
             Some(existing) => existing.id.clone(),
             None => {
-                let id = crate::state::new_id();
-                let terminal = crate::state::new_id();
                 let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
                     path.file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.display().to_string())
                 });
-                session.workspaces.push(Workspace {
-                    id: id.clone(),
-                    path: path.clone(),
-                    name,
-                    terminals: vec![TerminalTab { id: terminal.clone(), name: None, cwd: path.clone(), attention: false }],
-                    active_terminal: Some(terminal),
-                    editor: Area::default(),
-                    review: Area::default(),
-                    mode: "editor".into(),
-                    split_ratio: 0.5,
-                    editors: Vec::new(),
-                    active_editor: None,
-                    expanded: Vec::new(),
-                    recent_files: Vec::new(),
-                    views: Vec::new(),
-                    active_view: None,
-                    available: true,
-                    attention: false,
-                    git: None,
-                    from_worktree: from_worktree.unwrap_or(false),
-                    worktree_of: None,
-                });
+                let mut ws = Workspace::new(crate::state::new_id(), path.clone(), name);
+                ws.from_worktree = from_worktree.unwrap_or(false);
+                ws.opened_under = repository.as_ref().filter(|r| r.linked).and_then(|r| family::row_for(&session, &r.common_dir, opened_under.as_deref()));
+                ws.repository = repository;
+                if ws.opened_under.is_none() {
+                    let terminal = crate::state::new_id();
+                    ws.terminals = vec![TerminalTab { id: terminal.clone(), name: None, cwd: path.clone(), attention: false }];
+                    ws.active_terminal = Some(terminal);
+                }
+                let id = ws.id.clone();
+                session.workspaces.push(ws);
+                family::normalise(&mut session);
                 id
             }
         }
@@ -388,47 +443,24 @@ pub fn set_mode(app: AppHandle, state: tauri::State<AppState>, workspace_id: Str
     Ok(())
 }
 
-#[tauri::command]
-pub fn remove_workspace(app: AppHandle, state: tauri::State<AppState>, id: String) -> Result<(), String> {
-    let next = {
-        let mut session = state.session.lock();
-        let Some(pos) = session.workspaces.iter().position(|w| w.id == id) else {
-            return Err(format!("no workspace {id}"));
-        };
-        let removed = session.workspaces.remove(pos);
-        session.recent.retain(|r| r != &id);
-        let mut ptys = state.ptys.lock();
-        for tab in &removed.terminals {
-            if let Some(mut live) = ptys.remove(&tab.id) {
-                live.hangup();
-            }
-            crate::agent::forget(&state, &tab.id);
-        }
-        state.git.lock().remove(&id);
-        if session.active.as_deref() == Some(&id) {
-            session.active = None;
-            session.recent.first().cloned()
-        } else {
-            None
-        }
-    };
-    let result = match &next {
-        Some(next) => activate(&app, next).map_err(|e| format!("{e:#}")),
-        None => {
-            watch::sync(&app);
-            Ok(())
-        }
-    };
+/// Removes a workspace and what is listed under it (WS-21); no file on disk
+/// is touched. Off the main thread: hanging up a family's shells and bringing
+/// the next workspace on screen, which runs git and a scan, take time.
+#[tauri::command(async)]
+pub fn remove_workspace(app: AppHandle, id: String) -> Result<(), String> {
+    let result = drop_workspace(&app, &id).map_err(|e| format!("{e:#}"));
     publish(&app);
-    // Takes the removed workspace's include file away, so a shell that
+    // Takes the removed workspaces' include files away, so a shell that
     // outlived the hangup — tmux, a disowned job — loses its credentials.
     crate::credentials::write_terminal_configs(&app);
     result
 }
 
-/// Reorders the workspace list (WS-11). The frontend names every id, each
-/// top-level row followed by its worktrees, so the switcher's grouping and
-/// the session's order stay one order.
+/// Reorders the workspace list (WS-11, WS-18). The frontend names every id,
+/// each root followed by its worktrees, then each child followed by its own,
+/// so the switcher's grouping and the session's order stay one order;
+/// `family::normalise` keeps every child inside its root and every worktree
+/// after its row whatever list arrives.
 #[tauri::command]
 pub fn reorder_workspaces(app: AppHandle, state: tauri::State<AppState>, ids: Vec<String>) {
     reorder(&mut state.session.lock().workspaces, &ids, |w| &w.id);
@@ -450,14 +482,27 @@ pub fn rename_workspace(app: AppHandle, state: tauri::State<AppState>, id: Strin
     Ok(())
 }
 
+/// Opens or folds each of `paths`: the folder a click toggles, or every folder
+/// above a revealed path at once (ED-59), which then costs one watch sync and
+/// one publish however deep the path is. In the Explorer, or with `view`, in
+/// that view: each panel folds on its own (TREE-20).
 #[tauri::command]
-pub fn set_expanded(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, path: String, expanded: bool) {
+pub fn set_expanded(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view: Option<String>, paths: Vec<String>, expanded: bool) {
     {
         let mut session = state.session.lock();
-        if let Some(ws) = session.workspace_mut(&workspace_id) {
-            ws.expanded.retain(|p| p != &path);
+        let open = session.workspace_mut(&workspace_id).and_then(|ws| match &view {
+            Some(id) => ws.views.iter_mut().find(|v| &v.id == id).map(|v| &mut v.expanded),
+            None => Some(&mut ws.expanded),
+        });
+        if let Some(open) = open {
             if expanded {
-                ws.expanded.push(path);
+                for path in paths {
+                    if !open.contains(&path) {
+                        open.push(path);
+                    }
+                }
+            } else {
+                open.retain(|p| !paths.contains(p));
             }
         }
     }
@@ -557,7 +602,9 @@ pub fn open_diff(app: AppHandle, state: tauri::State<AppState>, workspace_id: St
     Ok(id)
 }
 
-/// Makes a preview tab permanent: it was edited, double-clicked or dragged.
+/// Makes a preview tab permanent: it was edited, double-clicked or dragged, a
+/// chip in it opened a file (CITE-22a), or a link in it opened a preview in
+/// its own workspace, which would otherwise take its slot (CITE-22d).
 #[tauri::command]
 pub fn pin_editor(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String) {
     let changed = {
@@ -866,7 +913,7 @@ pub fn view_create(app: AppHandle, state: tauri::State<AppState>, workspace_id: 
             return Err(format!("a view named {name} already exists"));
         }
         let id = crate::state::new_id();
-        ws.views.push(crate::state::View { id: id.clone(), name, entries: Vec::new() });
+        ws.views.push(crate::state::View { id: id.clone(), name, entries: Vec::new(), expanded: Vec::new() });
         ws.active_view = Some(id.clone());
         id
     };
@@ -900,27 +947,35 @@ pub fn view_delete(app: AppHandle, state: tauri::State<AppState>, workspace_id: 
     Ok(())
 }
 
-/// Adds a workspace-relative path to a view; a path already there is left
-/// where it is.
+/// Adds workspace-relative paths to a view in the order given, as one change
+/// (TREE-28); a path already there is left where it is. One path that cannot
+/// be an entry refuses them all, before the view is touched.
 #[tauri::command]
-pub fn view_add(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, path: String) -> Result<(), String> {
-    tree::resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
-    let path = path.trim_matches('/').to_string();
-    if path.is_empty() {
-        return Err("the workspace root cannot be sent to a view".into());
+pub fn view_add(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, paths: Vec<String>) -> Result<(), String> {
+    let mut adding = Vec::with_capacity(paths.len());
+    for path in paths {
+        tree::resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+        let path = path.trim_matches('/').to_string();
+        if path.is_empty() {
+            return Err("the workspace root cannot be sent to a view".into());
+        }
+        adding.push(path);
     }
     with_view(&state, &workspace_id, &view_id, |v| {
-        if !v.entries.contains(&path) {
-            v.entries.push(path);
+        for path in adding {
+            if !v.entries.contains(&path) {
+                v.entries.push(path);
+            }
         }
     })?;
     publish(&app);
     Ok(())
 }
 
+/// Takes paths out of a view, as one change (TREE-28).
 #[tauri::command]
-pub fn view_remove(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, path: String) -> Result<(), String> {
-    with_view(&state, &workspace_id, &view_id, |v| v.entries.retain(|e| e != &path))?;
+pub fn view_remove(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, view_id: String, paths: Vec<String>) -> Result<(), String> {
+    with_view(&state, &workspace_id, &view_id, |v| v.entries.retain(|e| !paths.contains(e)))?;
     publish(&app);
     Ok(())
 }

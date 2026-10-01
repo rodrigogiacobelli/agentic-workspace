@@ -12,6 +12,8 @@ export interface Workspace {
   id: string;
   path: string;
   name: string;
+  /** A family root's list, shared by every member of its family (TERM-16);
+   *  empty on every other entry. */
   terminals: TerminalTab[];
   activeTerminal: string | null;
   /** The Editor's working area: every group; `layout` arranges them. Never empty. */
@@ -32,14 +34,20 @@ export interface Workspace {
   /** The view the Custom panel shows; null is the first there is. */
   activeView: string | null;
   available: boolean;
-  /** A background terminal here printed since it was last viewed. */
+  /** A terminal of this root's family printed out of view since the family was last on screen. */
   attention: boolean;
   git: GitSummary | null;
   /** Opened from a repository's worktree list rather than named by the user. */
   fromWorktree: boolean;
-  /** The open workspace on this one's repository, when this one is a linked
-   *  worktree of it; the switcher and the tray list it under that one. */
+  /** The repository row this linked worktree is listed under — a root or a
+   *  child on its repository — when one is open; the switcher and the tray
+   *  list it there. */
   worktreeOf: string | null;
+  /** The root whose folder this child was found in (WS-12); null for any
+   *  other entry. */
+  childOf: string | null;
+  /** The row a linked worktree was opened under, saved (assumption 4). */
+  openedUnder: string | null;
 }
 
 /** A split node, shared by the editor layout and the panel layout. */
@@ -93,6 +101,8 @@ export interface View {
   id: string;
   name: string;
   entries: string[];
+  /** The folders the Custom panel draws open in this view, apart from the Explorer's (TREE-20). */
+  expanded: string[];
 }
 
 export interface GitSummary {
@@ -210,10 +220,14 @@ export interface Settings {
   markdownMode: "source" | "split" | "rich";
   /** Rich mode fills the tab's width rather than a readable column. */
   richFullWidth: boolean;
+  /** A trash from the file tree asks first (SET-05). */
+  confirmDelete: boolean;
   /** The program a terminal tab runs; empty means `$SHELL`. */
   terminalShell: string;
   /** Which renderer a terminal draws with. */
   terminalGpu: "auto" | "webgl" | "dom";
+  /** Where ＋ starts a shell: the family's root, or the workspace on screen. */
+  terminalOpenIn: "root" | "workspace";
   /** One dock tree per docked mode; null, or a mode left out, is that mode's default. */
   panelLayout: Partial<PanelLayouts> | null;
   workspaces: Record<string, WorkspaceSettings>;

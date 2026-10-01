@@ -82,8 +82,11 @@ pub struct Live {
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pub pid: Option<u32>,
-    /// The shell started with its workspace's terminal credentials (CRED-07).
-    pub credentials: bool,
+    /// The workspace whose terminal credentials the shell started with
+    /// (CRED-07, CRED-14): its family's root, or the worktree it started in
+    /// as a root of its own before that worktree joined a family (TERM-25).
+    /// Its include names that workspace's key until the shell is restarted.
+    pub credentials: Option<String>,
     stream: Arc<Stream>,
 }
 
@@ -141,12 +144,12 @@ impl Live {
     }
 }
 
-/// What a workspace's shells start as: the program the setting names, empty
-/// meaning the one the desktop would have started, and the environment its
-/// terminal credentials add (CRED-06, CRED-07). Read once per spawn batch, the
-/// repository looked up on disk before the settings lock is taken. A tab
-/// takes both when its shell starts, so a change applies to the next shell
-/// rather than disturbing a running one.
+/// What a family's shells start as: the program the setting names, empty
+/// meaning the one the desktop would have started, and the environment the
+/// terminal credentials of `workspace_id`, its root, add (CRED-06, CRED-07,
+/// CRED-14). Read once per spawn batch, the repository looked up on disk
+/// before the settings lock is taken. A tab takes both when its shell starts,
+/// so a change applies to the next shell rather than disturbing a running one.
 fn shell_env(app: &AppHandle, workspace_id: &str) -> (String, Vec<(String, String)>) {
     let state = app.state::<AppState>();
     let scope = crate::credentials::scope(&state, workspace_id);
@@ -175,7 +178,7 @@ fn shell_env(app: &AppHandle, workspace_id: &str) -> (String, Vec<(String, Strin
     (shell, env)
 }
 
-fn spawn(app: AppHandle, id: String, cwd: &Path, size: PtySize, shell: &str, env: &[(String, String)]) -> Result<Live> {
+fn spawn(app: AppHandle, id: String, cwd: &Path, size: PtySize, shell: &str, env: &[(String, String)], env_of: &str) -> Result<Live> {
     let system = native_pty_system();
     let pair = system.openpty(size).context("allocating a pseudoterminal")?;
 
@@ -302,7 +305,7 @@ fn spawn(app: AppHandle, id: String, cwd: &Path, size: PtySize, shell: &str, env
         })
         .context("starting the flush thread")?;
 
-    Ok(Live { master: pair.master, writer, killer, pid, credentials: !env.is_empty(), stream })
+    Ok(Live { master: pair.master, writer, killer, pid, credentials: (!env.is_empty()).then(|| env_of.to_string()), stream })
 }
 
 /// Drops the oldest bytes once the tail is an eighth past the cap, cutting
@@ -350,9 +353,18 @@ fn close_tab(state: &AppState, session: &mut Session, id: &str) {
     crate::agent::forget(state, id);
 }
 
-/// Starts a shell for every tab of the workspace that has none. A workspace is
-/// spawned when first shown, so launch does not scale with the workspace count.
-pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Result<()> {
+/// Starts a shell for every tab of `workspace_id`'s family that has none, with
+/// the root's environment (CRED-14). A family is spawned when one of its
+/// members is first shown, so launch does not scale with the workspace count.
+/// A tab starts in its own directory, else in the root's folder, else — the
+/// root's folder missing — in the folder of `workspace_id` (TERM-26); a tab
+/// with none of the three is left without a shell rather than stop the rest.
+///
+/// Returns what the user has to hear, for the caller to raise: at launch no
+/// window listens yet, so a notice raised here would be lost. That is the
+/// root's folder missing, said on the family's first spawn, and any tab that
+/// did not start.
+pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Option<String> {
     // One caller at a time: a switch runs off the main thread, and two callers
     // would each find a tab without a shell and each start one. The second
     // would replace the first, whose shell, hung up, would then take the tab
@@ -360,26 +372,39 @@ pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Result<()> {
     static SPAWNING: Mutex<()> = Mutex::new(());
     let _one = SPAWNING.lock();
     let state = app.state::<AppState>();
-    let (root, tabs): (PathBuf, Vec<TerminalTab>) = {
+    let (home, name, root, here, tabs): (String, String, PathBuf, PathBuf, Vec<TerminalTab>) = {
         let session = state.session.lock();
-        match session.workspace(workspace_id) {
-            Some(ws) => (ws.path.clone(), ws.terminals.clone()),
-            None => return Ok(()),
-        }
+        let (Some(ws), Some(home)) = (session.workspace(workspace_id), session.family_root(workspace_id)) else { return None };
+        (home.id.clone(), home.name.clone(), home.path.clone(), ws.path.clone(), home.terminals.clone())
     };
-    if !root.is_dir() {
-        anyhow::bail!("{} is not a directory", root.display());
-    }
+    let first = {
+        let ptys = state.ptys.lock();
+        !tabs.iter().any(|t| ptys.contains_key(&t.id))
+    };
+    let missing = !root.is_dir();
+    let fallback = if missing { Some(here).filter(|h| h != &root && h.is_dir()) } else { Some(root.clone()) };
     let mut shell = None;
     let mut ended = false;
+    let (mut started, mut stranded) = (0, 0);
+    let mut failed = Vec::new();
     for tab in tabs {
         if state.ptys.lock().contains_key(&tab.id) {
             continue;
         }
-        let (program, env) = shell.get_or_insert_with(|| shell_env(app, workspace_id));
-        let cwd = if tab.cwd.is_dir() { tab.cwd.clone() } else { root.clone() };
+        let Some(cwd) = Some(tab.cwd.clone()).filter(|d| d.is_dir()).or_else(|| fallback.clone()) else {
+            stranded += 1;
+            continue;
+        };
+        let (program, env) = shell.get_or_insert_with(|| shell_env(app, &home));
         let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
-        let mut live = spawn(app.clone(), tab.id.clone(), &cwd, size, program, env)?;
+        let mut live = match spawn(app.clone(), tab.id.clone(), &cwd, size, program, env, &home) {
+            Ok(live) => live,
+            Err(e) => {
+                failed.push(format!("A terminal of {name} did not start: {e:#}"));
+                continue;
+            }
+        };
+        started += 1;
         // A tab closed, or its workspace removed, while the shell started has
         // nothing left to hang that shell up. Both take `ptys` under the
         // session, so under the two of them here the tab either is still
@@ -410,7 +435,18 @@ pub fn ensure_live(app: &AppHandle, workspace_id: &str) -> Result<()> {
     if ended {
         session::publish(app);
     }
-    Ok(())
+    // A tab is stranded only when there was nowhere to fall back to, which
+    // means the root's folder is missing.
+    let mut said = Vec::new();
+    if missing && (stranded > 0 || (first && started + failed.len() > 0)) {
+        said.push(match &fallback {
+            Some(here) => format!("{name}'s folder {} is missing. Its terminals whose own folder is gone start in {}.", root.display(), here.display()),
+            None if stranded > 0 => format!("{name}'s folder {} is missing, so {stranded} of its terminals did not start.", root.display()),
+            None => format!("{name}'s folder {} is missing.", root.display()),
+        });
+    }
+    said.extend(failed);
+    (!said.is_empty()).then(|| said.join("\n"))
 }
 
 /// Gives the short flush window to the terminal `foreground` names and the
@@ -449,25 +485,40 @@ fn with_live<T>(state: &AppState, id: &str, f: impl FnOnce(&mut Live) -> Result<
     f(live).map_err(|e| format!("{e:#}"))
 }
 
-/// Opens a terminal tab in the workspace's root, or in `cwd`, a directory
-/// relative to it (TREE-17).
-#[tauri::command]
-pub fn terminal_open(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, cwd: Option<String>) -> Result<String, String> {
+/// Opens a terminal tab in front of the family's list (TERM-16). Its shell
+/// starts in `cwd`, a directory relative to the workspace named (TREE-17,
+/// TERM-18a); without one, where *New terminals open in* says — the family's
+/// root (TERM-17) or the workspace named, the one on screen (TERM-18). A root
+/// whose folder is missing gives way to the workspace named (TERM-26). Off
+/// the main thread: it starts a process.
+#[tauri::command(async)]
+pub fn terminal_open(app: AppHandle, workspace_id: String, cwd: Option<String>) -> Result<String, String> {
+    let state = app.state::<AppState>();
     let id = crate::state::new_id();
     let dir = cwd
         .map(|rel| crate::tree::resolve(&state, &workspace_id, &rel).map(|(_, abs)| abs))
         .transpose()
         .map_err(|e| format!("{e:#}"))?;
+    let at_root = state.settings.lock().terminal_open_in != "workspace";
+    let (here, root) = {
+        let session = state.session.lock();
+        let here = session.workspace(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?.path.clone();
+        (here, session.family_root(&workspace_id).map(|r| r.path.clone()))
+    };
+    let cwd = dir.unwrap_or_else(|| root.filter(|r| at_root && r.is_dir()).unwrap_or(here));
+    // A tab no shell can start in would sit in the list as "not running".
+    if !cwd.is_dir() {
+        return Err(format!("{} is not a directory", cwd.display()));
+    }
     {
         let mut session = state.session.lock();
-        let ws = session
-            .workspace_mut(&workspace_id)
-            .ok_or_else(|| format!("no workspace {workspace_id}"))?;
-        let cwd = dir.unwrap_or_else(|| ws.path.clone());
+        let ws = family_list(&mut session, &workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
         ws.terminals.push(TerminalTab { id: id.clone(), name: None, cwd, attention: false });
         ws.active_terminal = Some(id.clone());
     }
-    ensure_live(&app, &workspace_id).map_err(|e| format!("{e:#}"))?;
+    if let Some(message) = ensure_live(&app, &workspace_id) {
+        session::notice(&app, message);
+    }
     session::publish(&app);
     Ok(id)
 }
@@ -565,11 +616,18 @@ pub fn terminal_rename(app: AppHandle, state: tauri::State<AppState>, id: String
     session::publish(&app);
 }
 
+/// The family's list a member names: its root's (TERM-16).
+fn family_list<'a>(session: &'a mut Session, workspace_id: &str) -> Option<&'a mut crate::state::Workspace> {
+    let home = session.family_root(workspace_id)?.id.clone();
+    session.workspace_mut(&home)
+}
+
+/// One active terminal per family (assumption 9).
 #[tauri::command]
 pub fn set_active_terminal(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, id: String) {
     {
         let mut session = state.session.lock();
-        if let Some(ws) = session.workspace_mut(&workspace_id) {
+        if let Some(ws) = family_list(&mut session, &workspace_id) {
             if ws.terminals.iter().any(|t| t.id == id) {
                 ws.active_terminal = Some(id);
             }
@@ -582,7 +640,7 @@ pub fn set_active_terminal(app: AppHandle, state: tauri::State<AppState>, worksp
 pub fn reorder_terminals(app: AppHandle, state: tauri::State<AppState>, workspace_id: String, ids: Vec<String>) {
     {
         let mut session = state.session.lock();
-        if let Some(ws) = session.workspace_mut(&workspace_id) {
+        if let Some(ws) = family_list(&mut session, &workspace_id) {
             session::reorder(&mut ws.terminals, &ids, |t| &t.id);
         }
     }
@@ -598,22 +656,27 @@ pub struct StaleTerminal {
     pub label: String,
 }
 
-/// The workspace's shells that started without the credentials its terminals
-/// now carry (CRED-07). A shell that started with them follows every later
+/// The family's shells that started without the credentials its root now
+/// gives terminals (CRED-07, CRED-14): none, or a worktree's own from before
+/// it joined (TERM-25). A shell that started with them follows every later
 /// change through its include, so only these need a restart.
 #[tauri::command]
 pub async fn workspace_stale_terminals(state: tauri::State<'_, AppState>, workspace_id: String) -> Result<Vec<StaleTerminal>, String> {
-    let scope = crate::credentials::scope(&state, &workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+    let (home, tabs) = {
+        let session = state.session.lock();
+        let root = session.family_root(&workspace_id).ok_or_else(|| format!("no workspace {workspace_id}"))?;
+        (root.id.clone(), root.terminals.clone())
+    };
+    let scope = crate::credentials::scope(&state, &home).ok_or_else(|| format!("no workspace {home}"))?;
     let settings = state.settings.lock().clone();
-    if crate::credentials::terminal_env(&settings, &scope, &workspace_id).is_empty() {
+    if crate::credentials::terminal_env(&settings, &scope, &home).is_empty() {
         return Ok(Vec::new());
     }
-    let tabs = state.session.lock().workspace(&workspace_id).map(|ws| ws.terminals.clone()).unwrap_or_default();
     let ptys = state.ptys.lock();
     Ok(tabs
         .into_iter()
         .enumerate()
-        .filter(|(_, tab)| ptys.get(&tab.id).is_some_and(|live| !live.credentials))
+        .filter(|(_, tab)| ptys.get(&tab.id).is_some_and(|live| live.credentials.as_deref() != Some(home.as_str())))
         .map(|(at, tab)| {
             // As the tab strip names it, less the program's title, which only
             // the view knows; the tab's place tells two alike apart.
@@ -624,8 +687,10 @@ pub async fn workspace_stale_terminals(state: tauri::State<'_, AppState>, worksp
 }
 
 /// Replaces a running shell with a fresh one in the same tab: same id, name
-/// and working directory, the workspace's environment as it is now. A shell
-/// that has exited is not restarted (TERM-14 is unbuilt). The new shell
+/// and working directory, its family root's environment as it is now. The
+/// root holds the tab, so a shell that joined from a worktree of its own takes
+/// the root's credentials here (assumption 10). A shell that has exited is
+/// not restarted (TERM-14 is unbuilt). The new shell
 /// starts before the old one goes, and is swapped in under the session and
 /// `ptys` as `ensure_live` does, so a tab closed meanwhile takes no shell
 /// with it. A tab without a running shell is refused, before and at
@@ -651,7 +716,7 @@ pub fn terminal_restart(app: AppHandle, state: tauri::State<AppState>, id: Strin
         .unwrap_or(root);
     let size = size.unwrap_or(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 });
     let (shell, env) = shell_env(&app, &workspace_id);
-    let mut live = spawn(app.clone(), id.clone(), &cwd, size, &shell, &env).map_err(|e| format!("{e:#}"))?;
+    let mut live = spawn(app.clone(), id.clone(), &cwd, size, &shell, &env, &workspace_id).map_err(|e| format!("{e:#}"))?;
     let old = {
         let session = state.session.lock();
         let mut ptys = state.ptys.lock();

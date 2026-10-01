@@ -9,6 +9,7 @@ related:
   - 001-two-os-windows
   - 007-workspace-is-one-directory
   - 019-credentials-through-the-secret-service
+  - 020-workspace-family
 ---
 
 # ADR-002: Terminal sessions live in the backend and end with the app
@@ -31,27 +32,31 @@ Key forces:
 
 ## Decision
 
-The Rust backend owns every PTY. A terminal session is keyed by workspace and
-tab, outlives the view that draws it, and ends when the application exits.
+The Rust backend owns every PTY. A terminal session is keyed by its tab
+(`AppState.ptys`), outlives the view that draws it, and ends when the
+application exits. The tab sits in its workspace family's one list, which the
+family's root holds (`020-workspace-family`); a tab moved from one list to
+another keeps its shell running.
 
 Restored state is the tab's **name and working directory** only. A restored tab
-opens a fresh shell in that directory. No output is replayed and no command is
-re-run.
+opens a fresh shell in that directory, or, when the directory is gone, in the
+fallback `020-workspace-family` names (TERM-26). No output is replayed and no
+command is re-run.
 
 A shell starts in the user's environment, not the application's.
 `pty::spawn` runs `desktop::clean_child_env` on it, which removes the
 variables an AppImage exports and the WebKit variable the application set
-itself (`standards-linux-desktop`). It adds a workspace's credentials only
-when that workspace's own terminal option is on
-(`019-credentials-through-the-secret-service`), and `Live.credentials`
-records whether the shell started with them. *Restart shell*, in a terminal
-tab's context menu and on the Workspace settings page, asks first and then
-calls `terminal_restart`, which replaces a running shell in place: the same
-tab, id, name and
-working directory — read from `/proc/<pid>/cwd` — with a fresh shell in the
-workspace's environment as it is now. The new shell starts before the old one
-is hung up, and the exit of the old one leaves the tab alone. A shell that has
-exited is not restarted; its tab closes with it.
+itself (`standards-linux-desktop`). It adds the credentials of its family's
+root only when the root's own terminal option is on (CRED-14,
+`019-credentials-through-the-secret-service`), and `Live.credentials` records
+the workspace whose credentials the shell started with, or none. *Restart
+shell*, in a terminal tab's context menu and on the root's Workspace settings
+page, asks first and then calls `terminal_restart`, which replaces a running
+shell in place: the same tab, id, name and working directory — read from
+`/proc/<pid>/cwd` — with a fresh shell in the family root's environment as it
+is now. The new shell starts before the old one is hung up, and the exit of
+the old one leaves the tab alone. A shell that has exited is not restarted;
+its tab closes with it.
 
 ## Rationale
 
@@ -76,8 +81,8 @@ exited is not restarted; its tab closes with it.
 ## Consequences
 
 **Easier:**
-- A workspace switch changes which terminal is on screen; no process is
-  signalled.
+- A switch between families changes which terminal list is on screen, and a
+  switch within one changes nothing there; no process is signalled.
 - The frontend can be reloaded, and a rendering crash costs no running work.
 
 **Harder:**
@@ -97,5 +102,5 @@ exited is not restarted; its tab closes with it.
 - **Closing the Terminal window stops nothing.** Only application exit ends a
   session, apart from a shell the user restarts or closes.
 - **A shell's environment is the user's.** It goes through
-  `clean_child_env`, and carries a workspace's credentials only on that
-  workspace's consent.
+  `clean_child_env`, and carries its family root's credentials only on the
+  root's consent.

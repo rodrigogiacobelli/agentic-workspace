@@ -421,9 +421,12 @@ function Assignment({ label, field, value, items, repo, onChange }: {
 /**
  * The Workspace page's credentials: the key and the identity this workspace
  * uses, whether its terminals carry them (CRED-07, never inherited), and the
- * shells still running on the environment they started with.
+ * shells still running on the environment they started with — the family's,
+ * since a root's terminals are its family's. A member names `family`, its
+ * root: its terminals start with the root's credentials, so it has no
+ * terminal option of its own to offer (CRED-16).
  */
-export function WorkspaceCredentials({ current, workspace }: { current: Settings; workspace: Workspace }) {
+export function WorkspaceCredentials({ current, workspace, family }: { current: Settings; workspace: Workspace; family?: Workspace }) {
   const workspaces = useWorkspaces();
   const own = current.workspaces[workspace.path];
   const sshKey = own?.sshKey ?? null;
@@ -435,11 +438,13 @@ export function WorkspaceCredentials({ current, workspace }: { current: Settings
   const [stale, setStale] = useState<StaleTerminal[]>([]);
   const [staleError, setStaleError] = useState<string | null>(null);
 
+  const member = family !== undefined;
   const readStale = useCallback(() => {
+    if (member) return;
     api.workspaceStaleTerminals(workspace.id)
       .then((s) => { setStale(s); setStaleError(null); })
       .catch((e) => setStaleError(`This workspace's terminals could not be listed: ${String(e)}`));
-  }, [workspace.id]);
+  }, [workspace.id, member]);
   // When the page shows, when the option changes from either window, and on
   // every session change while it is open — a shell opened or closed.
   useEffect(readStale, [readStale, terminals, workspaces]);
@@ -488,12 +493,16 @@ export function WorkspaceCredentials({ current, workspace }: { current: Settings
         repo={repo && { name: repo.name, value: repoSettings?.identity ?? null }}
         onChange={(v) => assign({ identity: v })}
       />
-      <label className="setting">
-        <span>Terminals use this workspace's credentials</span>
-        <input type="checkbox" checked={terminals} onChange={(e) => assign({ terminals: e.target.checked })} />
-      </label>
+      {family ? (
+        <p className="settings-note">Terminals of {family.name}'s family start with {family.name}'s credentials.</p>
+      ) : (
+        <label className="setting">
+          <span>Terminals use this workspace's credentials</span>
+          <input type="checkbox" checked={terminals} onChange={(e) => assign({ terminals: e.target.checked })} />
+        </label>
+      )}
       {error && <p className="setting-error" role="alert">{error}</p>}
-      {stale.length > 0 && (
+      {!member && stale.length > 0 && (
         <>
           <p className="settings-note">Started before the change, still on the old environment:</p>
           {stale.map((t) => (

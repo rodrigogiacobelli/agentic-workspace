@@ -17,6 +17,21 @@ pub fn read_file(state: tauri::State<AppState>, workspace_id: String, path: Stri
     String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8 text"))
 }
 
+/// Which version of a file is on disk, as its inode, length and modification
+/// time, or none when no file is there. An image tab compares it to learn that
+/// its picture was rewritten, replaced or deleted (IMG-09, IMG-09a): a stat,
+/// where reading the file or asking git would cost every change beside it.
+#[tauri::command(async)]
+pub fn file_stamp(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<Option<String>, String> {
+    let (_, abs) = tree::resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
+    let meta = match std::fs::metadata(&abs) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{:#}", anyhow::Error::new(e).context(format!("reading {}", abs.display())))),
+    };
+    Ok(meta.is_file().then(|| format!("{}-{}-{}.{}", meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec())))
+}
+
 /// Opens a file in the desktop's default application, for the files the
 /// editor declines: binaries.
 #[tauri::command]

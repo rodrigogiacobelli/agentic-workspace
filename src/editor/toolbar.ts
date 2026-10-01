@@ -6,7 +6,7 @@
 // own keys.
 
 import { Prec, StateEffect, StateField, type EditorState, type Extension, type TransactionSpec } from "@codemirror/state";
-import { EditorView, keymap, showPanel, showTooltip, type Panel, type TooltipView } from "@codemirror/view";
+import { EditorView, keymap, showPanel, showTooltip, tooltips, type Panel, type TooltipView } from "@codemirror/view";
 import { iconElement, type IconName } from "../components/icons";
 import { duration } from "../motion";
 import { place } from "../tooltip";
@@ -393,5 +393,19 @@ export function richFormatting(): Extension {
       }),
     ]),
     showPanel.of(toolbar),
+    // The link popover sits in `.cm-editor`, which its group clips
+    // (`.split-child`), so it is placed in the editor's own box, 8 px in at
+    // the sides, rather than anywhere in the window, and styles.css keeps it
+    // narrower than that box. Absolute from the start: WebKitGTK passes for
+    // Safari, whose path in CodeMirror turns a fixed tooltip absolute on its
+    // first or second measure anyway, and while fixed the width cap is a
+    // share of the window rather than of the editor.
+    tooltips({
+      position: "absolute",
+      tooltipSpace: (view) => {
+        const r = view.dom.getBoundingClientRect();
+        return { left: r.left + 8, right: r.right - 8, top: r.top, bottom: r.bottom };
+      },
+    }),
   ];
 }

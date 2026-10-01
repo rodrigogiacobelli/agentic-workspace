@@ -45,12 +45,18 @@ pub struct Settings {
     pub markdown_mode: String,
     /// Rich mode fills the tab's width rather than a readable column.
     pub rich_full_width: bool,
+    /// A trash from the file tree asks first (SET-05).
+    pub confirm_delete: bool,
     /// The program a terminal tab runs. Empty means `$SHELL`, which is what
     /// the desktop's own terminal would start.
     pub terminal_shell: String,
     /// Which renderer a terminal draws with: `auto`, `webgl` or `dom`. `auto`
     /// draws into the DOM — see `useWebgl` in `src/terminals.ts`.
     pub terminal_gpu: String,
+    /// Where ＋ starts a shell: `root`, the folder of the family's root, or
+    /// `workspace`, the one on screen (TERM-17, TERM-18). v0.4.0 drops it
+    /// when it saves the settings, which puts it back to `root`.
+    pub terminal_open_in: String,
     /// Where each docked mode's panels sit around its working area: one dock
     /// tree per mode, `{ editor, scm }`, as the frontend lays them out and
     /// opaque to the backend. The application's, not a workspace's (DOCK-08).
@@ -145,8 +151,10 @@ impl Default for Settings {
             tab_display: "labels".into(),
             markdown_mode: "source".into(),
             rich_full_width: false,
+            confirm_delete: true,
             terminal_shell: String::new(),
             terminal_gpu: "auto".into(),
+            terminal_open_in: "root".into(),
             panel_layout: serde_json::Value::Null,
             workspaces: HashMap::new(),
             credentials: Credentials::default(),

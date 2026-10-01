@@ -36,6 +36,8 @@ pub struct Workspace {
     pub id: String,
     pub path: PathBuf,
     pub name: String,
+    /// A family root's list, shared by every member of its family (TERM-16);
+    /// empty on every other entry once `family::normalise` has run.
     #[serde(default)]
     pub terminals: Vec<TerminalTab>,
     #[serde(default)]
@@ -75,7 +77,8 @@ pub struct Workspace {
     /// Whether `path` is a directory right now. Computed when published.
     #[serde(default, skip_deserializing)]
     pub available: bool,
-    /// A background terminal here printed since it was last viewed.
+    /// A terminal of this root's family printed out of view since the family
+    /// was last on screen (AGT-11).
     #[serde(default, skip_deserializing)]
     pub attention: bool,
     /// Branch and state of the repository, when the directory is one.
@@ -85,12 +88,30 @@ pub struct Workspace {
     /// rather than the user naming the folder. It goes when the worktree does.
     #[serde(default)]
     pub from_worktree: bool,
-    /// When this one is a linked worktree, the open workspace on its
-    /// repository: same common git directory, not a linked worktree itself.
-    /// The switcher and the tray list it under that one. Computed when
-    /// published.
+    /// When this one is a linked worktree listed under a repository's row —
+    /// a root or a child on the same common git directory — that row. The
+    /// switcher and the tray list it there. Computed by `family::normalise`
+    /// from `opened_under` and the repository read from disk, never read
+    /// back: v0.4.0 writes its own value here.
     #[serde(default, skip_deserializing)]
     pub worktree_of: Option<String>,
+    /// For a linked worktree, the repository row it was opened under
+    /// (assumption 4). Saved, so a family keeps its worktree across restarts;
+    /// a file v0.4.0 saved back has none, and `family::normalise` places the
+    /// worktree again from the session's order.
+    #[serde(default)]
+    pub opened_under: Option<String>,
+    /// When this one is a child — a repository found directly inside a
+    /// root's folder — that root. Computed by `family::normalise`; the child
+    /// itself is known by its id (`family::CHILD_MARK`), which v0.4.0 keeps.
+    #[serde(default, skip_deserializing)]
+    pub child_of: Option<String>,
+    /// The repository at this directory's top, read from the files git keeps
+    /// when the entry was loaded or created: what places a linked worktree
+    /// under its repository's row before any summary is in. `None` when the
+    /// folder holds none or its `.git` could not be resolved. Never saved.
+    #[serde(skip)]
+    pub repository: Option<crate::credentials::Repository>,
 }
 
 /// A flat, ordered list of shortcuts into the workspace. Each entry sits at
@@ -102,6 +123,10 @@ pub struct View {
     pub name: String,
     #[serde(default)]
     pub entries: Vec<String>,
+    /// The folders the Custom panel draws open in this view, apart from the
+    /// Explorer's `expanded` (TREE-20).
+    #[serde(default)]
+    pub expanded: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -395,6 +420,36 @@ impl Area {
 }
 
 impl Workspace {
+    /// An entry with nothing open yet: no terminal, empty working areas, the
+    /// Editor in front.
+    pub fn new(id: String, path: PathBuf, name: String) -> Self {
+        Workspace {
+            id,
+            path,
+            name,
+            terminals: Vec::new(),
+            active_terminal: None,
+            editor: Area::default(),
+            review: Area::default(),
+            mode: default_docked_mode(),
+            split_ratio: default_ratio(),
+            editors: Vec::new(),
+            active_editor: None,
+            expanded: Vec::new(),
+            recent_files: Vec::new(),
+            views: Vec::new(),
+            active_view: None,
+            available: true,
+            attention: false,
+            git: None,
+            from_worktree: false,
+            worktree_of: None,
+            opened_under: None,
+            child_of: None,
+            repository: None,
+        }
+    }
+
     /// Both working areas have at least one group and a layout naming each
     /// group exactly once; older session files and new workspaces get theirs
     /// here.
@@ -460,6 +515,27 @@ impl Session {
         self.workspaces.iter_mut().find(|w| w.id == id)
     }
 
+    /// The root of `id`'s workspace family: itself unless it is a child or a
+    /// worktree member, and a child's worktree climbs to the child's root.
+    /// Reads what `family::normalise` computed, which is current whenever the
+    /// session lock is let go.
+    pub fn family_root(&self, id: &str) -> Option<&Workspace> {
+        let ws = self.workspace(id)?;
+        let row = ws.worktree_of.as_deref().and_then(|r| self.workspace(r)).unwrap_or(ws);
+        Some(row.child_of.as_deref().and_then(|r| self.workspace(r)).unwrap_or(row))
+    }
+
+    /// The entries listed under `id` in the selector: a root's children, its
+    /// worktree members and theirs; a child's worktree members.
+    pub fn listed_under(&self, id: &str) -> Vec<String> {
+        let under = |w: &Workspace| w.child_of.as_deref() == Some(id) || w.worktree_of.as_deref() == Some(id);
+        self.workspaces
+            .iter()
+            .filter(|w| under(w) || w.worktree_of.as_deref().and_then(|r| self.workspace(r)).is_some_and(under))
+            .map(|w| w.id.clone())
+            .collect()
+    }
+
     pub fn workspace_of_terminal_mut_ref(&self, terminal_id: &str) -> Option<&Workspace> {
         self.workspaces.iter().find(|w| w.terminals.iter().any(|t| t.id == terminal_id))
     }
@@ -477,16 +553,25 @@ pub struct AppState {
     pub settings: Mutex<crate::settings::Settings>,
     /// Terminal ids that printed while out of view.
     pub attention: Mutex<std::collections::HashSet<String>>,
-    /// The terminal tab on screen: the active workspace's active terminal,
-    /// which is the one the Terminal window shows, refreshed by
-    /// `session::persist`. A chunk of output reads this instead of the
-    /// session, whose lock is held across the whole of `persist` (PERF-04),
-    /// and it picks the terminal whose output leaves on the short window.
+    /// The ids in `attention` whose family has come on screen since they
+    /// printed: each tab keeps its mark until it is itself in front, but its
+    /// root's `●` is gone until it prints again (AGT-11). Locked after
+    /// `attention` when both are held.
+    pub seen: Mutex<std::collections::HashSet<String>>,
+    /// The terminal tab on screen: the active terminal of the active
+    /// workspace's family, kept on its root, which is the one the Terminal
+    /// window shows, refreshed by `session::persist`. A chunk of output
+    /// reads this instead of the session, whose lock is held across the
+    /// whole of `persist` (PERF-04), and it picks the terminal whose output
+    /// leaves on the short window.
     /// Locked after `ptys` when both are held, never before it.
     pub foreground: Mutex<Option<String>>,
     pub activities: crate::agent::Activities,
     /// Repository summaries keyed by workspace id, refreshed on git changes.
     pub git: Mutex<HashMap<String, GitSummary>>,
+    /// The workspace ids whose summary `family::summarise` is reading now,
+    /// on whichever thread.
+    pub summarising: Mutex<std::collections::HashSet<String>>,
     pub hotkey: Mutex<crate::hotkey::Hotkey>,
     /// The window label that last had focus; the global hotkey raises it.
     pub last_focused: Mutex<String>,
@@ -502,9 +587,11 @@ pub struct AppState {
     /// one last.
     pub published: Mutex<String>,
     pub data_dir: PathBuf,
-    /// Messages for the user that have no command to return through, such as
-    /// a state store that could not be read at launch.
+    /// Notices no window heard when they were raised, for the first window to ask.
     pub notices: Mutex<Vec<String>>,
+    /// What launch moved aside because it could not be read: data lost, which
+    /// the Workspace window says once in a dialog rather than a toast (NTF-04).
+    pub set_aside: Mutex<Vec<String>>,
     /// Whether Ctrl was down at the last drop the webview handed to Tauri,
     /// and when: see `windows::drop_modifiers`.
     pub dropped: Mutex<Option<(bool, std::time::Instant)>>,

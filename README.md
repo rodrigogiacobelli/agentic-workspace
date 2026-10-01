@@ -3,14 +3,16 @@
 A native Linux desktop app for running several agent-driven projects at once —
 without losing the one you just switched away from.
 
-> **Status: four rounds.** Workspaces, the two windows, terminals that
-> survive a switch, the file tree, session restore, the three-mode markdown
-> editor, git with worktrees, the two agent signals, app-drawn window chrome
-> over a tray-resident process, draggable editor splits and panels, custom
-> views, path citations, the typing helpers, the Editor, Source Control and
-> Terminal modes, an SSH key and commit identity per workspace, drag and drop
-> in the Explorer, and change marks in the editor run. `.lore/codex/` holds the
-> decisions behind it.
+> **Status: seven rounds.** Workspaces and the families of repositories they
+> hold, the two windows, terminals that survive a switch and are shared across
+> a family, the file tree with several files selected at once and a follow of
+> the document in front, session restore, the three-mode markdown editor, an
+> image viewer, git with worktrees, the two agent signals, app-drawn window
+> chrome over a tray-resident process, notices that leave on their own,
+> draggable editor splits and panels, custom views, path citations, the typing
+> helpers, the Editor, Source Control and Terminal modes, an SSH key and commit
+> identity per workspace, drag and drop in the Explorer, and change marks in
+> the editor run. `.lore/codex/` holds the decisions behind it.
 
 ---
 
@@ -28,10 +30,13 @@ windows, and you have no idea whether it finished.
 ## The idea
 
 A **workspace** is one directory, and it owns everything about that project: its
-file tree, its open documents, its terminals. Switching workspace swaps all of
-it at once. The terminals you left behind keep running — same processes, same
-output, just out of sight — and they are exactly as you left them when you come
-back.
+file tree, its open documents, its layout. Switching workspace swaps all of it
+at once. A folder you add by hand is the root of a **family**: the repositories
+directly inside it, and the worktrees of each, are workspaces of their own, and
+the whole family shares one list of terminals — so the agent you started at the
+root is still in front when you look at the worktree it is writing into. The
+terminals you left behind keep running — same processes, same output, just out
+of sight — and they are exactly as you left them when you come back.
 
 ```
   ┌─ Workspace window ──────────┐   ┌─ Terminal window ───────────┐
@@ -74,6 +79,25 @@ enough for `claude`, `tmux` and `vim`. Switch away and they keep running. Come
 back and everything they printed is there. Quit for the day and tomorrow the
 tabs return with their working directories, ready for you to relaunch.
 
+**One list of terminals per family.** Switch between a root, a repository
+inside it and a worktree, and the Terminal window shows the same tabs with the
+same one in front. A new terminal starts at the root, or in the workspace on
+screen if you set *Settings › Terminal › New terminals open in* that way;
+*Open terminal here* on a folder starts it there either way. A tab whose
+shell sits in a repository or worktree of the family names it after its
+label, its tooltip gives the full directory, and the tab in front follows a
+`cd`.
+
+**Workspaces inside workspaces.** Add a plain folder such as `~/code` and the
+switcher lists the repositories directly inside it under it, each a workspace
+with its own tabs, Explorer and Source Control. Only that one level is looked
+at, and a repository you add by hand stays where you put it. A repository
+cloned into the folder while you work in its family is listed as soon as it
+lands. Rename a child, or drag it among its siblings; a child whose folder is
+gone stays listed, marked unavailable, until you remove it or its folder comes
+back. Removing a root removes its whole family from the list and closes its
+terminals, and says so first; no file on disk is deleted.
+
 **A markdown editor that edits both sides.** Three modes: raw source, a split
 with source on one side and the rendered document on the other, and a
 full-width rich editor. The rendered side is *editable*, not a preview — which
@@ -86,7 +110,8 @@ wrote them.
 
 **Tabs that don't pile up.** A single click in the file tree opens a preview
 tab, labelled in italics, which the next single click replaces. Editing it,
-double-clicking it or dragging it to a new place makes it permanent.
+double-clicking it, dragging it to a new place, or opening a file from a chip in
+it makes it permanent.
 
 **A layout you drag into shape.** Drag an editor tab along its strip, or into
 another group's strip, and the tabs there move aside to show where it will land;
@@ -98,21 +123,52 @@ back from the title row's *View* menu or its hotkey. Editor splits belong to the
 workspace; panel placement belongs to the app, one layout per mode.
 
 **Custom views.** A view is a named list of shortcuts into the workspace, shown
-in the Editor's *Custom* panel. Send files and folders to it from *Explorer*
-and they sit at its root whatever
-their depth on disk, each folder expanding to its real children. Nothing is
-copied and nothing is moved; deleting a view deletes the list.
+in the Editor's *Custom* panel. Send files and folders to it from *Explorer*,
+the whole selection at once, and they sit at its root whatever their depth on
+disk, each folder expanding to its real children; each view keeps its own
+folders open. Nothing is copied and nothing is moved: Delete on a shortcut
+takes it out of the view, and deleting a view deletes the list.
+
+**An Explorer that follows you.** Whenever another document comes to the
+front, the Explorer selects it if its row is showing, without opening a folder
+or taking the keyboard, and the Custom panel does the same on its own; a
+panel where you have several rows selected keeps them. The
+*Show in Explorer* button at the left of every editor header opens the folders
+above the file, clears a filter that hides it, brings the Explorer forward —
+back where it was docked if you had hidden it — and puts the keyboard on the
+file. `Ctrl`+click, Shift+click and Shift with the arrow keys select several
+files, and Delete, cut, copy, a drag and *Quote to AI* act on exactly the rows
+that are highlighted.
 
 **Paths an agent can read.** *Quote to AI* on any file or folder writes
 `@path/from/the/workspace/root` into the document you are editing — one line
 per file when several are selected. In the rendered view a cited image, audio
 file or video on a line of its own is drawn in place. Anywhere else — in a
 sentence, after a label, in a table cell — it is a chip, as every other cited
-file is: click a chip to open the file, rest the pointer on an image chip to
-preview the image, and a citation to a file that is not there is marked in
-red. One setting decides
-whether pasting and dropping write a citation or a markdown link relative to the
-note.
+file is: click a chip to open the file in a tab of its own beside the note
+(a folder chip shows the folder in the Explorer), rest the pointer on an image
+chip to preview the image, and a citation to a file that is not there is
+marked in red. Where the same repository is open twice — inside a root and on
+its own — a chip opens the file in the one of the note's own family. One
+setting decides whether pasting and dropping write a citation or a markdown
+link relative to the note.
+
+**An image viewer.** An image opens fitted to its tab, and a small one at its
+own size. Zoom by step from the header's − and ＋ or the keys, around the
+pointer with `Ctrl`+wheel, or with a double-click on the point you want;
+*Fit* and *1:1* sit beside them, with rotate and flip, which turn the view and
+never the file. Drag, scroll or use the arrow keys to pan. A tab keeps its
+zoom, position and rotation while the app runs, the status bar shows the
+image's size and zoom, a picture an agent rewrites reloads in place, and a
+vector image stays sharp at any zoom. A deleted image says so, and one the
+viewer cannot decode offers your default application. In a narrow group the controls fold into
+a `⋯` menu, and every key still works.
+
+**Notices that leave on their own.** Every toast leaves two seconds after you
+see it, errors included; point at the stack, or tab into it, to hold every
+toast there, and × dismisses one at once. A toast raised while its window is in
+the background waits until you look. Saved data the app could not read at
+launch is a dialog, not a toast.
 
 **Paste images and audio straight in.** They land in the project's clipboard
 folder, get a link, and render inline — images shown, audio playable, without
@@ -132,8 +188,10 @@ with hunk staging; blame stays in the Editor. Worktrees matter because a project
 here is often *itself* a worktree of another one — and creating one offers to
 open it as a new workspace, while removing one offers to delete its branch and
 says how many commits only that branch holds. In the switcher and the tray a
-worktree sits under its repository; drag a repository's row to reorder the
-list, and its worktrees move with it.
+worktree sits under its repository — under a *Worktrees* row when that
+repository also holds repositories of its own — and opening one starts no
+shell: it shares its family's terminals. Drag a root's row to reorder the
+list, and its family moves with it.
 
 **A key and an identity per workspace.** Settings → *Credentials* lists the
 SSH keys you add from `~/.ssh` and the commit identities you define; a
@@ -143,8 +201,10 @@ commits carry that name and email. A passphrase is kept in your desktop's
 wallet (GNOME Keyring, KWallet or KeePassXC), never in a file of the app's; with
 no wallet, it is not saved. A worktree with nothing assigned uses its
 repository's key and identity. Your terminals keep your own ssh setup unless
-you turn on *Terminals use this workspace's credentials* for that workspace,
-and then only inside its repository. An unknown host key, a passphrase or a
+you turn on *Terminals use this workspace's credentials* on a family's root.
+Then every shell of the family carries the root's key and identity inside the
+root's repository and its worktrees — or, for a plain folder, inside every
+repository under it — and keeps your own setup anywhere else. An unknown host key, a passphrase or a
 server's question from git or from ssh in a terminal comes up as a dialog in
 the window that asked.
 
@@ -152,11 +212,13 @@ the window that asked.
 of the source view — added, changed, and a wedge where lines were deleted — and
 over the scrollbar of every view, where clicking a mark scrolls to it.
 
-**It tells you when an agent needs you.** A workspace you left running gets an
-attention badge when its terminal produces output, and an optional desktop
-notification when a busy terminal goes quiet — the agent finished, or it is
-waiting for your answer. With every window closed, the tray icon carries the
-same signal.
+**It tells you when an agent needs you.** A family you left running gets an
+attention mark on its root's row when one of its terminals produces output,
+and an optional desktop notification when a busy terminal goes quiet — the
+agent finished, or it is waiting for your answer. The root's notification
+setting speaks for the whole family, and coming back to any member of it
+clears the mark. With every window closed, the tray icon carries the same
+signal.
 
 ## What it is not
 
@@ -179,9 +241,9 @@ desktops are best-effort; other operating systems are out of scope.
 | `.lore/codex/standards/` | The rules the code has to comply with |
 | `.lore/codex/operations/` | Running it, building it, installing it, starting it at login, and why it will not start |
 
-The in-flight specification — every behaviour as Given/When/Then — lives at
-`working/acceptance-criteria.md` and `working/acceptance-criteria-2.md`, neither
-version controlled. Their facts move into the codex as they are built.
+The in-flight specification — every behaviour as Given/When/Then — lives in
+`working/`, which is not version controlled. Its facts move into the codex as
+they are built.
 
 Project knowledge lives in Lore. `lore codex list` is the index.
 
@@ -222,11 +284,11 @@ under KDE, and the four failures that stop it before a window appears.
 | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | both | Editor / Source Control / Terminal mode |
 | `Ctrl+Q` | both | Quit |
 | `Ctrl+Alt+A` | anywhere | Raise the window you last used (bound through the desktop portal; reassign it in System Settings → Shortcuts) |
-| `Ctrl+Shift+T` / `Ctrl+Shift+W` | terminal | New / close terminal tab |
+| `Ctrl+Shift+T` / `Ctrl+Shift+W` | terminal | New terminal tab in the family's list / close the tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | both | Next / previous tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | terminal | Copy / paste |
 | `Ctrl+Shift+F` | terminal / workspace | Search the scrollback / the Search panel |
-| `Ctrl+Shift+E` | workspace | The Explorer panel |
+| `Ctrl+Shift+E` | workspace | The Explorer panel, with the keyboard on its selection |
 | `Ctrl+Shift+G` | workspace | The Commit panel, in Source Control |
 | `Ctrl+Shift+O` | workspace | The Outline panel |
 | `Ctrl+P` | workspace | Quick open a file |
@@ -235,11 +297,47 @@ under KDE, and the four failures that stop it before a window appears.
 | `Ctrl+\` / `Ctrl+Alt+\` | workspace | Split the working area / move the tab to the next group |
 | `Ctrl+,` | both | Settings |
 | `Ctrl+Alt+Shift+C` | workspace | Copy the selected path, relative to the workspace |
-| `Ctrl+Z` | Explorer | Undo the last move made by dragging or by cut and paste |
-| `Ctrl` while dropping | Explorer | Copy the dragged files instead of moving them |
 
 A panel hotkey selects and focuses that panel wherever you have docked it,
 switches to its mode, and brings it back if you closed it.
+
+In the Explorer and the Custom panel, each with a selection of its own:
+
+| Key | Does |
+|---|---|
+| `Ctrl`+click | Add a row to the selection, or take it out |
+| `Shift`+click / `Ctrl+Shift`+click | Select from the last row picked to this one / add that range |
+| `↑` / `↓` | Select the row above / below |
+| `Shift+↑` / `Shift+↓` | Extend the selection a row |
+| `Home` / `End` | Select the first / last row |
+| `→` / `←` | Unfold a folder, then step into it / fold it, then step to its parent |
+| `Ctrl+A` | Select every row the panel shows |
+| `Escape` | Keep only the row the keyboard is on |
+| `Enter` | Open the file as a permanent tab, or fold and unfold the folder |
+| `Delete` | Move the selection to the trash; in a view, take a shortcut out of the view |
+| `F2` | Rename the one selected row |
+| `Ctrl+C` / `Ctrl+X` | Copy / cut the selection |
+| `Ctrl+V` | Paste into the folder of the row the keyboard is on |
+| `Ctrl+Z` | Undo the last move made by dragging or by cut and paste |
+| `Ctrl` while dropping | Copy the dragged files instead of moving them |
+
+Delete asks first, naming what goes, unless *Ask before moving files to the
+trash* is off in Settings › Editor; the question's *Don't ask again* turns it
+off.
+
+With an image in front and focused:
+
+| Key | Does |
+|---|---|
+| `+` / `=` / `Ctrl+=` | Zoom in a step |
+| `-` / `Ctrl+-` | Zoom out a step |
+| `0` | Fit the tab |
+| `1` | Actual size, *1:1* |
+| `R` / `Shift+R` | Turn right / left |
+| `↑` `↓` `←` `→` | Pan 40 px |
+| `Ctrl`+wheel | Zoom around the pointer |
+| `Shift`+wheel | Pan sideways |
+| Double-click | Actual size at the point clicked, or 200 % from actual size; again, back |
 
 Inside a document:
 
@@ -291,7 +389,7 @@ rule in one press. Enter starts a new paragraph and `Shift+Enter` breaks the
 line inside one; typing `# `, `- `, `**word**` or three backticks and Enter
 formats as you go. A code block keeps its language as a small label you can
 change, and what the view does not draw — an HTML block, a footnote — shows its
-source in a box of its own. `Ctrl`+click follows a link. Paste an image or drop a file
+source in a box of its own. `Ctrl`+click follows a link into a preview tab. Paste an image or drop a file
 onto a document and it lands in the workspace's clipboard folder; Settings →
 *Asset links* decides whether the document gets a markdown link relative to the
 note or an `@` citation from the workspace root.
@@ -304,11 +402,14 @@ Git runs through the `git` binary on your machine, so hooks run and your
 configuration applies — except where a workspace has an SSH key or a commit
 identity assigned: its remote operations offer that key alone, and its
 commits take that name and email over your configuration's. Desktop
-notifications go through `notify-send`; clicking one switches to the terminal
-that went quiet.
+notifications go through `notify-send`; clicking one switches to the member of
+that family you last had on screen and brings the terminal that went quiet to
+the front.
 
 `Ctrl`+click a path or URL printed in a terminal to open the file at that line
-in the Workspace window, or the URL in your browser. The ✎ button in the title
+in the Workspace window — in the workspace on screen when it holds the file,
+else in the deepest member of the terminal's family that does — or the URL in
+your browser. The ✎ button in the title
 row renames a workspace; the path underneath does not change.
 
 Double-click a terminal tab to rename it; drag tabs to reorder them; right-click
@@ -316,8 +417,10 @@ one to restart its shell. Right-click in the file tree for file operations, for
 *Quote to AI*, for *Send to* a view, and on a folder for *Open terminal here*;
 deleting moves to the trash through GIO.
 
-Drag files and folders in the Explorer onto a folder to move them; a name
-already taken asks whether to replace it, keep both or cancel. Drop files from
+Drag files and folders in the Explorer onto a folder to move them, the whole
+selection at once, and one `Ctrl+Z` puts them all back; a name already taken
+asks whether to replace it, keep both or cancel, and *Apply to all* answers
+for the rest of the move. Drop files from
 your file manager onto a folder to copy them in, drag a single file out to
 another application, or drop an entry on the middle of a Markdown document to
 write a link or an `@` citation to it where it lands.
@@ -326,8 +429,12 @@ Settings open as a column of pages — General, Editor, Terminal, Panels, Agent
 signals, Credentials, and one for the active workspace — and reopen on the page
 you left. Click a breadcrumb above a document to copy its path, relative to the
 workspace (the workspace crumb copies the absolute path); right-click it to
-reveal it in the Explorer or copy its absolute path. In a narrow editor group
-the Source, Split and Rich buttons keep their place at the right and the
-breadcrumb gives way: the heading trail shortens and then goes, the folders and
-then the workspace fold into one `…` crumb whose menu lists them, and last the
-file name shortens. A shortened crumb shows its full text in its tooltip.
+reveal it in the Explorer or copy its absolute path. The *Show in Explorer*
+button left of the breadcrumbs shows the file itself. In a narrow editor group
+that button stays whole at the left, the Source, Split and Rich buttons keep
+their place at the right and the breadcrumb gives way: the heading trail
+shortens and then goes, the folders and then the workspace fold into one `…`
+crumb whose menu lists them, and last the file name shortens. On an image, the
+viewer's controls hold the right end instead, and once the file name is cut
+short all but −, the zoom and ＋ fold into a `⋯` menu. A shortened crumb shows
+its full text in its tooltip.

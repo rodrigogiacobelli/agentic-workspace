@@ -16,7 +16,10 @@ export interface TreeDrag {
   workspaceId: string;
   /** Workspace-relative, in tree order. */
   paths: string[];
-  /** The same entries as absolute paths, which the file operations take. */
+  /**
+   * The same entries as absolute paths, which the file operations take, less
+   * any inside a folder among them: it travels with the folder (TREE-26a).
+   */
   abs: string[];
   /** Those of `paths` that are folders. */
   dirs: Set<string>;

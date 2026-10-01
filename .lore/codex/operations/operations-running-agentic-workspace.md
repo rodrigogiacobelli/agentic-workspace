@@ -3,16 +3,19 @@ id: operations-running-agentic-workspace
 title: Running Agentic Workspace
 summary: How to run Agentic Workspace from a checkout on Arch, build the deb, rpm
   and AppImage bundles, install the AppImage and replace it with a newer build without
-  losing the session, run a development build beside an installed one, find the
-  binary's ssh helper modes, the runtime files and the wallet items behind a
-  workspace's SSH key, start the app at login under KDE, and read the four failures
-  that stop it before a window appears.
+  losing the session, what session.json and settings.json hold — a workspace
+  family's entries included — and what the v0.4.0 AppImage does with a session this
+  build wrote, run a development build beside an installed one, find the binary's ssh
+  helper modes, the runtime files and the wallet items behind a workspace's SSH key,
+  start the app at login under KDE, and read the four failures that stop it before a
+  window appears.
 related:
 - standards-linux-desktop
 - 008-tauri-v2-on-arch-kde
 - 004-central-settings-store
 - 013-app-drawn-chrome-and-tray
 - 019-credentials-through-the-secret-service
+- 020-workspace-family
 binds:
 - src-tauri/tauri.conf.json
 - package.json
@@ -152,11 +155,27 @@ Each entry below is one per build.
 
 | Entry | Written by | Holds |
 |---|---|---|
-| `session.json` | `store::save` | the workspaces, open editors, terminal tabs and their working directories, under a `version` field |
-| `settings.json` | `settings::save` | global settings and per-workspace settings keyed by absolute path, as ADR-004 requires: among them `credentials` (the SSH keys by the path of their file in `~/.ssh`, and the commit identities), each workspace's `sshKey`, `identity` and `terminalCredentials`, and `settingsTab`, the page the settings dialog opens on. No passphrase is in it |
+| `session.json` | `store::save` | the workspace entries, their open editors and views, and each family's terminal tabs with their working directories, under a `version` field |
+| `settings.json` | `settings::save` | global settings and per-workspace settings keyed by absolute path, as ADR-004 requires: among them `credentials` (the SSH keys by the path of their file in `~/.ssh`, and the commit identities), each workspace's `sshKey`, `identity` and `terminalCredentials`, `settingsTab`, the page the settings dialog opens on, `terminalOpenIn`, where ＋ starts a shell — `root`, the family's root, by default, or `workspace`, the workspace on screen — and `confirmDelete`, whether the file tree asks before a trash, `true` by default. No passphrase is in it |
 | `windows.json` | `windows::save` | each window's size, position, maximised state and monitor name |
 | `drafts/` | `files::save_draft` | unsaved editor buffers, one file per document |
 | `themes/` | `themes::import_themes` | imported VS Code colour themes |
+
+`session.json` lists the workspace entries in the order the selector and the
+tray show them: each root, the worktrees open under it, then each child
+followed by the worktrees open under that child. A child — a repository found
+directly inside a root's folder — has an id starting `child-`, which is how a
+later load and a later scan of the root's folder know it; its root is the
+entry on its parent folder. A linked worktree saves the row it was opened
+under as `openedUnder`. Only a family's root holds `terminals`:
+`family::normalise`, at every load and every save, moves a tab it finds under
+any other entry to the end of that entry's root's list, keeping the tab's id,
+name and directory. Each view saves the folders the Custom panel has open in
+it as its own `expanded`. `childOf` and `worktreeOf` are written for the
+windows and never read back. Every one of these fields has a default and
+`version` stays 2, so the v0.4.0 AppImage reads a session this build wrote
+rather than setting it aside; *Rolling back to v0.4.0* says what it does with
+one, and `020-workspace-family` holds why the number stays.
 
 `gpu-probe` appears only where NVIDIA drives the screen under Wayland. It holds
 the driver's version from before GTK starts until the launch has drawn its
@@ -187,9 +206,11 @@ than installed by hand.
 
 An unreadable `settings.json` is renamed to
 `settings.json.unreadable-<seconds>` rather than overwritten. The app then
-starts on the default settings and shows a notice naming the moved file and
-saying that every workspace's SSH key, commit identity and terminal
-credentials were reset; the keys' passphrases stay in the wallet.
+starts on the default settings, and the Workspace window opens a dialog,
+*Saved data could not be read*, naming the moved file and saying that every
+workspace's SSH key, commit identity and terminal credentials were reset; the
+dialog stays until *OK*, and no toast repeats it. The keys' passphrases stay
+in the wallet.
 
 ## SSH keys, the wallet and the runtime directory
 
@@ -222,7 +243,7 @@ workspace with a key cannot fetch, pull or push.
 |---|---|---|
 | `askpass-<pid>.sock` | `askpass::serve`, at launch | the relay's socket, mode 0600, one per running instance |
 | `ssh-<pid>-<random>.conf` | the wrapper, per connection | the host's flattened ssh configuration without its identity lines, mode 0600, deleted when ssh exits |
-| `terminal-<workspace id>.gitconfig` | `credentials::write_terminal_config` | for a workspace whose terminals carry its credentials: `core.sshCommand`, `ssh.variant` and the identity under `user`, `author` and `committer`, mode 0600 |
+| `terminal-<workspace id>.gitconfig` | `credentials::write_terminal_config` | for a workspace whose terminals carry its credentials: `core.sshCommand`, `ssh.variant` and the identity under `user`, `author` and `committer`, mode 0600. A family's shells start with their root's file |
 
 `askpass::sweep` deletes, at launch, sockets and configuration files whose pid
 is gone. `credentials::write_terminal_configs` rewrites every open workspace's
@@ -338,7 +359,8 @@ geometry, drafts and imported themes.
 version is higher — or one that fails to parse — to `store::set_aside`. That
 renames it to `session.json.unreadable-<seconds>` rather than deleting it, the
 suffix being the Unix time of the rename. The app then starts with an empty
-workspace list and shows a notice naming the file it moved.
+workspace list, and the Workspace window opens the *Saved data could not be
+read* dialog naming the file it moved.
 
 **Rolling back.** Copy `session.json` aside first:
 
@@ -366,6 +388,22 @@ Restore either copy while the app is not running; the running app overwrites
 `session.json` the next time its session changes. The launch settles the
 desktop entry too: `desktop::ensure_entry` compares the whole entry against the
 one the running build wants and writes when the two differ.
+
+**Rolling back to v0.4.0.** This build writes `version` 2, the number v0.4.0
+carries, so v0.4.0 reads the session and sets nothing aside. It lists every
+entry and starts: each child as a top-level row, each worktree under the first
+row on its repository in session order, each member of a family with no
+terminal tab, and each root with its family's whole list. It prunes only an
+entry opened from a worktree list whose folder is gone, which no child is. Its
+next save drops `openedUnder`, `childOf` and every view's `expanded`, and keeps each
+entry's id, name and place in the order, and every terminal tab, the ones it
+added included. Started again on that file, this build shows the same tree,
+names and order: it knows a child by its `child-` id and its root's folder,
+places each worktree again from the order it saved, moves a tab v0.4.0 added
+under a member to the end of the root's list, and opens every view with its
+folders shut. v0.4.0's next settings save drops `terminalOpenIn` and
+`confirmDelete`, which come back at their defaults: new terminals at the root,
+and a question before every trash.
 
 ## Start at login
 
@@ -400,7 +438,11 @@ The tray icon is a StatusNotifierItem through libayatana-appindicator. On Linux
 that host delivers menu events only, so a left click opens the menu rather than
 raising a window. The menu's first entry, **Show Agentic Workspace**, raises the
 window that held focus last; below it `tray::menu` lists both windows with a
-check mark against the ones on screen, then the workspaces, then **Quit**. That
+check mark against the ones on screen, then the open workspace entries in the
+selector's order — each root, its open worktrees under a disabled
+*Worktrees* label when the root also has children, then each child prefixed
+`› ` and the child's open worktrees — then **Quit**. A worktree git lists
+that nobody opened is offered in the selector only. That
 entry and the icon's tooltip both name `desktop::APP_NAME`, so a development
 build's tray item reads **Show Agentic Workspace (dev)** and the two are
 distinguishable.
@@ -443,8 +485,9 @@ error reaches a checkout run with `pnpm tauri dev`, and a deb or rpm install on
 a host that did not resolve the dependency. The AppImage carries its own copy
 and starts on a host without the package.
 
-**The app starts, the workspace list is empty, and a notice names a file it
-moved aside.** The session store was unreadable — a newer format, or damaged
+**The app starts, the workspace list is empty, and the *Saved data could not
+be read* dialog names a file it moved aside.** The session store was
+unreadable — a newer format, or damaged
 JSON — and `store::set_aside` renamed it to
 `session.json.unreadable-<seconds>` under
 `~/.local/share/dev.agenticworkspace.app/`. The app is usable as it stands:

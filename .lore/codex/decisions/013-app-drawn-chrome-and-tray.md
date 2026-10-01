@@ -3,16 +3,20 @@ id: 013-app-drawn-chrome-and-tray
 title: 'ADR-013: App-drawn chrome and a tray-resident process'
 summary: Why both windows run undecorated behind one 30 px row the application draws
   itself, why closing a window hides it into a tray icon instead of ending the process,
-  and what libappindicator's menu-only event model costs.
+  how the workspace selector and the tray list each workspace family and where its
+  attention shows, and what libappindicator's menu-only event model costs.
 related:
 - 001-two-os-windows
 - 017-modes
+- 018-mount-what-is-on-screen
+- 020-workspace-family
 - standards-linux-desktop
 - operations-running-agentic-workspace
 binds:
 - src-tauri/src/tray.rs
 - src-tauri/src/windows.rs
 - src/components/Switcher.tsx
+- src/components/Menu.tsx
 ---
 
 # ADR-013: App-drawn chrome and a tray-resident process
@@ -72,17 +76,65 @@ disappears while the process lives on in the tray (TRAY-01, TRAY-07).
 `tray::menu` builds a first entry reading **Show** and `desktop::APP_NAME` —
 **Show Agentic Workspace** from an installed build, **Show Agentic Workspace
 (dev)** from a development one — then one checked entry per window, one checked
-entry per workspace with a dot against any background workspace wanting
-attention, and **Quit** (TRAY-03, TRAY-04, TRAY-06). The workspaces are listed
-as the switcher lists them: each workspace that is not a linked worktree, in
-session order, followed by the open worktrees of its repository
-(`Workspace.worktree_of`), each prefixed `⑂ `. Dragging a top-level row in
-the switcher reorders the workspaces, its worktrees moving with it, and
-`reorder_workspaces` stores that order in the session (WS-11). `tray::icon`
-paints an orange dot into the corner of the application icon while a background
-workspace wants attention (TRAY-05). Quit and the last-window close both route
-through the Workspace window, which owns the unsaved-buffer prompt; it is the
-only window that listens for `quit-requested`.
+entry per open workspace, and **Quit** (TRAY-03, TRAY-04, TRAY-06). Quit and
+the last-window close both route through the Workspace window, which owns the
+unsaved-buffer prompt; it is the only window that listens for
+`quit-requested`.
+
+**The selector lists each workspace family in up to three levels.** A
+workspace family (`020-workspace-family`) is a root — a workspace the owner
+added by hand that is not listed under a repository's row — with its
+children, the repositories found directly inside the root's folder, and its
+worktree members, the linked worktrees of either that are open as workspaces.
+`family::normalise` writes which is which into `Workspace.child_of` and
+`Workspace.worktree_of`, and the selector and the tray both read those two
+fields. `Switcher` draws each root as a top-level row. A root's disclosure
+lists its worktrees — each open one as `⑂ name · branch`, then, under a
+repository's main checkout, the ones git lists that no workspace has open —
+followed by its children; a child's disclosure lists the child's
+worktrees the same way (WS-12, WS-19). A root that lists both worktrees and
+children gathers the worktrees under a `Worktrees` row, which opens or closes
+on a click and offers no Rename or Remove; a root without children, and every
+child, lists its worktrees directly (BR-13, BR-13a, BR-14a). A row with the
+active workspace anywhere below it opens by itself whenever the list opens,
+and one closed by hand opens again on the next opening (BR-14). A root row
+offers Rename and Remove. A child row offers Rename, and Remove only while its
+folder is missing (WS-17, WS-20, WS-16a). An open worktree row offers Rename
+and no Remove, since Source Control's Worktrees panel deletes a worktree.
+`RowMenu` in `src/components/Menu.tsx` indents each row by its depth.
+
+**Rows reorder within their own list** (WS-11, WS-18). A row names the list it
+belongs to in `Row.siblings`: the roots, or one root's children. `RowMenu`
+lets a row take a drop only from a row of the same list, and gives no drag to
+a worktree row, a `Worktrees` row or a row alone in its list. A drop lands
+before the row it is on, after the last row of a nested list when it is on
+that row's lower half, and last among the roots when it is on the footer.
+`Switcher` then sends `reorder_workspaces` every id — each root, its worktree
+members, then each child followed by its own — and `normalise` restores
+that shape on every persist whatever list arrives, so a child stays among its
+root's children and a worktree stays under its row. The session stores the
+order, and the tray lists it.
+
+**The tray lists what the selector lists** (TRAY-08). `tray::apply` puts each
+root first, then its open worktree members prefixed `⑂ `, then each child
+prefixed `› ` followed by the child's open worktree members prefixed `› ⑂ `.
+Over the open worktree members of a root that also has children it puts a
+disabled `Worktrees` entry. Worktrees git lists that nobody opened are offered
+in the selector alone. Picking a workspace entry switches to that workspace on
+a thread of its own, since bringing a workspace on screen runs git and a scan
+and can start shells.
+
+**Attention belongs to a family, on its root** (AGT-10, AGT-11). The root holds
+the family's terminals, so `session::persist` sets the root's
+`Workspace.attention` while a tab of its list has printed out of view since the
+family last came on screen (`020-workspace-family`). Four marks read that
+flag, and none of them marks the family on screen: the selector prefixes `● ` to the root's row, open or
+closed, and to no member row; the title row shows its attention badge while
+any root outside the family on screen wants attention; the tray prefixes `● `
+to the root's entry; and `tray::icon` paints an orange dot into the corner of
+the application icon (TRAY-05). Coming to any member of the family clears
+the flag, and a tab that prints again raises it; each tab keeps its own mark
+in the Terminal window until it is itself in front.
 
 libappindicator's menu-only event model means the tray icon is built with
 `show_menu_on_left_click(true)`: a left click opens the menu, and its first
@@ -107,6 +159,14 @@ position is requested and left to KWin (PLT-11), and
   relaunching restore a window identically.
 - The tray menu is the one surface that reaches the application when no window
   is on screen, so it carries the windows, the workspaces and the way out.
+- The selector and the tray draw one tree from the two fields `normalise`
+  computes, so a worktree or a child sits under the same row in both.
+- A `Worktrees` row separates a root's worktrees from its repositories only
+  where the root holds both; elsewhere it would be one more click between the
+  owner and a worktree.
+- A family's attention sits on its root because the root holds the family's
+  terminals and every member shows them: coming to any member is coming to
+  the output that raised it.
 - A dot drawn into the icon is the only signal available to a process whose
   windows are all hidden.
 
@@ -117,6 +177,8 @@ position is requested and left to KWin (PLT-11), and
 | **Keep the KDE decorations** | Costs nothing to build and matches every other window on the desktop, and the title row then sits under a second title bar, doubling the chrome above every document and every terminal. |
 | **Quit when the last window closes** | The conventional behaviour for a document application, and it destroys the running terminals that `002-backend-owned-terminal-sessions` exists to keep. |
 | **An own StatusNotifierItem over zbus** | Delivers the click events libappindicator withholds, at the cost of implementing the dbusmenu protocol to satisfy one criterion that the menu's first entry satisfies already. |
+| **A `Worktrees` row under every repository** | One shape for every row, and a click more to reach a worktree under a repository that holds nothing else to tell it from. |
+| **An attention dot on the member a shell's directory lies in** | Names where the output came from, and marks a row that holds no terminal of its own: the tab is in the root's list, which every member shows. |
 
 ## Consequences
 
@@ -140,6 +202,9 @@ position is requested and left to KWin (PLT-11), and
   change nothing, rather than replacing an open menu under the pointer. It
   sets the icon only when the attention dot comes or goes, since GTK decodes
   each icon it is handed in a sandboxed image loader.
+- A drag in the selector is scoped to one list, and WebKit hides a drag's data
+  until the drop, so `RowMenu` holds the dragged row and its list in a ref from
+  `dragstart` to decide which rows accept it.
 
 ## Constraints imposed
 

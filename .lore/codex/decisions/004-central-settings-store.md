@@ -10,6 +10,7 @@ related:
 - standards-repository
 - 014-one-layout-tree
 - 019-credentials-through-the-secret-service
+- 020-workspace-family
 ---
 
 # ADR-004: Settings live in a central store, never in the user's repos
@@ -34,7 +35,12 @@ Key forces:
 
 All settings — global and per project — live in the application's own store
 under `~/.local/share/<app-id>/`, with per-project settings keyed by absolute
-path. The application writes nothing inside any workspace directory.
+path. The application writes nothing inside any workspace directory. Two
+workspace entries on one folder — a root the user added and a child a scan
+found there (`020-workspace-family`) — share that folder's one entry. The
+global settings in `settings.json` include `terminalOpenIn`, where a new
+terminal starts (TERM-17, TERM-18), and `confirmDelete`, whether a trash from
+the file tree asks first (SET-05).
 
 Credentials follow the same rule without their secrets
 (`019-credentials-through-the-secret-service`). `settings.json` lists the SSH
@@ -79,8 +85,12 @@ the one the windows hear last.
   until the workspace is relocated.
 - Two worktrees of one project are two keys and share nothing, with one
   exception: a linked worktree whose SSH key or commit identity is unset takes
-  its repository's. Its theme, notifications, clipboard folder and terminal
-  option are its own.
+  its repository's. Its theme and clipboard folder are its own. So are its
+  notifications and terminal option, which govern no shell while it is a
+  member of a family: the family's shells follow the root's
+  (`020-workspace-family`).
+- Two entries on one folder cannot hold different settings: a choice made on
+  either one's Workspace page applies to both.
 
 ## Constraints imposed
 
@@ -88,9 +98,10 @@ the one the windows hear last.
 - **A corrupt or newer-versioned store is moved aside, never deleted**, and the
   application starts with an empty workspace list and says what happened. An
   unreadable `settings.json` is moved aside the same way, to
-  `settings.json.unreadable-<seconds>`, and the notice says that every
-  workspace's SSH key, commit identity and terminal credentials were reset
-  with it.
+  `settings.json.unreadable-<seconds>`. The Workspace window says either in a
+  dialog that stays until the user presses *OK*, never in a toast (NTF-04),
+  and for `settings.json` the dialog says that every workspace's SSH key,
+  commit identity and terminal credentials were reset with it.
 - **No secret is written to the store.** A field that would hold one does not
   exist.
 - **Nothing is written into a workspace directory** other than a file the user

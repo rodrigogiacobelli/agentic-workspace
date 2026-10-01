@@ -4,6 +4,7 @@ mod assets;
 mod clipboard;
 mod credentials;
 mod desktop;
+mod family;
 mod git;
 mod hotkey;
 mod files;
@@ -67,13 +68,20 @@ fn setup(app: &mut tauri::App) -> Result<()> {
 
     let mut session = session;
     session.workspaces.iter_mut().for_each(state::Workspace::ensure_groups);
+    // Placed from the files git keeps, before any shell or summary: a worktree
+    // hangs under its repository's row and its terminals join the family's
+    // list at once, with or without git on the PATH (TERM-21a, WS-22).
+    family::read_repositories(&mut session);
+    family::normalise(&mut session);
     handle.manage(AppState {
         session: Mutex::new(session),
         settings: Mutex::new(settings),
         attention: Mutex::new(std::collections::HashSet::new()),
+        seen: Mutex::new(std::collections::HashSet::new()),
         foreground: Mutex::new(None),
         activities: Mutex::new(HashMap::new()),
         git: Mutex::new(HashMap::new()),
+        summarising: Mutex::new(std::collections::HashSet::new()),
         hotkey: Mutex::new(hotkey::Hotkey::default()),
         last_focused: Mutex::new("workspace".into()),
         ptys: Mutex::new(HashMap::new()),
@@ -82,7 +90,8 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         tray: tray::Tray::default(),
         published: Mutex::new(String::new()),
         data_dir,
-        notices: Mutex::new(notices),
+        notices: Mutex::new(Vec::new()),
+        set_aside: Mutex::new(notices),
         dropped: Mutex::new(None),
         git_children: Mutex::new(HashMap::new()),
         prompts: Mutex::new(askpass::Prompts::default()),
@@ -105,11 +114,13 @@ fn setup(app: &mut tauri::App) -> Result<()> {
         gpu_survived();
     });
 
+    // The family on screen gets its shells now, from the placement above, so
+    // a worktree's terminals run under its root before any git (TERM-21a).
+    // What that has to say is queued for the windows to take as they load:
+    // none listens while setup holds the main thread.
     let active = handle.state::<AppState>().session.lock().active.clone();
-    if let Some(id) = active {
-        if let Err(e) = pty::ensure_live(&handle, &id) {
-            session::notice(&handle, format!("Could not restore the active workspace's terminals: {e:#}"));
-        }
+    if let Some(message) = active.and_then(|id| pty::ensure_live(&handle, &id)) {
+        handle.state::<AppState>().notices.lock().push(message);
     }
     // Every workspace, not only the one on screen: the selector lists each
     // one's branch and its worktrees, and a summary is what carries both. Off
@@ -119,10 +130,11 @@ fn setup(app: &mut tauri::App) -> Result<()> {
     std::thread::Builder::new()
         .name("git-summaries".into())
         .spawn(move || {
+            // The repositories inside each root's folder first, so the
+            // children found come in with everyone's summaries (WS-12).
+            family::scan_roots(&summaries);
             let all: Vec<String> = summaries.state::<AppState>().session.lock().workspaces.iter().map(|w| w.id.clone()).collect();
-            for id in all {
-                git::refresh_summary(&summaries, &id);
-            }
+            family::summarise(&summaries, all);
             session::prune_worktrees(&summaries);
             watch::sync(&summaries);
             session::publish(&summaries);
@@ -349,6 +361,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             session::get_session,
             session::take_notices,
+            session::take_set_aside,
             session::add_workspace,
             session::switch_workspace,
             session::remove_workspace,
@@ -453,11 +466,12 @@ pub fn run() {
             tree::create_entry,
             tree::rename_entry,
             tree::duplicate_entry,
-            tree::trash_entry,
+            tree::trash_entries,
             tree::paste_entry,
             tree::reveal_entry,
             tree::search_project,
             files::read_file,
+            files::file_stamp,
             files::open_externally,
             files::save_draft,
             files::read_draft,

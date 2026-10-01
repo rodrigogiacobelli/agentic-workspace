@@ -2,7 +2,7 @@
 // behind it re-renders, and the Workspace window re-renders on every git and
 // file-tree event; a menu drawn by the app stays open until it is dismissed.
 
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useDismiss } from "../motion";
 import { Icon } from "./icons";
@@ -108,13 +108,19 @@ export interface Row {
   name: ReactNode;
   detail?: string;
   selected?: boolean;
-  onPick: () => void;
+  /** What a click does. A row without it only groups the rows under it: a
+   *  click opens or closes it, and it offers no actions (BR-14a). */
+  onPick?: () => void;
   onRename?: () => void;
   /** What the rename control says it does, when "Rename" is not it. */
   renameLabel?: string;
   onRemove?: () => void;
   /** Rows nested under this one, revealed by its disclosure. */
   children?: Row[];
+  /** The list this row is dragged within, when the menu reorders: a row
+   *  takes a drop only from a row of the same list, and one without drags
+   *  nowhere. */
+  siblings?: string;
 }
 
 interface RowMenuProps {
@@ -130,113 +136,146 @@ interface RowMenuProps {
   /** Where the list sits under the control: at its left edge, or centred on it. */
   align?: "start" | "center";
   /**
-   * The top-level rows are dragged into a new order: a drop puts the dragged
-   * row before the one it lands on, or last when it lands on the footer
-   * (`before` is null). `mime` names the drag, so a row accepts only its own
-   * list's.
+   * Rows that name their `siblings` are dragged into a new order within that
+   * list: a drop puts the dragged row before the one it lands on, or last
+   * when it lands on the lower half of a nested list's last row or, for the
+   * top-level rows, on the footer (`before` is null). `mime` names the drag,
+   * so a row accepts only its own list's.
    */
-  reorder?: { mime: string; onMove: (id: string, before: string | null) => void };
+  reorder?: { mime: string; onMove: (id: string, before: string | null, siblings: string) => void };
 }
 
-/** Where a drag over the footer lands: after every row. */
+/** Where a drag over the footer lands: after every top-level row. */
 const END = Symbol("end");
+
+/** Where a drag would land: before the row named, after it, or at the end. */
+type Over = { at: string | typeof END; after: boolean };
+
+/** Whether a row holds the selection anywhere below it. */
+const holdsSelection = (r: Row): boolean => !!r.children?.some((c) => c.selected || holdsSelection(c));
 
 /** A selector whose rows carry their own rename and remove actions on the right. */
 export function RowMenu({ label, title, className, rows, footer, empty, minWidth = 280, align = "start", reorder }: RowMenuProps) {
   const [open, setOpen] = useState<{ x: number; y: number; width: number } | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  /** The row a drag is over, which the dragged row would land before, or the end. */
-  const [over, setOver] = useState<string | typeof END | null>(null);
+  /** Rows opened or closed by hand; any other is open while it holds the selection. */
+  const [expanded, setExpanded] = useState<Map<string, boolean>>(new Map());
+  const [over, setOver] = useState<Over | null>(null);
+  /** The row being dragged. Held here because WebKit hides a drag's data
+   *  until the drop, and whether a row takes it depends on its list. */
+  const dragged = useRef<{ id: string; siblings: string; top: boolean } | null>(null);
   const button = useRef<HTMLButtonElement>(null);
   const toggle = () => {
     if (open) { setOpen(null); return; }
     const r = button.current?.getBoundingClientRect();
     if (!r) return;
+    // A row closed by hand opens again on the selection the next time the
+    // list does (BR-14); one opened by hand stays open.
+    setExpanded((all) => new Map([...all].filter(([, opened]) => opened)));
     setOpen({ x: align === "center" ? r.left + r.width / 2 : r.left, y: r.bottom + 2, width: Math.max(r.width, minWidth) });
   };
-  const disclose = (id: string) =>
-    setExpanded((all) => {
-      const next = new Set(all);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
+  // A row that holds the current selection opens itself, at every level: the
+  // one thing the list has to show is where you already are (BR-14).
+  const isOpen = (r: Row) => expanded.get(r.id) ?? holdsSelection(r);
+  const disclose = (r: Row) => setExpanded((all) => new Map(all).set(r.id, !(all.get(r.id) ?? holdsSelection(r))));
 
   /**
-   * What makes an element take the dragged row: before the row `before`, or
-   * last when it is null. The drop is accepted on `dragenter` as well as
-   * `dragover`: WebKit fires only the enter on the motion that crosses into
-   * an element, and a refused enter refuses a release on that motion. It
-   * leaves `relatedTarget` null on drag events, so a leave into the element's
-   * own children is told apart by what is under the pointer.
+   * What makes an element take the dragged row: before the row `at`, after
+   * it when the pointer is on the lower half of a nested list's last row, or
+   * last when `at` is the footer. `accepts` says whether the row being
+   * dragged belongs to this list. The drop is accepted on `dragenter` as well
+   * as `dragover`: WebKit fires only the enter on the motion that crosses
+   * into an element, and a refused enter refuses a release on that motion.
+   * It leaves `relatedTarget` null on drag events, so a leave into the
+   * element's own children is told apart by what is under the pointer.
    */
-  const target = (before: string | null) => {
+  const target = (at: string | typeof END, accepts: (d: { siblings: string; top: boolean }) => boolean, last = false) => {
     if (!reorder) return undefined;
-    const key = before ?? END;
+    const where = (e: React.DragEvent): Over => {
+      const r = e.currentTarget.getBoundingClientRect();
+      return { at, after: last && e.clientY > r.top + r.height / 2 };
+    };
     const accept = (e: React.DragEvent) => {
-      if (!e.dataTransfer.types.includes(reorder.mime)) return;
+      const d = dragged.current;
+      if (!e.dataTransfer.types.includes(reorder.mime) || !d || !accepts(d)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
-      setOver(key);
+      const next = where(e);
+      setOver((o) => (o?.at === next.at && o.after === next.after ? o : next));
     };
     return {
       onDragEnter: accept,
       onDragOver: accept,
       onDragLeave: (e: React.DragEvent) => {
-        if (!e.currentTarget.contains(document.elementFromPoint(e.clientX, e.clientY))) setOver((o) => (o === key ? null : o));
+        if (!e.currentTarget.contains(document.elementFromPoint(e.clientX, e.clientY))) setOver((o) => (o?.at === at ? null : o));
       },
       // A drop moves the row and nothing more: no click follows a drag, and
       // the list stays open on the new order.
       onDrop: (e: React.DragEvent) => {
         e.preventDefault();
         setOver(null);
-        const id = e.dataTransfer.getData(reorder.mime);
-        if (id && id !== before) reorder.onMove(id, before);
+        const d = dragged.current;
+        const id = e.dataTransfer.getData(reorder.mime) || d?.id;
+        if (!id || !d || !accepts(d)) return;
+        const before = at === END || where(e).after ? null : at;
+        if (id !== before) reorder.onMove(id, before, d.siblings);
       },
     };
   };
 
-  const renderRow = (r: Row, nested: boolean): ReactNode => {
-    // A row that holds the current selection opens itself: the one thing the
-    // list has to show is where you already are.
-    const isOpen = expanded.has(r.id) || !!r.children?.some((c) => c.selected);
-    // A nested row belongs to the row above it and moves with it, so it
-    // neither drags nor takes a drop. The data is set because WebKitGTK
-    // starts no drag whose data transfer is empty.
-    const drag = reorder && !nested ? {
+  const renderRow = (r: Row, depth: number, last: boolean): ReactNode => {
+    const shown = isOpen(r);
+    // A row drags within its own list only: a child among its root's
+    // children, a root among the roots. A worktree, the group of worktrees
+    // and a row alone in its list name none and stay where they are (WS-18).
+    // The data is set because WebKitGTK starts no drag whose data transfer
+    // is empty.
+    const siblings = r.siblings;
+    const drag = reorder && siblings !== undefined ? {
       draggable: true,
-      onDragStart: (e: React.DragEvent) => { e.dataTransfer.setData(reorder.mime, r.id); e.dataTransfer.effectAllowed = "move"; },
-      onDragEnd: () => setOver(null),
-      ...target(r.id),
+      onDragStart: (e: React.DragEvent) => {
+        dragged.current = { id: r.id, siblings, top: depth === 0 };
+        e.dataTransfer.setData(reorder.mime, r.id);
+        e.dataTransfer.effectAllowed = "move";
+      },
+      onDragEnd: () => { dragged.current = null; setOver(null); },
+      ...target(r.id, (d) => d.siblings === siblings, last && depth > 0),
     } : undefined;
+    const marked = drag && over?.at === r.id ? (over.after ? " drop-after" : " drop-before") : "";
+    const pick = r.onPick;
     return (
       <Fragment key={r.id}>
         {/* No `title`: the row already prints its path, and a tooltip repeating
             it lands over the rows underneath. */}
         <div
-          className={`row${r.selected ? " selected" : ""}${nested ? " row-nested" : ""}${drag && over === r.id ? " drop-before" : ""}`}
-          onClick={() => { setOpen(null); r.onPick(); }}
+          className={`row${r.selected ? " selected" : ""}${depth > 0 ? " row-nested" : ""}${marked}`}
+          style={{ "--depth": depth } as CSSProperties}
+          onClick={() => {
+            if (!pick) return disclose(r);
+            setOpen(null);
+            pick();
+          }}
           {...drag}
         >
           {!!r.children?.length && (
             <button
-              className={`row-disclose${isOpen ? " open" : ""}`}
-              title={isOpen ? "Hide worktrees" : "Show worktrees"}
-              aria-expanded={isOpen}
-              onClick={(e) => { e.stopPropagation(); disclose(r.id); }}
+              className={`row-disclose${shown ? " open" : ""}`}
+              title={shown ? "Collapse" : "Expand"}
+              aria-expanded={shown}
+              onClick={(e) => { e.stopPropagation(); disclose(r); }}
             >▸</button>
           )}
           <span className="row-text">
             <span className="row-name">{r.name}</span>
             {r.detail && <span className="row-detail">{r.detail}</span>}
           </span>
-          {(r.onRename || r.onRemove) && (
+          {pick && (r.onRename || r.onRemove) && (
             <span className="row-actions" onClick={(e) => e.stopPropagation()}>
               {r.onRename && <button title={r.renameLabel ?? "Rename"} onClick={() => { setOpen(null); r.onRename!(); }}><Icon name="rename" size={13} /></button>}
               {r.onRemove && <button title="Remove" onClick={() => { setOpen(null); r.onRemove!(); }}><Icon name="close" size={13} /></button>}
             </span>
           )}
         </div>
-        {isOpen && r.children?.map((c) => renderRow(c, true))}
+        {shown && r.children?.map((c, i, all) => renderRow(c, depth + 1, i === all.length - 1))}
       </Fragment>
     );
   };
@@ -250,12 +289,12 @@ export function RowMenu({ label, title, className, rows, footer, empty, minWidth
       {open && (
         <ContextMenu x={open.x} y={open.y} align={align} anchor={open} onClose={() => setOpen(null)}>
           <div className="row-menu" style={{ minWidth: open.width }}>
-            {rows.map((r) => renderRow(r, false))}
+            {rows.map((r, i) => renderRow(r, 0, i === rows.length - 1))}
             {rows.length === 0 && empty && <div className="palette-empty">{empty}</div>}
             {footer && (
               <>
-                <hr className={over === END ? "drop-at" : undefined} />
-                <button className="row-footer" onClick={() => { setOpen(null); footer.onClick(); }} {...target(null)}>{footer.label}</button>
+                <hr className={over?.at === END ? "drop-at" : undefined} />
+                <button className="row-footer" onClick={() => { setOpen(null); footer.onClick(); }} {...target(END, (d) => d.top)}>{footer.label}</button>
               </>
             )}
           </div>

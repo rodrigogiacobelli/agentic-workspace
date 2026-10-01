@@ -2,11 +2,13 @@
 id: standards-motion
 title: Motion standard
 summary: How this codebase writes the rules in design-motion — the token scale in
-  src/styles.css that every duration and easing is named from, the calc form that
-  makes the reduced-motion switch work, the pseudo-element that carries the tab
-  indicator, the positions a dragged tab and its neighbours take, the hook that
-  lets a surface React unmounts still play its exit, the easing every wheel scroll
-  goes through, and what checks the result.
+  src/styles.css that every duration and easing is named from, and the one time
+  written as a number, a toast's two seconds; the calc form that makes the
+  reduced-motion switch work, the pseudo-element that carries the tab indicator,
+  the positions a dragged tab and its neighbours take, the hook that lets a surface
+  React unmounts still play its exit, how the toast stack holds its toasts, what
+  the image viewer animates and what it leaves to the input, the easing every wheel
+  scroll goes through, and what checks the result.
 related:
   - design-motion
   - standards-code
@@ -16,7 +18,10 @@ related:
 binds:
   - src/styles.css
   - src/motion.ts
+  - src/notice.ts
+  - src/App.tsx
   - src/components/tabs.tsx
+  - src/components/ImageView.tsx
   - src/wheel.ts
 ---
 
@@ -36,6 +41,15 @@ through `--d-loop` at 1400 ms — four easing curves, three delays and the
 `transition-duration: 0ms` on `:active` is the one literal in the stylesheet,
 because an acknowledgement that animates is late.
 
+An animation run from script reads the same tokens: `duration()` and
+`easing()` in `src/motion.ts` return a token's value as the stylesheet
+resolves it, reduced motion included.
+
+A toast's dwell is the one time written as a number: `NOTICE_DWELL_MS` in
+`src/notice.ts`, 2000 ms. The reduced-motion query shortens the duration
+tokens, and it must not shorten the time a message stays to be read. The
+editor's *Reloaded from disk.* banner leaves on the same number (NTF-06).
+
 ## Every distance is written through `--travel`
 
 A translate reads `calc(<n>px * var(--travel))`. The reduced-motion query sets
@@ -54,10 +68,11 @@ and the selected tab in the settings dialog's tab column is marked the same
 way.
 
 The one height reveal is a directory's children in the file tree, played for
-a directory opened while the tree is on screen — from the tree, a
-breadcrumb's *Reveal in Explorer*, a paste, a drop or a new folder — and never
-for the open directories of a
-tree built when its workspace or mode comes back (`.tree-branch.open.unfold`). The grid
+a directory opened while the tree is on screen — from the tree or its keys,
+*Show in Explorer*, a breadcrumb's *Reveal in Explorer*, a folder chip, a
+paste, a drop or a new folder — and never for the open directories of a tree
+built when its workspace or mode comes back, or of a view the Custom panel
+switches to (`.tree-branch.open.unfold`). The grid
 wrapper that carries it clips its child downwards only, with
 `overflow: visible clip`, so a name longer than the panel still scrolls into
 view rather than being cut off.
@@ -92,8 +107,7 @@ in `src/motion.ts` keeps it for the length of its exit and then calls the
 parent's close, reading the duration from the token so reduced motion shortens
 that too. `ContextMenu`, `Palette`, `Prompt`, `SettingsDialog` with its tab
 pages, `CredentialPrompt`, `Confirm`, the terminal's search bar and each
-toast — the error notice and the information notice that leaves on its own
-after 3.5 seconds — take their dismissal from it.
+toast take their dismissal from it.
 
 Three things the hook settles that a timer alone does not. A surface shown
 again while its exit is still playing has been reused, so its pending close is
@@ -112,10 +126,56 @@ takes `is-closing`, stops listening for keys, and removes its element after
 `duration("--d-fast")`. Each opening builds a new element, so no pending exit
 lands on a menu shown again.
 
+## A toast counts down only while nobody holds the stack
+
+`Notice` in `src/App.tsx` starts a toast's exit through `useDismiss` once
+`NOTICE_DWELL_MS` has run, whatever its kind (NTF-01). The timer runs only
+while the toast is not held; held, it stops, and it starts again with the
+time that was left. `Notices`, the stack around every toast of a window,
+holds them all as one while any of three is true (NTF-02, NTF-03):
+
+- the pointer is on the stack: a `mousemove` at a new screen point sets it,
+  and one at the point of the last is ignored, since WebKitGTK sends that move
+  when something appears under a resting pointer, and a toast that arrives
+  there has not been pointed at;
+- keyboard focus is inside the stack;
+- the window does not have focus: the hold starts from `document.hasFocus()`
+  and follows the window's `focus` and `blur`.
+
+A toast that leaves takes focus with it and can leave the pointer over
+nothing, and neither sends an event. After every change to the list,
+`Notices` asks `document.elementFromPoint` what lies under the last pointer
+position and lets go of a hold the stack no longer has, and does the same for
+focus. It never takes a hold that way. The hold lives in `Notices` rather than
+in `App`, so a window gaining or losing focus re-renders the stack and not
+the window.
+
+## The image viewer animates what the reader asks for
+
+`src/components/ImageView.tsx` sizes the picture in pixels, never with a
+`scale()`, and pans by scrolling. A zoom step, a fit, an actual size or a
+quarter turn asked for by a button, a key or a double-click plays one
+animation of the picture's frame
+through `Element.animate`: from a transform that puts the frame back where and
+how it was drawn to none, on `duration("--d-base")` and `easing("--e-in-out")`.
+A new change takes a running animation from its computed transform and
+cancels it, so the next one starts from where the frame had got to
+(design-motion, Interruption). A scale and a rotation have no distance for
+`--travel` to zero, so under `prefers-reduced-motion: reduce` the viewer plays
+nothing and the new size and turn land at once.
+
+What the reader drives continuously plays nothing. The viewer's own wheel
+listener, registered as not passive, takes a `Ctrl`+wheel before `wheel.ts`
+and the webview see it, calls `preventDefault` so the page never zooms, and
+writes the new zoom at once; a Shift+wheel it takes the same way and scrolls
+sideways at once. A drag writes the scroll offsets on every pointer move under
+pointer capture. A fit the viewer works out again as a divider or the window
+resizes the tab, and a mirror flip, land without an animation.
+
 ## Wheel scrolling is the application's own
 
 `src/wheel.ts` scrolls every surface a wheel scrolls vertically: both editor
-views, the diff, the Explorer, the panels, the settings. WebKitGTK animates each
+views, the diff, the image viewer, the Explorer, the panels, the settings. WebKitGTK animates each
 wheel event by itself and starts over at the next, so the stream of small steps
 a high-resolution or free-spinning wheel sends moved a page in stalls and
 spurts (`standards-linux-desktop`). One listener on the window takes each
@@ -136,7 +196,9 @@ the lines coming into view, a split's other pane following — shifts the target
 by the same amount, so it is carried rather than undone. A press or a key stops
 every glide where it is, as a touch stops a fling. Sideways scrolling, a zoom
 (Ctrl), a terminal, whose wheel xterm hands to the program running in it, and
-`prefers-reduced-motion: reduce` keep the webview's own scrolling.
+`prefers-reduced-motion: reduce` keep the webview's own scrolling. An event a
+surface has already taken, `defaultPrevented` — the image viewer's
+`Ctrl`+wheel zoom and Shift+wheel pan — is left alone.
 
 ## What checks it
 

@@ -84,12 +84,20 @@ export function useKept<T>(key: string, initial: T): [T, (next: SetStateAction<T
   const value = useSyncExternalStore(subscribe, snapshot);
   const set = useCallback((next: SetStateAction<T>) => {
     const prev = kept.get(key) as T;
-    const value = typeof next === "function" ? (next as (p: T) => T)(prev) : next;
-    if (Object.is(value, prev)) return;
-    kept.set(key, value);
-    readers.get(key)?.forEach((cb) => cb());
+    put(key, typeof next === "function" ? (next as (p: T) => T)(prev) : next);
   }, [key]);
   return [value, set];
+}
+
+/**
+ * Writes a kept value from outside the views reading it, and redraws
+ * whichever reads it now: what a request from elsewhere in the window
+ * changes, such as the row a breadcrumb reveals in the Explorer.
+ */
+export function put<T>(key: string, value: T): void {
+  if (Object.is(value, kept.get(key))) return;
+  kept.set(key, value);
+  readers.get(key)?.forEach((cb) => cb());
 }
 
 /**

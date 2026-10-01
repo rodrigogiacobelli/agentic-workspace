@@ -270,7 +270,7 @@ pub fn rename_entry(app: AppHandle, state: tauri::State<AppState>, workspace_id:
     std::fs::rename(&src, &dst)
         .with_context(|| format!("renaming {} to {}", src.display(), dst.display()))
         .map_err(|e| format!("{e:#}"))?;
-    crate::session::relocate(&app, &workspace_id, &from, &to);
+    crate::session::relocate(&app, &src, &dst);
     Ok(())
 }
 
@@ -418,9 +418,6 @@ pub fn paste_entry(
     if src_is_dir && real_dir.starts_with(&src) {
         return Err(format!("{} cannot be pasted into itself", src.display()));
     }
-    // What the source is called inside this workspace, when it is inside it:
-    // the form the tree, the tabs and the views speak.
-    let inside = src.strip_prefix(&root).ok().map(|rel| rel.to_string_lossy().into_owned());
     let to_dir = to_dir.trim_matches('/').to_string();
     let wanted = join_rel(&to_dir, &name);
     let target = real_dir.join(file_name);
@@ -454,11 +451,9 @@ pub fn paste_entry(
     let dst = root.join(&dest);
     if cut {
         move_across(&src, &dst).with_context(|| format!("moving {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
-        // A cut inside the workspace is a move: what was open under the old
-        // path follows it.
-        if let Some(rel) = inside {
-            crate::session::relocate(&app, &workspace_id, &rel, &dest);
-        }
+        // A cut is a move: what was open under the old path follows it, in
+        // whichever workspace holds both.
+        crate::session::relocate(&app, &src, &dst);
     } else {
         copy_entry(&src, &dst).with_context(|| format!("copying {} to {}", src.display(), dst.display())).map_err(|e| format!("{e:#}"))?;
     }
@@ -475,15 +470,37 @@ pub fn trash(abs: &Path) -> Result<()> {
         .output()
         .with_context(|| format!("running gio trash on {}", abs.display()))?;
     if !output.status.success() {
-        anyhow::bail!("gio trash failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+        // gio names the file twice before its reason, and every caller has
+        // named it already.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr.trim().rsplit(": ").next().filter(|r| !r.is_empty()).map(str::to_string).unwrap_or_else(|| output.status.to_string());
+        anyhow::bail!("gio trash failed: {reason}");
     }
     Ok(())
 }
 
-#[tauri::command]
-pub fn trash_entry(state: tauri::State<AppState>, workspace_id: String, path: String) -> Result<(), String> {
-    let (_, abs) = resolve(&state, &workspace_id, &path).map_err(|e| format!("{e:#}"))?;
-    trash(&abs).map_err(|e| format!("{e:#}"))
+/// Moves entries to the desktop's trash, one at a time, and answers those
+/// that failed as `<path>: <reason>`, so one notice can list them all
+/// (TREE-25b). `resolve` takes the empty path for the root itself, which is
+/// refused here: nothing in the tree names it.
+///
+/// Off the main thread: every entry starts a `gio` process.
+#[tauri::command(async)]
+pub fn trash_entries(state: tauri::State<AppState>, workspace_id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+    resolve(&state, &workspace_id, "").map_err(|e| format!("{e:#}"))?;
+    let failed = paths
+        .into_iter()
+        .filter_map(|path| {
+            let result = resolve(&state, &workspace_id, &path).and_then(|(root, abs)| {
+                if abs == root {
+                    anyhow::bail!("the workspace's own folder is not moved to the trash");
+                }
+                trash(&abs)
+            });
+            result.err().map(|e| format!("{path}: {e:#}"))
+        })
+        .collect();
+    Ok(failed)
 }
 
 #[tauri::command]

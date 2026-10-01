@@ -3,9 +3,10 @@ id: 018-mount-what-is-on-screen
 title: 'ADR-018: Only what is on screen is mounted, and a workspace out of sight is quiet'
 summary: Why the Workspace window mounts only the workspace and mode on screen and
   rebuilds the rest from state kept outside React; why a workspace out of sight
-  costs no watch on its tree, no working-tree read and no mounted view; why the backend
-  publishes and refreshes only on real change; why terminals are the one view kept
-  whole; and why each window loads only its own half of the bundle.
+  costs no watch on its tree, no working-tree read and no mounted view; what the
+  repositories found inside a root cost, and how launch reads their summaries once;
+  why the backend publishes and refreshes only on real change; why terminals are the
+  one view kept whole; and why each window loads only its own half of the bundle.
 related:
 - 017-modes
 - 016-terminal-output-and-renderer
@@ -13,6 +14,7 @@ related:
 - 009-xterm-and-portable-pty
 - 010-react-frontend
 - 012-git-through-the-git-binary
+- 020-workspace-family
 - standards-code
 binds:
 - src/live.ts
@@ -21,12 +23,14 @@ binds:
 - src/components/WorkspaceFacts.tsx
 - src/components/EditorArea.tsx
 - src/components/FileTree.tsx
+- src/components/ImageView.tsx
 - src/components/DiffView.tsx
 - src/editors.ts
 - src/editor/document.ts
 - src/repo.ts
 - src-tauri/src/watch.rs
 - src-tauri/src/session.rs
+- src-tauri/src/family.rs
 - src-tauri/src/git.rs
 - src-tauri/src/store.rs
 - src-tauri/src/agent.rs
@@ -83,14 +87,26 @@ missing after a rebuild. `useKept` is a `useState` over a module map: the
 setter writes through at once and redraws whichever view reads the key now,
 so a fetch or a push that finishes after its panel was taken down reaches the
 panel built in its place. `keep` writes without redrawing, for an offset a
-view records as it scrolls; `peek` reads once at build; `useKeptScroll`
+view records as it scrolls; `peek` reads once at build; `put` writes a key
+from outside the views that read it and redraws them, as a follow of the
+document in front or a reveal in the Explorer does; `useKeptScroll`
 restores a scroller once its content is there. Keys name their owner —
 `<workspace>:<what>` or `<workspace>:tab:<tab>:<what>` — and `retainKept`
 drops those of a removed workspace or a closed tab. Every panel keeps what the
-reader typed, started or fetched: listings, filters and the Explorer's
-multi-selection, the commit message, branch lists and a remote operation's
-output, search hits, loaded history, diff text, and every list's scroll,
-the outline's per tab. A rebuilt view paints that at once; the tree, the
+reader typed, started or fetched: listings, filters, each tree panel's
+selection — its selected rows, lead row and anchor, under
+`<workspace>:tree:explorer:selection` and `<workspace>:tree:custom:selection`
+— the commit message, branch lists and a remote operation's output, search
+hits, loaded history, diff text, and every list's scroll, the outline's per
+tab. `<workspace>:tree:front` holds the id of the Editor tab the trees last
+followed, so a view rebuilt by a switch follows a document brought to the
+front while it was away and otherwise leaves the selection the reader left
+(TREE-18). An image tab keeps its view — fitted or not, the zoom, the turns
+and flips, and the picture's own size — under `<workspace>:tab:<tab>:image`,
+and the picture's point at the middle of the view under
+`<workspace>:tab:<tab>:image-at`, so the picture comes back at the same zoom,
+position and rotation after a switch of tab, mode or workspace, and fitted
+after a restart (IMG-07). A rebuilt view paints that at once; the tree, the
 lists and the diffs then read again, and Search keeps its last hits until it
 is run again. It plays no entrance for what it kept: only a branch opened
 after the tree was built unfolds, and only the output box of an operation run
@@ -106,25 +122,59 @@ a tab brought forward in a group already on screen; a group rebuilt with the
 tab it had in front leaves focus where it is.
 
 **A workspace out of sight is quiet.** `watch::sync` watches the active
-workspace's root, expanded directories and tab directories, and the git
-directory of every workspace. `session::activate` calls `watch::catch_up`,
-which reports the root, the expanded directories, the tab directories and the
-repository as changed, so a workspace coming back reads what moved while it
-was away. The watcher drops `*.lock` paths inside a git directory, sends no
-`dir-changed` for a directory inside one unless a tab of the active workspace
-is open on a file there, and attributes a change under
-`worktrees/<name>` to that worktree's workspace. `git::refresh_summary`
-reports whether a summary changed — a workspace whose directory is gone loses
-its summary, which counts — and `watch::emit` prunes and publishes only when
-one did. After any change in a git directory `watch::emit` re-syncs the
-watched set, and `Watcher::heal` watches again a reported directory that was
-deleted and created anew, since deleting a directory ends its watch. `session::publish` sends nothing when the snapshot equals the
-last one sent; `store::save` skips a write whose text matches the last one
-while the file is still there. `src/repo.ts` tells only the readers of the
-workspace it read, only when a read changed something, and a file change
-re-reads only the status list, unless no repository is held or git refuses
-the status, when it reads everything. A tree filter's file list is read again
+workspace's root, the folders open in its Explorer (`Workspace.expanded`) and
+in each of its views (`View.expanded`), and its tab directories; the root
+folder of the active workspace's family; and the git directory of every
+workspace that holds a summary. A workspace family (`020-workspace-family`)
+is a root the owner added by hand, the repositories directly inside its folder
+(its children) and the open worktrees of either; the family's root folder is
+watched, non-recursively, only while that root lists the repositories inside
+it (`family::scans`). While the root itself is out of sight — one of its
+members on screen — `watch::emit` hears a change to that folder, or to an
+entry directly in it, for the family scan alone: the change reaches no
+workspace but the one on screen, and the root reads what moved when it comes
+back (WS-16, assumption 27). `session::activate` calls `watch::catch_up`, which reports the root, the
+folders open in the Explorer, the tab directories and the repository as
+changed, so a workspace coming back reads what moved while it was away. The
+watcher drops `*.lock` paths inside a git directory, sends no `dir-changed`
+for a directory inside one unless a tab of the active workspace is open on a
+file there, and attributes a change under `worktrees/<name>` to that
+worktree's workspace. `git::refresh_summary` reports whether a summary changed
+— a workspace whose directory is gone loses its summary, which counts.
+`watch::emit` prunes only when one did, and publishes only when one did or
+the family scan added a child, found one gone or back, or read the summary of
+a child that had none. After any change in a git directory, and after a scan
+that found any of those, `watch::emit` re-syncs the watched set, and
+`Watcher::heal` watches again a reported directory that was deleted and
+created anew, since deleting a directory ends its watch. `session::publish`
+sends nothing when the snapshot equals the last one sent; `store::save` skips
+a write whose text matches the last one while the file is still there.
+`src/repo.ts` tells only the readers of the workspace it read, only when a
+read changed something, and a file change re-reads only the status list,
+unless no repository is held or git refuses the status, when it reads
+everything. A tree filter's file list is read again
 at most once a second while files change.
+
+**A root's children cost a watch and a summary each.** A child — a repository
+`family::scan` finds directly inside a root's folder — is a workspace entry of
+its own, whether or not the owner opens it. It holds a summary, which
+`git::refresh_summary` reads with git at launch and after each change in its
+git directory, and `watch::sync` watches that git directory as it does every
+workspace's: the directory itself, `refs`, `refs/heads`, `refs/tags` and
+`worktrees`. A scan runs no git: it is a read of the root's own `.git`, one
+listing of the root's folder and one stat per folder in it, with the session
+unlocked while it lists. `020-workspace-family` lists when a scan runs; the
+scan this watch set drives is `watch::emit`'s, on a change directly inside the
+root folder of the family on screen, unless the entry is hidden or is a file
+on disk. Launch reads every summary in one pass on the `git-summaries` thread:
+`family::scan_roots` scans every root, the linked worktrees last, then
+`family::summarise` reads each workspace's summary, the children's included.
+`summarise` claims each id in `AppState.summarising` before its first git and
+skips an id another thread has claimed. A member coming on screen hands the
+children its scan found with no summary to `family::settle`, which reads them
+through `summarise` on a thread of its own, so a switch made while the launch
+pass runs starts no second read of a child that pass is reading. `settle`
+re-syncs the watches and publishes only when it read a summary.
 
 **Terminals stay whole.** Each terminal's xterm instance lives in
 `src/terminals.ts` for the life of its tab, attached to its stream, whatever
@@ -141,8 +191,11 @@ settings are all present. The Workspace window never loads xterm.js, and the
 Terminal window never loads CodeMirror or the git panels.
 
 **The switch leaves the main thread.** `switch_workspace` runs as an async
-command. `activate` starts the workspace's shells before it names the
-workspace active, so a window attaching to a terminal finds its shell.
+command, and so do `add_workspace`, `remove_workspace` and `terminal_open`;
+a workspace picked from the tray is brought on screen on a thread of its own.
+Each of them runs git, a scan or a shell start. `activate` starts the shells
+of the workspace's family before it names the workspace active, so a window
+attaching to a terminal finds its shell.
 
 ## Rationale
 
@@ -157,10 +210,22 @@ workspace active, so a window attaching to a terminal finds its shell.
   first tour and after the third.
 - A workspace out of sight has no tree watch, no working-tree read and no
   mounted view; only a change in its git directory refreshes its summary, and
-  its terminals flush on the 250 ms window. Agent activity that writes files
-  and runs `git status` in workspaces not on screen starts no git process and
-  uses 0.1% of a core; in the workspace on screen it starts two a second, one
-  tree listing and one status read per file written.
+  its terminals flush on the 250 ms window. The one watch on a folder out of
+  sight, the root folder of the family on screen, is heard for the family scan
+  alone, which is a directory listing and never git. Agent activity that
+  writes files and runs `git status` in workspaces not on screen starts no git
+  process and uses 0.1% of a core; in the workspace on screen it starts two a
+  second, one tree listing and one status read per file written.
+- A repository cloned beside the member on screen is listed at the cost of a
+  listing. Measured on 2026-09-30 with a worktree member on screen: folders
+  and files made, written and removed directly in its root's folder started
+  no git process and published nothing; `git init` of a new repository there
+  started only that child's summary and one publish; and a minute idle
+  started no git process.
+- Claiming each summary before reading it lets the launch pass and a switch
+  made during it share the work: three switches among a root's children while
+  launch read every summary, with each git call slowed to 1.5 s, read no
+  summary but that of the child each switch brought on screen.
 - The split cuts what each window parses: the Terminal window loads 669 KB of
   JavaScript and the Workspace window 1.0 MB, instead of 1.5 MB each. For the
   whole change, in alternating launches, the application
@@ -197,6 +262,10 @@ workspace active, so a window attaching to a terminal finds its shell.
 - A change in a workspace out of sight is seen when the workspace comes back,
   through `catch_up`, not when it happens; open documents of that workspace
   check their files then.
+- A child costs its summary and five watches on its git directory whether or
+  not the owner opens it, and a root holding many repositories pays that for
+  each; a root the owner added by hand on a child's folder reads a second
+  summary of the same repository.
 
 ## Constraints imposed
 
@@ -205,6 +274,11 @@ workspace active, so a window attaching to a terminal finds its shell.
   shown over it, stays mounted out of sight, and those idle through `Live`.
 - **Terminals are never torn down by a switch.** An xterm instance ends only
   with its tab.
+- **A scan runs no git.** `family::scan` lists a root's folder with the session
+  unlocked. Git runs after it, for the summary of a child it found without
+  one: in `family::settle`'s thread, in the watcher's thread that heard the
+  change, or at launch in the `git-summaries` thread, never on the GTK main
+  thread.
 - **Shared code imports neither half.** `App`, `Switcher`, `StatusBar`,
   `SettingsDialog`, `CredentialsPage`, `CredentialPrompt`, `Palette`, `Menu`,
   `api`, `settings`, `modes`, `modal` and `notice` reach `editors`,

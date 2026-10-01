@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ask, message } from "@tauri-apps/plugin-dialog";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { api, events } from "../api";
 import { offerDrop, onDropEnd, startTreeDrag, treeDrag, type DropAction, type TreeDrag } from "../dropRoute";
 import * as editors from "../editors";
-import { keep, peek, useKept, useKeptScroll, useLive } from "../live";
+import { keep, peek, put, useKept, useKeptScroll, useLive } from "../live";
+import * as settings from "../settings";
+import * as selection from "../treeSelection";
 import type { Entry, StatusEntry, View, Workspace } from "../types";
+import { Confirm } from "./Confirm";
 import { fileIcon, Icon } from "./icons";
 import { ContextMenu, RowMenu, SubMenu } from "./Menu";
 import { Prompt } from "./Prompt";
@@ -12,16 +15,16 @@ import { FILE_MIME } from "./SplitTree";
 import { duration } from "../motion";
 import { report } from "../notice";
 
+/** The workspace's own tree, or its custom views. */
+type Kind = "explorer" | "custom";
+
 interface Props {
   ws: Workspace;
-  /** The workspace's own tree, or its custom views. */
-  kind: "explorer" | "custom";
+  kind: Kind;
   /** A single click opens a preview tab; a double click or a new file opens a permanent one. */
   onOpen: (path: string, preview: boolean) => void;
   /** Inserts a citation of each path into the active document, one per line. */
   onQuote: (paths: string[]) => void;
-  selected: string | null;
-  onSelect: (path: string | null) => void;
   gitStatus?: StatusEntry[];
 }
 
@@ -42,20 +45,43 @@ function statusMap(status: StatusEntry[]): Map<string, string> {
   return map;
 }
 
+/** A row as the tree last drew it: what the keys and every action of the panel work on (TREE-22a). */
+interface TreeRow extends selection.Row {
+  entry: Entry;
+  /** Its branch is drawn open. */
+  open: boolean;
+  /** A click, ← and → fold and unfold it; a filtered tree draws every folder open. */
+  folds: boolean;
+  /** The row is one of the open view's own entries. */
+  viewRoot: boolean;
+  /** The row whose branch it is drawn in, by its place in the order; -1 at the top. */
+  parent: number;
+}
+
 interface Menu {
   x: number;
   y: number;
-  entry: Entry | null;
-  /** The row is one of the open view's own entries. */
-  viewRoot: boolean;
+  /** The row right-clicked; null for the background. */
+  row: TreeRow | null;
 }
 
 type Dialog =
   | { kind: "new-file"; dir: string }
   | { kind: "new-folder"; dir: string }
   | { kind: "rename"; entry: Entry }
-  | { kind: "new-view"; then?: string }
+  | { kind: "new-view"; then?: string[] }
   | { kind: "rename-view"; view: View };
+
+/** A question the tree asks in a dialog of its own, and the answer it waits on (SET-05a, TREE-27). */
+interface Question {
+  title: string;
+  message: string;
+  ok: string;
+  cancel: string;
+  alt?: string;
+  checkbox?: { label: string };
+  answer: (a: { ok: boolean; checked: boolean; alt: boolean }) => void;
+}
 
 /** A move made in the tree, which Ctrl+Z makes back (TREE-13). */
 interface Move {
@@ -105,13 +131,150 @@ const NOTHING = new Map<string, Entry[]>();
  */
 let clipboardHasFiles: boolean | null = null;
 
+/** Where each panel's selection is kept: one per panel, never shared (TREE-22). */
+const selectionKey = (workspaceId: string, kind: Kind) => `${workspaceId}:tree:${kind}:selection`;
+
+/** The view the Custom panel shows: the one last picked, or the first there is. */
+const shownView = (ws: Workspace): View | null => ws.views.find((v) => v.id === ws.activeView) ?? ws.views[0] ?? null;
+
 /**
- * A row asked for from outside the tree: a breadcrumb's Reveal in Explorer
- * (ED-47). Held here rather than in a tree, since the Explorer it names may be
- * built only once the request has brought it forward.
+ * Lead rows asked for from outside a tree, by a follow or a reveal, to be
+ * scrolled into view once drawn, as `<workspace>:<kind>` to the lead. Held
+ * here rather than in a tree: the tree may be behind another panel's tab, with
+ * no box to scroll, or not built yet (TREE-18b, ED-59a).
  */
-let revealing: { workspaceId: string; path: string } | null = null;
-window.addEventListener("tree-reveal", (e) => { revealing = (e as CustomEvent<{ workspaceId: string; path: string }>).detail; });
+const bringing = new Map<string, string>();
+
+/**
+ * Follows under open folders whose row the panel's listing does not hold, as
+ * `<workspace>:<kind>` to the path and the selection the follow found. The
+ * file may be gone with no document read yet to say so (§9.20), or newer than
+ * a listing kept out of sight or from before a rebuild. The tree selects the
+ * row once it draws it, unless its selection changed first, and a read of the
+ * folder without it drops the follow: the selection stays as it was (§9.16).
+ * A follow `held` off by several highlighted rows waits too (see `follow`).
+ */
+const awaiting = new Map<string, { path: string; from: selection.Selection; held?: boolean }>();
+
+/** A filter's file list being read, among the directories a tree has in flight: a NUL is in no path. */
+const FILES = "\0files";
+
+/**
+ * The document in front changed (TREE-18 to TREE-21): each panel that draws
+ * `path` selects it alone and scrolls to it once it is on screen. A panel
+ * that does not draw it, or highlights several rows, is left as it was, and so
+ * is every panel when the file is `gone`, its tab detached: a listing kept out
+ * of sight may still name it. Nothing opens, nothing comes forward, and the
+ * keyboard stays where it is. A `path` of null, no document in front, follows
+ * nothing.
+ */
+export function followFront(ws: Workspace, path: string | null, gone: boolean): void {
+  // A follow still waiting gives way to this one, and to none: settled later
+  // it would select a document no longer in front, or no longer open.
+  awaiting.delete(`${ws.id}:explorer`);
+  awaiting.delete(`${ws.id}:custom`);
+  if (path === null || gone) return;
+  follow(ws.id, "explorer", ws.expanded, null, path, false);
+  const view = shownView(ws);
+  if (view) follow(ws.id, "custom", view.expanded, view.entries, path, false);
+}
+
+/**
+ * One panel's part of a follow. Several rows highlighted hold it off, but
+ * counted on listings kept while the tree was out of sight they may be rows
+ * since removed: the follow is held, and the tree weighs it again once it has
+ * read them, `settled`, and takes it only if at most one is left (TREE-18b).
+ */
+function follow(wsId: string, kind: Kind, expanded: string[], roots: string[] | null, path: string, settled: boolean): void {
+  const id = `${wsId}:${kind}`;
+  const kept = `${wsId}:tree:${kind}`;
+  const key = selectionKey(wsId, kind);
+  const sel = peek<selection.Selection>(key) ?? selection.NONE;
+  const filter = peek<string>(`${kept}:filter`) ?? "";
+  const files = peek<string[] | null>(`${kept}:files`) ?? null;
+  const listings = peek<Map<string, Entry[]>>(`${kept}:listings`);
+  // A filter draws from its file list, and a view draws its entries whatever
+  // the disk holds. Beneath those the tree walks its listings down, so a row
+  // is drawn only while the listing kept of every folder on the way still
+  // names the next: one inside a folder deleted outside the app is not, even
+  // with the dead folder's own listing kept. A folder with no listing kept
+  // says nothing until the tree has read every folder it draws, `settled`:
+  // then its read failed, and it draws nothing. Each listing is made a set
+  // once, however many paths ask.
+  const names = new Map<string, Set<string> | undefined>();
+  const lists = (dir: string, p: string) => {
+    if (!names.has(dir)) {
+      const listed = listings?.get(dir);
+      names.set(dir, listed && new Set(listed.map((e) => e.path)));
+    }
+    return names.get(dir)?.has(p) ?? !settled;
+  };
+  const unlisted = (p: string) => {
+    if (filter) return false;
+    for (let d = p; d && !roots?.includes(d); d = dirOf(d)) if (!lists(dirOf(d), d)) return true;
+    return false;
+  };
+  // Only rows still drawn make a multi-selection (TREE-21). A path moved,
+  // deleted or folded away stays in the set with no row to highlight, and
+  // would otherwise hold off every follow until the owner clicks the tree.
+  // The panel is weighed once for a selection of several, which under a
+  // filter is a pass over the whole list; one path walks it only to a match.
+  const shows = sel.set.size > 1 ? selection.drawing(expanded, roots, filter, files) : (p: string) => selection.draws(p, expanded, roots, filter, files);
+  let highlighted = 0;
+  for (const p of sel.set) if (shows(p) && !unlisted(p) && ++highlighted > 1) break;
+  awaiting.delete(id);
+  if (!shows(path)) return;
+  if (highlighted > 1) {
+    if (settled) return;
+    // A fresh value, so a tree on screen redraws and settles it at once
+    // rather than on a later fold that leaves one row.
+    const from = { ...sel };
+    awaiting.set(id, { path, from, held: true });
+    put(key, from);
+    return;
+  }
+  if (unlisted(path)) { awaiting.set(id, { path, from: sel }); return; }
+  // Selected alone already, it keeps the copy it leads at in a view; a fresh
+  // value all the same, so the tree redraws and scrolls to it.
+  const stays = sel.set.size === 1 && sel.set.has(path) ? sel.lead : null;
+  bringing.set(id, stays ?? path);
+  put(key, stays ? { ...sel } : selection.only({ key: path, path }));
+}
+
+/**
+ * Show in Explorer and Reveal in Explorer (ED-59, ED-59b): the Explorer
+ * selects the path alone, clearing a filter that hides it first, and scrolls
+ * to it once the folders above it are open and it is on screen. The Workspace
+ * window opens those folders and brings the Explorer forward.
+ */
+export function revealInTree(workspaceId: string, path: string): void {
+  const kept = `${workspaceId}:tree:explorer`;
+  const filter = peek<string>(`${kept}:filter`) ?? "";
+  if (filter && !selection.draws(path, [], null, filter, peek<string[] | null>(`${kept}:files`) ?? null)) {
+    put(`${kept}:filter`, "");
+    put(`${kept}:files`, null);
+  }
+  bringing.set(`${workspaceId}:explorer`, path);
+  put(selectionKey(workspaceId, "explorer"), selection.only({ key: path, path }));
+}
+
+/**
+ * Trees asked for the keyboard — by their tab, Ctrl+Shift+E or a reveal —
+ * that have not taken it yet, as `<workspace>:<kind>`. Heard here, as Search
+ * hears it: the asking comes first when it is what brings the tree into being.
+ */
+const wanted = new Set<string>();
+window.addEventListener("panel-focus", (e) => {
+  const { workspaceId, id } = (e as CustomEvent<{ workspaceId: string; id: string }>).detail;
+  if (id === "explorer" || id === "custom") wanted.add(`${workspaceId}:${id}`);
+});
+
+/** The path the copy-path key names: the lead of the tree holding the keyboard, else the Explorer's. */
+export function treeLead(workspaceId: string): string | null {
+  const focused = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>(".tree")?.dataset.kind;
+  const lead = peek<selection.Selection>(selectionKey(workspaceId, focused === "custom" ? "custom" : "explorer"))?.lead;
+  return lead ? selection.pathOf(lead) : null;
+}
 
 /**
  * A drag from another application is seen only through Tauri, which says
@@ -134,23 +297,27 @@ export function externalDrop(el: Element, paths: string[]): void {
  * their depth, each expanding to its real children (VIEW-03, VIEW-04).
  *
  * The tree is taken down when its workspace or mode leaves the screen. Its
- * listings, filter, view entries, multi-selection and scroll are kept per
+ * listings, filter, view entries, selection and scroll are kept per
  * workspace and kind, so the tree built again paints as it was left, then
  * reads what it draws afresh — it heard no change while it was down.
  */
-export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitStatus = [] }: Props) {
+export function FileTree({ ws, kind, onOpen, onQuote, gitStatus = [] }: Props) {
   const gitMap = useMemo(() => statusMap(gitStatus), [gitStatus]);
   const kept = `${ws.id}:tree:${kind}`;
   const [listings, setListings] = useKept(`${kept}:listings`, NOTHING);
   const [menu, setMenu] = useState<Menu | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [asking, setAsking] = useState<Question | null>(null);
   const [filter, setFilter] = useKept(`${kept}:filter`, "");
   const [allFiles, setAllFiles] = useKept<string[] | null>(`${kept}:files`, null);
   const [viewEntries, setViewEntries] = useKept<Entry[] | null>(`${kept}:view`, null);
-  /** Ctrl+click adds rows to a selection that Quote to AI cites together (CITE-13). */
-  const [multi, setMulti] = useKept<Set<string>>(`${kept}:multi`, new Set());
+  /** This panel's own rows selected, lead and anchor: a click, a key or a reveal in the other panel never changes them. */
+  const selKey = selectionKey(ws.id, kind);
+  const [sel, setSel] = useKept(selKey, selection.NONE);
+  /** The selection as it is now, not as this render drew it: a key pressed before the tree redraws starts where the last one left it. */
+  const selNow = () => peek<selection.Selection>(selKey) ?? sel;
   /** Every row drawn in this render, in tree order. */
-  const order = useRef<string[]>([]);
+  const order = useRef<TreeRow[]>([]);
   /**
    * Where a tree drag over this tree would land, marked: the folder it goes
    * into (`""` the root), or the view entry it goes before (VIEW-12). Every
@@ -165,13 +332,29 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   /** Directories still drawn while their collapse plays out. */
   const [collapsing, setCollapsing] = useState<Set<string>>(new Set());
   const inflight = useRef(new Set<string>());
-  // Custom shows the view last picked, or the first there is.
-  const view = kind === "custom" ? (ws.views.find((v) => v.id === ws.activeView) ?? ws.views[0] ?? null) : null;
+  const view = kind === "custom" ? shownView(ws) : null;
   const entriesKey = view?.entries.join("\n") ?? "";
   const roots = view?.entries ?? null;
-  /** What callbacks outliving a render read: the workspace, its expansion and the view's entries as of the last one. */
-  const latest = useRef({ ws, expanded: ws.expanded, roots });
-  latest.current = { ws, expanded: ws.expanded, roots };
+  /** The folders this panel draws open: the Explorer's, or the view's own (TREE-20). */
+  const expanded = view?.expanded ?? ws.expanded;
+  /** What callbacks outliving a render read: this panel's expansion, and the view with its entries as of the last one. */
+  const latest = useRef({ expanded, roots, view: view?.id ?? null });
+  latest.current = { expanded, roots, view: view?.id ?? null };
+  /** Opens or folds folders in this panel only. */
+  const setOpen = (paths: string[], open: boolean) => api.setExpanded(ws.id, paths, open, latest.current.view);
+
+  /**
+   * A follow held off by several highlighted rows is weighed again once the
+   * tree is on screen with every read it asked for back, and so counts rows
+   * as the disk holds them now (TREE-18b).
+   */
+  const settle = useCallback(() => {
+    const id = `${ws.id}:${kind}`;
+    const want = awaiting.get(id);
+    if (!want?.held || !liveRef.current || inflight.current.size) return;
+    if (peek(selKey) !== want.from) awaiting.delete(id);
+    else follow(ws.id, kind, latest.current.expanded, latest.current.roots, want.path, true);
+  }, [ws.id, kind, selKey]);
 
   // A listing that comes back as it was changes nothing and draws nothing; one
   // for a directory folded while it was read is dropped.
@@ -179,18 +362,34 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     if (inflight.current.has(dir)) return;
     inflight.current.add(dir);
     api.listDir(ws.id, dir)
-      .then((entries) => setListings((m) => {
-        if (dir && !latest.current.expanded.includes(dir)) return m;
-        return same(m.get(dir), entries) ? m : new Map(m).set(dir, entries);
-      }))
-      // A directory deleted while it was open stays in the expanded set, and
-      // every build would report it again; it is folded instead.
-      .catch((e) => {
-        if (dir && /No such file|os error 2/i.test(String(e))) void api.setExpanded(ws.id, dir, false).catch(() => {});
-        else report(e);
+      .then((entries) => {
+        const id = `${ws.id}:${kind}`;
+        const want = awaiting.get(id);
+        if (want && dirOf(want.path) === dir && !entries.some((e) => e.path === want.path)) awaiting.delete(id);
+        setListings((m) => {
+          if (dir && !latest.current.expanded.includes(dir)) return m;
+          return same(m.get(dir), entries) ? m : new Map(m).set(dir, entries);
+        });
       })
-      .finally(() => inflight.current.delete(dir));
-  }, [ws.id, setListings]);
+      // A directory deleted while it was open stays in the expanded set, and
+      // every build would report it again; it is folded instead. The fold
+      // lands later, and its listing goes now: until then the tree would draw
+      // the rows it names, and a held follow settling would count them (TREE-21).
+      .catch((e) => {
+        if (!dir || !/No such file|os error 2/i.test(String(e))) { report(e); return; }
+        setListings((m) => {
+          if (!m.has(dir)) return m;
+          const next = new Map(m);
+          next.delete(dir);
+          return next;
+        });
+        void api.setExpanded(ws.id, [dir], false, latest.current.view).catch(() => {});
+      })
+      .finally(() => {
+        inflight.current.delete(dir);
+        settle();
+      });
+  }, [ws.id, kind, setListings, settle]);
 
   const loadView = useCallback(() => {
     if (!view) { setViewEntries(null); return; }
@@ -202,7 +401,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   // from what it kept until the answers land. A directory opened after that is
   // read as it opens. A file list dropped meanwhile, with its filter, stays
   // dropped.
-  const expandedKey = ws.expanded.join("\n");
+  const expandedKey = expanded.join("\n");
   const built = useRef(false);
   /** What the last pass drew: a directory coming into view is read even with a
    *  listing kept, which the other tree may have folded and let go stale. */
@@ -211,7 +410,7 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     const all = !built.current;
     built.current = true;
     if (all && kind === "explorer") load("");
-    const now = drawn(ws.expanded, roots);
+    const now = drawn(expanded, roots);
     for (const dir of now) if (all || !wasDrawn.current.has(dir)) load(dir);
     wasDrawn.current = new Set(now);
     if (all && filter && allFiles !== null) refetchFiles(0);
@@ -221,16 +420,26 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   // until the answer lands. An agent writing in a watched directory reports a
   // change several times a second, and every read walks the whole tree, so the
   // changes of a second share one read; only the latest read asked for lands.
+  // From the asking until it has, the list counts as in flight, like a
+  // listing, so a held follow is weighed against the disk as it is now. A
+  // read asked for meanwhile does not hold it off further: an agent writing
+  // all the while would hold it off for good.
   const filesRead = useRef<{ timer: number | null; asked: number }>({ timer: null, asked: 0 });
   const refetchFiles = (delay: number) => {
     const read = filesRead.current;
     if (read.timer !== null) return;
+    inflight.current.add(FILES);
     read.timer = window.setTimeout(() => {
       read.timer = null;
       const asked = ++read.asked;
       api.listFiles(ws.id)
         .then((files) => { if (read.asked === asked) setAllFiles((prev) => (prev === null || same(prev, files) ? prev : files)); })
-        .catch(report);
+        .catch(report)
+        .finally(() => {
+          if (read.asked !== asked) return;
+          inflight.current.delete(FILES);
+          settle();
+        });
     }, delay);
   };
   useEffect(() => () => { if (filesRead.current.timer !== null) window.clearTimeout(filesRead.current.timer); }, []);
@@ -242,10 +451,17 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   // the first frame of it. Then its listing goes, with those of the
   // directories inside it, and is read afresh when it opens again. The timer
   // runs out even when another directory folds meanwhile.
-  const wasExpanded = useRef(ws.expanded);
+  const wasExpanded = useRef(expanded);
+  // Another view shown holds its own folders open (TREE-20), and draws them as
+  // they are, with nothing unfolding or folding to get there.
+  const wasView = useRef(view?.id);
+  if (wasView.current !== view?.id) {
+    wasView.current = view?.id;
+    wasExpanded.current = expanded;
+  }
   useEffect(() => {
-    const gone = wasExpanded.current.filter((d) => !ws.expanded.includes(d));
-    wasExpanded.current = ws.expanded;
+    const gone = wasExpanded.current.filter((d) => !expanded.includes(d));
+    wasExpanded.current = expanded;
     if (!gone.length) return;
     setCollapsing((all) => new Set([...all, ...gone]));
     window.setTimeout(() => {
@@ -314,20 +530,14 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
    * breadcrumb's Reveal in Explorer, a paste or a new folder: their branches alone unfold, never
    * the ones drawn open as the tree is built.
    */
-  const opened = built.current ? ws.expanded.filter((d) => !wasExpanded.current.includes(d)) : [];
-  const toggle = (path: string) => void api.setExpanded(ws.id, path, !ws.expanded.includes(path));
+  const opened = built.current ? expanded.filter((d) => !wasExpanded.current.includes(d)) : [];
+  const toggle = (path: string) => void setOpen([path], !expanded.includes(path));
 
   // Filtered view: matching files and their ancestors, every directory open.
   const filtered = useMemo(() => {
     if (!filter || !allFiles) return null;
-    const needle = filter.toLowerCase();
-    const roots = view?.entries ?? null;
-    const matches = allFiles
-      .filter((p) => p.toLowerCase().includes(needle))
-      .filter((p) => !roots || roots.some((r) => p === r || p.startsWith(`${r}/`)))
-      .slice(0, 2000);
     const children = new Map<string, Map<string, boolean>>();
-    for (const file of matches) {
+    for (const file of selection.matches(allFiles, filter, view?.entries ?? null)) {
       const parts = file.split("/");
       let dir = "";
       parts.forEach((part, i) => {
@@ -340,14 +550,29 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     return children;
   }, [filter, allFiles, view?.entries]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Whether a path shown in the panel is a directory. A filtered tree draws folders it never listed. */
-  const isDir = (path: string): boolean =>
-    filtered?.get(dirOf(path))?.get(path.slice(path.lastIndexOf("/") + 1)) === true ||
-    viewEntries?.find((e) => e.path === path)?.isDir || [...listings.values()].some((l) => l.some((e) => e.path === path && e.isDir));
+  /**
+   * The highlighted rows the panel draws, each path once, in tree order: what
+   * Delete, a copy, a cut, a drag and Quote to AI take (TREE-22a). A row
+   * folded out of sight is not among them.
+   */
+  const picked = (): TreeRow[] => {
+    const seen = new Set<string>();
+    const { set } = selNow();
+    return order.current.filter((r) => set.has(r.path) && !seen.has(r.path) && !!seen.add(r.path));
+  };
+  /** What a drag or a menu on `r` takes: the whole selection when the row is in it, in tree order. */
+  const taking = (r: TreeRow): TreeRow[] => (selNow().set.has(r.path) ? picked() : [r]);
+  const leadRow = (): TreeRow | undefined => order.current[selection.indexOf(order.current, selNow().lead)];
+  /** The one row F2, Rename and Duplicate act on: none while several are selected. */
+  const single = (): TreeRow | null => {
+    const rows = picked();
+    return rows.length === 1 ? rows[0] : null;
+  };
 
-  /** Where a new file or folder goes: inside the selected folder, beside the selected file, else the root. */
+  /** Where a new file or folder goes: inside the lead folder, beside the lead file, else the root (TREE-22a). */
   const creationDir = (): string | null => {
-    if (selected) return isDir(selected) ? selected : dirOf(selected);
+    const lead = leadRow();
+    if (lead) return lead.entry.isDir ? lead.path : dirOf(lead.path);
     return view ? null : "";
   };
 
@@ -367,31 +592,61 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     askClipboard();
   };
 
-  const contextTarget = (): Entry | null => menu?.entry ?? null;
   const targetDir = (): string => {
-    const e = contextTarget();
+    const e = menu?.row?.entry;
     return e ? (e.isDir ? e.path : dirOf(e.path)) : "";
   };
 
-  const trash = async (paths: string[]) => {
-    if (!paths.length) return;
-    const what = paths.length === 1 ? paths[0] : `${paths.length} items`;
-    const yes = await ask(`Move ${what} to the trash?`, { title: "Delete", kind: "warning", okLabel: "Move to trash", cancelLabel: "Keep" });
-    if (!yes) return;
-    for (const p of paths) await api.trashEntry(ws.id, p).catch(report);
-    setMulti(new Set());
+  const question = (q: Omit<Question, "answer">) =>
+    new Promise<{ ok: boolean; checked: boolean; alt: boolean }>((answer) => setAsking({ ...q, answer }));
+
+  /**
+   * Asks before a trash unless the setting says not to (SET-05), naming what
+   * goes; ticking Don't ask again turns the setting off (SET-05a).
+   */
+  const mayTrash = async (going: TreeRow[]): Promise<boolean> => {
+    if (settings.get()?.confirmDelete === false) return true;
+    const names = going.map((r) => (r.entry.isDir ? `${r.path}/` : r.path));
+    const { ok, checked } = await question({
+      title: "Move to trash",
+      message: names.length === 1 ? `Move ${names[0]} to the trash?` : `Move these ${names.length} items to the trash?\n\n${selection.listed(names)}`,
+      checkbox: { label: "Don't ask again" },
+      ok: "Move to trash",
+      cancel: "Keep",
+    });
+    if (ok && checked) void settings.update({ confirmDelete: false }).catch(report);
+    return ok;
   };
 
-  /** The rows a keyboard action applies to: the multi-selection in tree order, else the selected row. */
-  const targets = (): string[] => (multi.size > 0 ? order.current.filter((p) => multi.has(p)) : selected ? [selected] : []);
+  /**
+   * Delete and Move to trash: the rows go to the desktop's trash as
+   * `selection.deleting` weighs them (TREE-25, TREE-25a). With `shortcuts`, a
+   * row that is one of the view's own entries leaves the view instead, and no
+   * file is touched (VIEW-07). Failures are one notice, a line each
+   * (TREE-25b), and the selection moves on to the row after the last one
+   * removed.
+   */
+  const remove = async (rows: TreeRow[], shortcuts: boolean) => {
+    const { leaving, going } = selection.deleting(rows, shortcuts && view ? view.entries : []);
+    if (!leaving.length && !going.length) return;
+    if (going.length && !(await mayTrash(going))) return;
+    const gone = [...leaving, ...going].map((r) => r.path);
+    const next = selection.afterRemoval(order.current, gone);
+    if (view && leaving.length) await api.viewRemove(ws.id, view.id, leaving.map((r) => r.path)).catch(report);
+    const failed = going.length ? await api.trashEntries(ws.id, going.map((r) => r.path)).catch((e) => { report(e); return null; }) : [];
+    if (failed === null) return;
+    if (failed.length) report(failed.join("\n"));
+    if (failed.length < gone.length) setSel(next ? selection.only(next) : selection.NONE);
+  };
 
   /**
    * Copy and cut go to the desktop's clipboard, not a variable of this module.
    * One clipboard is what makes the newest copy win whichever window made it,
-   * and it is the same clipboard a file manager pastes from (FIX-12).
+   * and it is the same clipboard a file manager pastes from (FIX-12). A
+   * folder's own entries go with it, not beside it (TREE-26a).
    */
   const copy = (cut: boolean) => {
-    const paths = targets();
+    const paths = selection.outermost(picked().filter((r) => !r.entry.missing).map((r) => r.path));
     if (paths.length) void api.setClipboardFiles(paths.map((p) => `${ws.path}/${p}`), cut).then(() => holdsFiles(true)).catch(report);
   };
 
@@ -400,40 +655,51 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
    * a clean one is closed, and one with unsaved changes stops the Replace,
    * since its buffer would outlive its file. A tab not opened this session
    * keeps its unsaved changes as a draft, which would be laid over whatever
-   * lands at its path the next time it opens.
+   * lands at its path the next time it opens. The tabs are those of every
+   * workspace on these files, as a move reaches them (TREE-26c): a child's
+   * folder lies inside its root's, and one file is open in both.
    */
-  const closeTabsUnder = async (dest: string): Promise<boolean> => {
-    const w = latest.current.ws;
-    const tabs = [...w.groups, ...w.review.groups].flatMap((g) => g.editors).filter((t) => t.path === dest || t.path.startsWith(`${dest}/`));
-    const drafted = await Promise.all(tabs.map((t) => !editors.get(t.id) && api.readDraft(w.id, t.path).then((d) => d !== null, () => false)));
-    const dirty = tabs.find((t, i) => editors.isDirty(t.id) || drafted[i]);
-    if (dirty) {
-      report(`${dirty.path} has unsaved changes, so ${dest} was not replaced.`);
-      return false;
-    }
-    for (const t of tabs) await api.closeFile(w.id, t.id);
-    return true;
+  const closeTabsUnder = async (dest: string): Promise<void> => {
+    const abs = `${ws.path}/${dest}`;
+    const { workspaces } = await api.getSession();
+    const tabs = workspaces.flatMap((w) => [...w.groups, ...w.review.groups].flatMap((g) => g.editors)
+      .filter((t) => { const at = `${w.path}/${t.path}`; return at === abs || at.startsWith(`${abs}/`); })
+      .map((t) => ({ w, t })));
+    const drafted = await Promise.all(tabs.map(({ w, t }) => !editors.get(t.id) && api.readDraft(w.id, t.path).then((d) => d !== null, () => false)));
+    const dirty = tabs.find(({ t }, i) => editors.isDirty(t.id) || drafted[i]);
+    if (dirty) throw `${dirty.t.path}${dirty.w.id === ws.id ? "" : ` in ${dirty.w.name}`} has unsaved changes, so ${dest} was not replaced.`;
+    for (const { w, t } of tabs) await api.closeFile(w.id, t.id);
   };
 
   /**
    * Puts one absolute path into `dir`, asking first when its name is taken
-   * there (TREE-12). Answers where it landed, null when it stayed where it
-   * was, or "stop" when the answer was to cancel the rest.
+   * there (TREE-12) — unless an answer was given for all of them already
+   * (TREE-27), which `rule` holds. `more` says entries follow this one, so
+   * the question offers Apply to all. Answers where it landed, or "stop"
+   * when the answer was to cancel the rest.
    */
-  const place = async (from: string, dir: string, cut: boolean): Promise<string | null | "stop"> => {
+  const place = async (from: string, dir: string, cut: boolean, rule: { all: "replace" | "keep" | null }, more: boolean): Promise<string | null | "stop"> => {
     const first = await api.pasteEntry(ws.id, from, dir, cut, "ask");
     if (!first.exists) return first.path;
     const dest = join(dir, from.slice(from.lastIndexOf("/") + 1));
     // Pasted where it already is, a copy takes a free name beside itself, as Duplicate does.
     if (from === `${ws.path}/${dest}`) return (await api.pasteEntry(ws.id, from, dir, cut, "keep")).path;
-    const answer = await message(`${dest} already exists. Replace it, sending the one there to the trash, or keep both?`, {
-      title: "Name taken",
-      kind: "warning",
-      buttons: { yes: "Replace", no: "Keep both", cancel: "Cancel" },
-    });
-    if (answer === "Keep both") return (await api.pasteEntry(ws.id, from, dir, cut, "keep")).path;
-    if (answer !== "Replace") return "stop";
-    if (!(await closeTabsUnder(dest))) return null;
+    let answer = rule.all;
+    if (!answer) {
+      const a = await question({
+        title: "Name taken",
+        message: `${dest} already exists. Replace it, sending the one there to the trash, or keep both?`,
+        checkbox: more ? { label: "Apply to all" } : undefined,
+        ok: "Replace",
+        alt: "Keep both",
+        cancel: "Cancel",
+      });
+      answer = a.alt ? "keep" : a.ok ? "replace" : null;
+      if (a.checked) rule.all = answer;
+    }
+    if (answer === "keep") return (await api.pasteEntry(ws.id, from, dir, cut, "keep")).path;
+    if (answer !== "replace") return "stop";
+    await closeTabsUnder(dest);
     return (await api.pasteEntry(ws.id, from, dir, cut, "replace")).path;
   };
 
@@ -442,50 +708,66 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
   /**
    * Copies, or moves when `cut`, absolute paths into the folder `dir`: the
    * clipboard's paste, a drop from a tree and a drop from another
-   * application. The folder then opens and is read — a folded one is not
-   * watched — and the last entry to land is selected. The moves made inside
-   * the workspace are kept together for Ctrl+Z (TREE-13).
+   * application. A folder goes once with everything in it, and never into
+   * itself: then nothing goes (TREE-26a). The folder then opens and is read
+   * — a folded one is not watched — and what landed is selected. The moves
+   * made inside the workspace are kept together for one Ctrl+Z (TREE-13,
+   * TREE-26b), and the failures are one notice, a line each.
    */
   const transfer = async (paths: string[], dir: string, cut: boolean): Promise<void> => {
-    let last: string | null = null;
+    const into = dir ? `${ws.path}/${dir}` : ws.path;
+    const itself = paths.find((a) => into === a || into.startsWith(`${a}/`));
+    if (itself) { report(`${itself} cannot go into itself, so nothing was ${cut ? "moved" : "copied"}.`); return; }
+    const going = selection.outermost(paths);
+    const rule: { all: "replace" | "keep" | null } = { all: null };
+    const landed: string[] = [];
     const moved: Move[] = [];
-    for (const from of paths) {
+    const failed: string[] = [];
+    for (const [i, from] of going.entries()) {
       let to: string | null;
       try {
-        const landed = await place(from, dir, cut);
-        if (landed === "stop") break;
-        to = landed;
+        const landing = await place(from, dir, cut, rule, i < going.length - 1);
+        if (landing === "stop") break;
+        to = landing;
       } catch (e) {
-        report(e);
+        failed.push(String(e));
         continue;
       }
       if (to === null) continue;
-      last = to;
+      landed.push(to);
       const rel = from.startsWith(`${ws.path}/`) ? from.slice(ws.path.length + 1) : null;
       if (cut && rel !== null && rel !== to) moved.push({ from: rel, to });
     }
+    if (failed.length) report(failed.join("\n"));
     if (moved.length) keep(undoKey, [...(peek<Move[][]>(undoKey) ?? []), moved].slice(-UNDO_DEPTH));
-    if (dir && !latest.current.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true).catch(() => {});
+    if (dir && !latest.current.expanded.includes(dir)) await setOpen([dir], true).catch(() => {});
     load(dir);
-    if (last) {
-      setMulti(new Set());
-      onSelect(last);
-    }
+    const last = landed[landed.length - 1];
+    if (last) setSel({ set: new Set(landed), lead: last, anchor: last });
   };
 
-  /** Ctrl+Z: the last batch of moves goes back where it came from. A place taken since keeps what is there. */
+  /**
+   * Ctrl+Z: the last batch of moves goes back where it came from. A place
+   * taken since keeps what is there. What went back is selected, as a move
+   * selects what landed: the paths it left name no row now.
+   */
   const undoMoves = async () => {
     const stack = peek<Move[][]>(undoKey) ?? [];
     const batch = stack[stack.length - 1];
     if (!batch) return;
     keep(undoKey, stack.slice(0, -1));
+    const back: string[] = [];
     for (const { from, to } of [...batch].reverse()) {
-      await api.renameEntry(ws.id, to, from).catch((e) => report(/already exists/.test(String(e)) ? `${from} is taken now, so ${to} stays where it is.` : e));
+      await api.renameEntry(ws.id, to, from).then(
+        () => back.unshift(from),
+        (e) => report(/already exists/.test(String(e)) ? `${from} is taken now, so ${to} stays where it is.` : e),
+      );
     }
+    const last = back[back.length - 1];
+    if (last) setSel({ set: new Set(back), lead: last, anchor: last });
   };
 
-  const paste = async () => {
-    const dir = creationDir();
+  const paste = async (dir = creationDir()) => {
     if (dir === null) return;
     const { paths, cut } = await api.clipboardFiles().catch((e) => { report(e); return { paths: [], cut: false }; });
     if (!paths.length) return;
@@ -494,19 +776,57 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     if (cut) { await api.clearClipboardFiles().catch(() => {}); holdsFiles(false); }
   };
 
-  const entryOf = (path: string): Entry => ({ name: path.split("/").pop() ?? path, path, isDir: isDir(path), ignored: false });
+  /** A key moved the lead: its row is kept in view (TREE-24). */
+  const followLead = useRef(false);
+
+  /**
+   * The arrows, Home and End move the selection over the drawn rows without
+   * opening anything, Shift extending it from the anchor (TREE-24 to
+   * TREE-24b). → unfolds a folder, then steps into it; ← folds it, and from
+   * anything else steps out to the folder drawing it (TREE-24c).
+   */
+  const navigate = (key: string, shift: boolean) => {
+    const rows = order.current;
+    if (!rows.length) return;
+    const at = selection.indexOf(rows, selNow().lead);
+    const cur = rows[at];
+    let to: number;
+    if (key === "Home") to = 0;
+    else if (key === "End") to = rows.length - 1;
+    else if (!cur) to = 0;
+    else if (key === "ArrowDown") to = Math.min(at + 1, rows.length - 1);
+    else if (key === "ArrowUp") to = Math.max(at - 1, 0);
+    else if (key === "ArrowRight") {
+      if (cur.entry.isDir && !cur.entry.missing && !cur.open && cur.folds) { toggle(cur.path); return; }
+      if (!cur.entry.isDir || rows[at + 1]?.parent !== at) return;
+      to = at + 1;
+    } else {
+      if (cur.entry.isDir && cur.open && cur.folds) { toggle(cur.path); return; }
+      if (cur.parent === -1) return;
+      to = cur.parent;
+    }
+    const along = shift && key !== "ArrowLeft" && key !== "ArrowRight";
+    setSel((s) => (along ? selection.extend(s, rows, to, false) : selection.only(rows[to])));
+    followLead.current = true;
+  };
 
   const onKey = (e: React.KeyboardEvent) => {
     if ((e.target as HTMLElement).tagName === "INPUT") return;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "c") copy(false);
-    else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "x") copy(true);
-    else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "v") void paste();
-    else if (e.ctrlKey && !e.altKey && !e.shiftKey && key === "z") void undoMoves();
-    else if (!e.ctrlKey && e.key === "Delete") void trash(targets());
-    else if (!e.ctrlKey && e.key === "F2" && selected) setDialog({ kind: "rename", entry: entryOf(selected) });
-    else if (!e.ctrlKey && e.key === "Enter" && selected) { if (isDir(selected)) toggle(selected); else onOpen(selected, false); }
-    else if (e.key === "Escape") setMulti(new Set());
+    const ctrl = e.ctrlKey && !e.altKey && !e.shiftKey;
+    if (ctrl && key === "c") copy(false);
+    else if (ctrl && key === "x") copy(true);
+    else if (ctrl && key === "v") void paste();
+    else if (ctrl && key === "z") void undoMoves();
+    else if (ctrl && key === "a") setSel((s) => selection.all(s, order.current));
+    else if (!e.ctrlKey && !e.altKey && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) navigate(e.key, e.shiftKey);
+    else if (!e.ctrlKey && e.key === "Delete") void remove(picked(), true);
+    else if (!e.ctrlKey && e.key === "F2") { const one = single(); if (one && !one.entry.missing) setDialog({ kind: "rename", entry: one.entry }); }
+    else if (!e.ctrlKey && e.key === "Enter") {
+      const lead = leadRow();
+      if (lead?.entry.isDir) toggle(lead.path);
+      else if (lead && !lead.entry.missing) onOpen(lead.path, false);
+    } else if (e.key === "Escape") { const lead = leadRow(); setSel(lead ? selection.only(lead) : selection.NONE); }
     else return;
     e.preventDefault();
     e.stopPropagation();
@@ -525,14 +845,14 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
       if (d.kind === "new-file" || d.kind === "new-folder") {
         const path = join(d.dir, value);
         await api.createEntry(ws.id, path, d.kind === "new-folder");
-        if (d.dir && !ws.expanded.includes(d.dir)) await api.setExpanded(ws.id, d.dir, true);
+        if (d.dir && !expanded.includes(d.dir)) await setOpen([d.dir], true);
         load(d.dir);
         if (d.kind === "new-file") onOpen(path, false);
       } else if (d.kind === "rename") {
         await api.renameEntry(ws.id, d.entry.path, join(dirOf(d.entry.path), value));
       } else if (d.kind === "new-view") {
         const id = await api.viewCreate(ws.id, value);
-        if (d.then) await api.viewAdd(ws.id, id, d.then);
+        if (d.then?.length) await api.viewAdd(ws.id, id, d.then);
       } else if (d.kind === "rename-view") {
         await api.viewRename(ws.id, d.view.id, value);
       }
@@ -582,56 +902,89 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     const dir = dropDirOf(e, viewRoot);
     if (dir !== null) aimInto(ev, drag, dir);
   };
-  const dragFrom = (ev: React.DragEvent, e: Entry) => {
-    // The whole multi-selection travels when the row is in it, in tree order.
-    const paths = multi.has(e.path) ? targets() : [e.path];
-    const abs = paths.map((p) => `${ws.path}/${p}`);
-    const missing = paths.some((p) => !!(p === e.path ? e.missing : viewEntries?.find((v) => v.path === p)?.missing));
+  const dragFrom = (ev: React.DragEvent, r: TreeRow) => {
+    const rows = taking(r);
+    const paths = rows.map((x) => x.path);
+    const missing = rows.some((x) => !!x.entry.missing);
     // One entry carries its file for other applications (TREE-15). WebKit
     // runs several URIs together into one, so a selection carries none.
     const uri = paths.length === 1 && !missing;
     startTreeDrag({
       workspaceId: ws.id,
       paths,
-      abs,
-      dirs: new Set(paths.filter((p) => (p === e.path ? e.isDir : isDir(p)))),
+      abs: selection.outermost(paths).map((p) => `${ws.path}/${p}`),
+      dirs: new Set(rows.filter((x) => x.entry.isDir).map((x) => x.path)),
       roots: view && paths.every((p) => view.entries.includes(p)) ? view.id : null,
       missing,
       uri,
     });
     // WebKitGTK starts no drag without data; nothing reads this back.
     ev.dataTransfer.setData(FILE_MIME, paths.join("\n"));
-    if (uri) ev.dataTransfer.setData("text/uri-list", fileUri(abs[0]));
+    if (uri) ev.dataTransfer.setData("text/uri-list", fileUri(`${ws.path}/${paths[0]}`));
     ev.dataTransfer.effectAllowed = "copyMove";
   };
 
-  const row = (e: Entry, depth: number, expanded: boolean, onClick: () => void, viewRoot = false) => {
-    order.current.push(e.path);
-    const icon = fileIcon(e.name, e.isDir, expanded);
+  // What this render draws: the rows, in order, and which of them leads.
+  // Rows in a branch folding away are still drawn until it has, and are no
+  // longer the tree's to act on.
+  const uid = useId();
+  order.current = [];
+  let closing = 0;
+  let leadId: string | undefined;
+  // The row that leads, as `selection.indexOf` finds it: the copy the lead
+  // names while it is drawn, else the first copy of its path (TREE-23a). A
+  // row is drawn before the tree knows what follows it, so the folders say
+  // whether a view's copy is drawn.
+  const leadName = ((lead) => {
+    const cut = lead?.indexOf("\0") ?? -1;
+    if (lead === null || cut === -1) return lead;
+    const entry = lead.slice(0, cut);
+    const drawnThere = !!roots?.includes(entry) && selection.draws(selection.pathOf(lead), expanded, [entry], filter, allFiles);
+    return drawnThere ? lead : selection.pathOf(lead);
+  })(sel.lead);
+
+  /** `at` places the row: the view entry it is drawn under (null in the Explorer), its parent row, and how it folds. */
+  const row = (e: Entry, depth: number, open: boolean, onClick: () => void, at: { root: string | null; parent: number; viewRoot?: boolean; folds?: boolean }) => {
+    const viewRoot = !!at.viewRoot;
+    const r: TreeRow = { key: at.root === null ? e.path : `${at.root}\0${e.path}`, path: e.path, entry: e, open, folds: at.folds ?? true, viewRoot, parent: at.parent };
+    const index = closing ? -1 : order.current.push(r) - 1;
+    const isLead = index !== -1 && leadId === undefined && (r.key === leadName || r.path === leadName);
+    const id = `${uid}-${index}`;
+    if (isLead) leadId = id;
+    const selected = sel.set.has(e.path);
+    const icon = fileIcon(e.name, e.isDir, open);
     return (
       <div
+        id={index === -1 ? undefined : id}
+        role="treeitem"
+        aria-selected={selected}
+        aria-expanded={e.isDir ? open : undefined}
+        aria-level={depth + 1}
         data-path={e.path}
         data-drop-dir={dropDirOf(e, viewRoot) ?? undefined}
-        className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected === e.path || multi.has(e.path) ? " selected" : ""}${dragOver === e.path ? " drop-before" : ""}${e.isDir && dropDir === e.path ? " drop-into" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
+        className={`tree-row${e.ignored ? " ignored" : ""}${e.missing ? " missing" : ""}${selected ? " selected" : ""}${isLead ? " lead" : ""}${dragOver === e.path ? " drop-before" : ""}${e.isDir && dropDir === e.path ? " drop-into" : ""}${gitMap.has(e.path) ? ` git-${gitMap.get(e.path)}` : ""}`}
         style={{ paddingLeft: 8 + depth * 14 }}
+        // Ctrl takes a row in or out, Shift takes the rows from the anchor,
+        // both together add them; none of them opens a file (TREE-22, TREE-23).
         onClick={(ev) => {
-          if (ev.ctrlKey) {
-            setMulti((m) => { const next = new Set(m); if (next.has(e.path)) next.delete(e.path); else next.add(e.path); if (selected && !next.has(selected)) next.add(selected); return next; });
-            onSelect(e.path);
-            return;
+          if (index === -1) return;
+          const rows = order.current;
+          if (ev.shiftKey) setSel((s) => selection.extend(s, rows, index, ev.ctrlKey));
+          else if (ev.ctrlKey) setSel((s) => selection.toggle(s, rows, index));
+          else {
+            setSel(selection.only(r));
+            onClick();
           }
-          setMulti(new Set());
-          onClick();
         }}
-        onDoubleClick={() => { if (!e.isDir && !e.missing) onOpen(e.path, false); }}
+        onDoubleClick={(ev) => { if (!ev.ctrlKey && !ev.shiftKey && !e.isDir && !e.missing) onOpen(e.path, false); }}
         // A missing entry at a view's root still drags, to be reordered.
         draggable={viewRoot || !e.missing}
-        onDragStart={(ev) => dragFrom(ev, e)}
+        onDragStart={(ev) => dragFrom(ev, r)}
         onDragOver={(ev) => { const drag = treeDrag(); if (drag) aimRow(ev, drag, e, viewRoot); }}
-        onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); if (!multi.has(e.path)) { setMulti(new Set()); onSelect(e.path); } openMenu({ x: ev.clientX, y: ev.clientY, entry: e, viewRoot }); }}
+        onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); if (!selNow().set.has(e.path)) setSel(selection.only(r)); openMenu({ x: ev.clientX, y: ev.clientY, row: r }); }}
         title={e.missing ? `Missing: ${e.path}` : e.path}
       >
-        <span className={`tree-chevron${expanded ? " open" : ""}`}>{e.isDir ? "▸" : ""}</span>
+        <span className={`tree-chevron${open ? " open" : ""}`}>{e.isDir ? "▸" : ""}</span>
         <Icon name={icon.name} color={e.ignored || e.missing ? undefined : icon.color} />
         <span className="tree-name">{e.missing ? e.path : e.name}</span>
         {gitMap.has(e.path) && <span className="tree-git">{e.isDir ? "•" : gitMap.get(e.path)}</span>}
@@ -639,21 +992,28 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     );
   };
 
-  /** A directory's children, revealed and hidden by their own height (§11.3). */
-  const branch = (path: string, open: boolean, children: React.ReactNode): React.ReactNode =>
-    open || collapsing.has(path) ? (
-      <div className={`tree-branch${open ? " open" : ""}${opened.includes(path) ? " unfold" : ""}`}><div>{children}</div></div>
-    ) : null;
+  /**
+   * A directory's children, revealed and hidden by their own height (§11.3).
+   * They are drawn only while the branch is open or folding away.
+   */
+  const branch = (path: string, open: boolean, children: () => React.ReactNode): React.ReactNode => {
+    if (!open && !collapsing.has(path)) return null;
+    if (!open) closing++;
+    const inner = children();
+    if (!open) closing--;
+    return <div className={`tree-branch${open ? " open" : ""}${opened.includes(path) ? " unfold" : ""}`}><div>{inner}</div></div>;
+  };
 
-  const render = (dir: string, depth: number): React.ReactNode => {
+  const render = (dir: string, depth: number, parent: number, root: string | null): React.ReactNode => {
     const entries = listings.get(dir);
     if (!entries) return depth === 0 ? <div className="tree-loading loading">Loading…</div> : null;
     return entries.map((e) => {
-      const expanded = e.isDir && ws.expanded.includes(e.path);
+      const open = e.isDir && expanded.includes(e.path);
+      const at = order.current.length;
       return (
         <div key={e.path}>
-          {row(e, depth, expanded, () => { onSelect(e.path); if (e.isDir) toggle(e.path); else onOpen(e.path, true); })}
-          {branch(e.path, expanded, render(e.path, depth + 1))}
+          {row(e, depth, open, () => { if (e.isDir) toggle(e.path); else onOpen(e.path, true); }, { root, parent })}
+          {branch(e.path, open, () => render(e.path, depth + 1, at, root))}
         </div>
       );
     });
@@ -664,28 +1024,30 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     if (!viewEntries) return <div className="tree-loading loading">Loading…</div>;
     if (viewEntries.length === 0) return <div className="tree-loading">Nothing has been sent to this view yet. Right-click a file or folder in Explorer and choose “Send to view”.</div>;
     return viewEntries.map((e) => {
-      const expanded = e.isDir && ws.expanded.includes(e.path);
-      const open = () => { onSelect(e.path); if (e.missing) return; if (e.isDir) toggle(e.path); else onOpen(e.path, true); };
+      const unfolded = e.isDir && expanded.includes(e.path);
+      const open = () => { if (e.missing) return; if (e.isDir) toggle(e.path); else onOpen(e.path, true); };
+      const at = order.current.length;
       return (
         <div key={e.path}>
-          {row(e, 0, expanded, open, true)}
-          {branch(e.path, expanded, listings.has(e.path) ? render(e.path, 1) : (load(e.path), null))}
+          {row(e, 0, unfolded, open, { root: e.path, parent: -1, viewRoot: true })}
+          {branch(e.path, unfolded, () => (listings.has(e.path) ? render(e.path, 1, at, e.path) : (load(e.path), null)))}
         </div>
       );
     });
   };
 
-  const renderFiltered = (dir: string, depth: number): React.ReactNode => {
+  const renderFiltered = (dir: string, depth: number, parent: number, root: string | null): React.ReactNode => {
     const kids = filtered?.get(dir);
     if (!kids) return null;
     return [...kids.entries()]
       .sort(([a, ad], [b, bd]) => Number(bd) - Number(ad) || a.localeCompare(b))
       .map(([name, isDirectory]) => {
         const e: Entry = { name, path: join(dir, name), isDir: isDirectory, ignored: false };
+        const at = order.current.length;
         return (
           <div key={e.path}>
-            {row(e, depth, true, () => { onSelect(e.path); if (!e.isDir) onOpen(e.path, true); })}
-            {isDirectory && renderFiltered(e.path, depth + 1)}
+            {row(e, depth, true, () => { if (!e.isDir) onOpen(e.path, true); }, { root, parent, folds: false })}
+            {isDirectory && renderFiltered(e.path, depth + 1, at, root)}
           </div>
         );
       });
@@ -696,36 +1058,33 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     if (!filtered || !viewEntries) return <div className="tree-loading loading">Loading…</div>;
     return viewEntries
       .filter((e) => e.isDir ? filtered.has(e.path) : e.path.toLowerCase().includes(filter.toLowerCase()))
-      .map((e) => (
-        <div key={e.path}>
-          {row(e, 0, true, () => { onSelect(e.path); if (!e.isDir && !e.missing) onOpen(e.path, true); }, true)}
-          {e.isDir && renderFiltered(e.path, 1)}
-        </div>
-      ));
+      .map((e) => {
+        const at = order.current.length;
+        return (
+          <div key={e.path}>
+            {row(e, 0, true, () => { if (!e.isDir && !e.missing) onOpen(e.path, true); }, { root: e.path, parent: -1, viewRoot: true, folds: false })}
+            {e.isDir && renderFiltered(e.path, 1, at, e.path)}
+          </div>
+        );
+      });
   };
 
-  const citation = (e: Entry) => (e.isDir ? `${e.path}/` : e.path);
-  /** What Quote to AI cites: the multi-selection in tree order, or the one row. */
-  const quoteTargets = (e: Entry): string[] => {
-    if (multi.size > 1 && multi.has(e.path)) {
-      return order.current.filter((p) => multi.has(p)).map((p) => (isDir(p) ? `${p}/` : p));
-    }
-    return [citation(e)];
-  };
-  order.current = [];
+  const citation = (r: TreeRow) => (r.entry.isDir ? `${r.path}/` : r.path);
 
   const scroller = useKeptScroll<HTMLElement>(`${kept}:scroll`, view ? viewEntries !== null : listings.has(""));
-  // A revealed row is scrolled to once the folders above it have opened and it
-  // is drawn; behind another panel's tab it has no box yet, and waits. One the
-  // reader has since moved away from is dropped rather than paid later.
+  // A followed or revealed row is scrolled to once it is drawn, the folders
+  // above a revealed one opened; behind another panel's tab it has no box yet,
+  // and waits. One the reader has since moved away from is dropped rather than
+  // paid later.
   const body = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const want = revealing;
-    if (kind !== "explorer" || !want || want.workspaceId !== ws.id) return;
-    if (selected !== want.path) { revealing = null; return; }
-    const row = body.current?.querySelector(`[data-path="${CSS.escape(want.path)}"]`);
+    const id = `${ws.id}:${kind}`;
+    const want = bringing.get(id);
+    if (want === undefined) return;
+    if (sel.lead !== want) { bringing.delete(id); return; }
+    const row = body.current?.querySelector(".tree-row.lead");
     if (!row?.getClientRects().length) return;
-    revealing = null;
+    bringing.delete(id);
     row.scrollIntoView({ block: "nearest" });
     // A folder just opened is still unfolding, and its clipped rows do not yet
     // count toward the height the tree scrolls through, so near the end the
@@ -734,15 +1093,43 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     for (let b = row.closest(".tree-branch"); b; b = b.parentElement?.closest(".tree-branch") ?? null) unfolding.push(...b.getAnimations());
     if (unfolding.length) void Promise.all(unfolding.map((a) => a.finished)).then(() => row.scrollIntoView({ block: "nearest" }), () => {});
   });
-  // The request may change nothing the tree draws — the row already selected,
-  // the Explorer already in front, every folder above it open — so it draws
-  // again to look.
-  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  // A follow waiting on the listing selects its row once the tree draws it;
+  // a change of selection first, or a fold or filter that hides the path,
+  // drops it (§9.16). One held off by several rows is settled instead, as
+  // soon as the tree is on screen with nothing left to read.
   useEffect(() => {
-    if (kind !== "explorer") return;
-    window.addEventListener("tree-reveal", redraw);
-    return () => window.removeEventListener("tree-reveal", redraw);
-  }, [kind]);
+    const id = `${ws.id}:${kind}`;
+    const want = awaiting.get(id);
+    if (!want) return;
+    if (selNow() !== want.from || !selection.draws(want.path, expanded, roots, filter, allFiles)) { awaiting.delete(id); return; }
+    if (want.held) { settle(); return; }
+    const r = order.current.find((x) => x.path === want.path);
+    if (!r) return;
+    awaiting.delete(id);
+    bringing.set(id, r.key);
+    setSel(selection.only(r));
+  });
+  useEffect(() => {
+    if (!followLead.current) return;
+    followLead.current = false;
+    body.current?.querySelector(".tree-row.lead")?.scrollIntoView({ block: "nearest" });
+  });
+
+  // The tree takes the keyboard when its tab, Ctrl+Shift+E or a reveal asks
+  // for it (TREE-24e) — not when a mode or a workspace comes back and
+  // rebuilds it, which returns the keyboard to the document it left.
+  const take = useCallback(() => {
+    const id = `${ws.id}:${kind}`;
+    if (!liveRef.current || !wanted.has(id)) return;
+    wanted.delete(id);
+    body.current?.querySelector<HTMLElement>(".tree")?.focus({ preventScroll: true });
+    body.current?.querySelector(".tree-row.lead")?.scrollIntoView({ block: "nearest" });
+  }, [ws.id, kind]);
+  useEffect(() => {
+    window.addEventListener("panel-focus", take);
+    return () => window.removeEventListener("panel-focus", take);
+  }, [take]);
+  useEffect(take);
 
   // A dragover anywhere this tree did not accept takes its mark off, and so
   // does the end of the drag. A drag from another application is followed
@@ -777,8 +1164,53 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
     if (!value) setAllFiles(null);
   };
 
+  const content = kind === "custom" && !view ? null
+    : view ? (filter ? renderFilteredView() : renderView())
+    : filter ? (filtered ? renderFiltered("", 0, -1, null) : <div className="tree-loading loading">Loading…</div>)
+    : render("", 0, -1, null);
   const creation = creationDir();
   const create = (kind: "new-file" | "new-folder") => { if (creation !== null) setDialog({ kind, dir: creation }); };
+
+  /** A row's own menu; with the row in a selection of several, its actions take them all. */
+  const rowMenu = (r: TreeRow) => {
+    const e = r.entry;
+    const many = taking(r);
+    const several = many.length > 1;
+    const paths = many.map((x) => x.path);
+    return (
+      <>
+        <hr />
+        <button onClick={() => { onQuote(many.map(citation)); setMenu(null); }}>Quote to AI{several ? ` (${many.length} files)` : ""}</button>
+        {/* The selection goes in tree order, as one change, less what the view holds already (TREE-28). */}
+        <SubMenu label="Send to view">
+          {ws.views.map((v) => {
+            const adding = paths.filter((p) => !v.entries.includes(p));
+            return (
+              <button key={v.id} disabled={!adding.length} onClick={() => { void api.viewAdd(ws.id, v.id, adding).catch(report); setMenu(null); }}>
+                <span className="menu-label">{v.name}</span>{!adding.length && <span className="menu-hint">already there</span>}
+              </button>
+            );
+          })}
+          {ws.views.length > 0 && <hr />}
+          <button onClick={() => { setDialog({ kind: "new-view", then: paths }); setMenu(null); }}>New view…</button>
+        </SubMenu>
+        <hr />
+        <button onClick={() => { copy(false); setMenu(null); }}>Copy</button>
+        <button onClick={() => { copy(true); setMenu(null); }}>Cut</button>
+        {hasFiles && <button onClick={() => { void paste(targetDir()); setMenu(null); }}>Paste into {e.isDir ? e.name : dirOf(e.path) || "the root"}</button>}
+        <hr />
+        <button disabled={several} onClick={() => { setDialog({ kind: "rename", entry: e }); setMenu(null); }}>Rename…</button>
+        <button disabled={several} onClick={() => { void api.duplicateEntry(ws.id, e.path).catch(report); setMenu(null); }}>Duplicate</button>
+        <button onClick={() => { void remove(many, false); setMenu(null); }}>Move to trash</button>
+        <hr />
+        <button onClick={() => { void api.copyText(e.path); setMenu(null); }}>Copy relative path</button>
+        <button onClick={() => { void api.copyText(`${ws.path}/${e.path}`); setMenu(null); }}>Copy absolute path</button>
+        <button onClick={() => { void api.revealEntry(ws.id, e.path).catch(report); setMenu(null); }}>Reveal in file manager</button>
+        {/* A new terminal of this workspace, started in the folder, with its window brought forward on it (TREE-17). */}
+        {e.isDir && <button onClick={() => { void api.terminalOpen(ws.id, e.path).then(() => api.focusWindow("terminal")).catch(report); setMenu(null); }}>Open terminal here</button>}
+      </>
+    );
+  };
 
   return (
     <div className="sidebar-body" ref={body}>
@@ -822,76 +1254,49 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
             ref={scroller}
             className={`tree${dropDir === "" ? " drop-into" : ""}`}
             tabIndex={0}
+            role="tree"
+            aria-label={view ? `View: ${view.name}` : "Explorer"}
+            aria-multiselectable="true"
+            aria-activedescendant={leadId}
+            data-kind={kind}
             // The Explorer's background is its root; a view's is no folder at all (VIEW-06).
             data-drop-dir={view ? undefined : ""}
             onDragOver={(ev) => { const drag = treeDrag(); if (drag && !view && !(ev.target as Element).closest(".tree-row")) aimInto(ev, drag, ""); }}
             onKeyDown={onKey}
-            onMouseDown={(e) => { if (e.target === e.currentTarget) onSelect(null); }}
-            onContextMenu={(ev) => { ev.preventDefault(); openMenu({ x: ev.clientX, y: ev.clientY, entry: null, viewRoot: false }); }}
+            onMouseDown={(e) => { if (e.target === e.currentTarget) setSel(selection.NONE); }}
+            onContextMenu={(ev) => { ev.preventDefault(); openMenu({ x: ev.clientX, y: ev.clientY, row: null }); }}
           >
-            {view
-              ? (filter ? renderFilteredView() : renderView())
-              : (filter ? (filtered ? renderFiltered("", 0) : <div className="tree-loading loading">Loading…</div>) : render("", 0))}
+            {content}
           </nav>
         </>
       )}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} anchor={menu} onClose={() => setMenu(null)}>
           {/* A view's root is a list of shortcuts, not a directory: nothing new is created there (VIEW-06). */}
-          {(!view || menu.entry) && !menu.entry?.missing && (
+          {(!view || menu.row) && !menu.row?.entry.missing && (
             <>
               <button onClick={() => { setDialog({ kind: "new-file", dir: targetDir() }); setMenu(null); }}>New file…</button>
               <button onClick={() => { setDialog({ kind: "new-folder", dir: targetDir() }); setMenu(null); }}>New folder…</button>
             </>
           )}
-          {!menu.entry && hasFiles && (!view || selected) && (
+          {!menu.row && hasFiles && creation !== null && (
             <button onClick={() => { void paste(); setMenu(null); }}>Paste</button>
           )}
-          {view && !menu.entry && (
+          {view && !menu.row && (
             <>
               <button onClick={() => { setDialog({ kind: "new-view" }); setMenu(null); }}>New view…</button>
               <button onClick={() => { setDialog({ kind: "rename-view", view }); setMenu(null); }}>Rename view…</button>
               <button onClick={() => { void deleteView(view); setMenu(null); }}>Delete view</button>
             </>
           )}
-          {menu.entry && menu.viewRoot && view && (
+          {/* Every selected path that is one of the view's entries leaves it, as one change (TREE-28). */}
+          {menu.row?.viewRoot && view && (
             <>
               <hr />
-              <button onClick={() => { void api.viewRemove(ws.id, view.id, menu.entry!.path).catch(report); setMenu(null); }}>Remove from view</button>
+              <button onClick={() => { void api.viewRemove(ws.id, view.id, taking(menu.row!).map((r) => r.path).filter((p) => view.entries.includes(p))).catch(report); setMenu(null); }}>Remove from view</button>
             </>
           )}
-          {menu.entry && !menu.entry.missing && (
-            <>
-              <hr />
-              <button onClick={() => { onQuote(quoteTargets(menu.entry!)); setMenu(null); }}>Quote to AI{multi.size > 1 && multi.has(menu.entry.path) ? ` (${multi.size} files)` : ""}</button>
-              <SubMenu label="Send to view">
-                {ws.views.map((v) => {
-                  const there = v.entries.includes(menu.entry!.path);
-                  return (
-                    <button key={v.id} disabled={there} onClick={() => { void api.viewAdd(ws.id, v.id, menu.entry!.path).catch(report); setMenu(null); }}>
-                      <span className="menu-label">{v.name}</span>{there && <span className="menu-hint">already there</span>}
-                    </button>
-                  );
-                })}
-                {ws.views.length > 0 && <hr />}
-                <button onClick={() => { setDialog({ kind: "new-view", then: menu.entry!.path }); setMenu(null); }}>New view…</button>
-              </SubMenu>
-              <hr />
-              <button onClick={() => { copy(false); setMenu(null); }}>Copy</button>
-              <button onClick={() => { copy(true); setMenu(null); }}>Cut</button>
-              {hasFiles && <button onClick={() => { void paste(); setMenu(null); }}>Paste into {menu.entry.isDir ? menu.entry.name : dirOf(menu.entry.path) || "the root"}</button>}
-              <hr />
-              <button onClick={() => { setDialog({ kind: "rename", entry: menu.entry! }); setMenu(null); }}>Rename…</button>
-              <button onClick={() => { void api.duplicateEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Duplicate</button>
-              <button onClick={() => { void trash(targets().includes(menu.entry!.path) ? targets() : [menu.entry!.path]); setMenu(null); }}>Move to trash</button>
-              <hr />
-              <button onClick={() => { void api.copyText(menu.entry!.path); setMenu(null); }}>Copy relative path</button>
-              <button onClick={() => { void api.copyText(`${ws.path}/${menu.entry!.path}`); setMenu(null); }}>Copy absolute path</button>
-              <button onClick={() => { void api.revealEntry(ws.id, menu.entry!.path).catch(report); setMenu(null); }}>Reveal in file manager</button>
-              {/* A new terminal of this workspace, started in the folder, with its window brought forward on it (TREE-17). */}
-              {menu.entry.isDir && <button onClick={() => { void api.terminalOpen(ws.id, menu.entry!.path).then(() => api.focusWindow("terminal")).catch(report); setMenu(null); }}>Open terminal here</button>}
-            </>
-          )}
+          {menu.row && !menu.row.entry.missing && rowMenu(menu.row)}
         </ContextMenu>
       )}
       {dialog && (
@@ -907,6 +1312,17 @@ export function FileTree({ ws, kind, onOpen, onQuote, selected, onSelect, gitSta
           selectEnd={dialog.kind === "rename" && !dialog.entry.isDir && dialog.entry.name.lastIndexOf(".") > 0 ? dialog.entry.name.lastIndexOf(".") : undefined}
           onSubmit={(v) => void submitDialog(v)}
           onClose={() => setDialog(null)}
+        />
+      )}
+      {asking && (
+        <Confirm
+          title={asking.title}
+          message={asking.message}
+          checkbox={asking.checkbox}
+          ok={asking.ok}
+          cancel={asking.cancel}
+          alt={asking.alt}
+          onClose={(ok, checked, alt) => { setAsking(null); asking.answer({ ok, checked, alt }); }}
         />
       )}
     </div>

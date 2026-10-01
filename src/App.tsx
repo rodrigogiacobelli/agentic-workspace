@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type ComponentType } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 import { api, events } from "./api";
+import { familyRoot } from "./modes";
 import * as settings from "./settings";
 import { useDismiss } from "./motion";
+import { NOTICE_DWELL_MS } from "./notice";
 import { CredentialPrompt } from "./components/CredentialPrompt";
 import { Palette } from "./components/Palette";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -10,16 +12,13 @@ import { StatusBar } from "./components/StatusBar";
 import { Switcher, report } from "./components/Switcher";
 import type { Session, Settings, WindowRole, Workspace } from "./types";
 
-/** A failure stays until the reader dismisses it; an info notice confirms something that worked. */
+/** A failure, or a confirmation of something that worked: they differ in colour, and leave alike. */
 type NoticeKind = "error" | "info";
-
-/** How long an info notice stays: design-motion's short confirmation. */
-const CONFIRM_DWELL_MS = 3500;
 
 /** What only one window draws: its body, and its mode's facts in the status bar. */
 interface Half {
   Body: ComponentType<{ session: Session; openSwitcher: () => void; openSettings: () => void }>;
-  Facts: ComponentType<{ ws: Workspace }>;
+  Facts: ComponentType<{ ws: Workspace; session: Session }>;
 }
 
 /**
@@ -47,37 +46,34 @@ export function App({ role }: { role: WindowRole }) {
   const [half, setHalf] = useState<Half | null>(null);
   const [switcher, setSwitcher] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  // Keyed, not indexed: a toast plays its own exit, and an index would hand
-  // that state to whichever message shifted up into its place.
-  const [notices, setNotices] = useState<{ id: number; text: string; kind: NoticeKind }[]>([]);
 
   useEffect(() => {
-    let next = 0;
-    const push = (m: string, kind: NoticeKind = "error") => setNotices((n) => [...n, { id: next++, text: m, kind }]);
     void loadHalf(role).then(setHalf);
     settings.init().then(setCurrent).catch(report);
     api.getSession().then(setSession).catch(report);
-    api.takeNotices().then((ns) => ns.forEach((m) => push(m))).catch(() => {});
-    const unlisten = [events.onSession(setSession), events.onNotice(push), events.onInfo((m) => push(m, "info"))];
+    const unlisten = [events.onSession(setSession)];
     // The request reaches every window, and only this one holds buffers to
     // ask about: the Terminal window answering it would quit past the prompt.
     if (role === "workspace") unlisten.push(events.onQuitRequested(() => void quit()));
+    // What launch moved aside is data lost, so it waits for an answer rather
+    // than leaving like a toast, in the window the owner works in (NTF-04).
+    if (role === "workspace") {
+      api.takeSetAside()
+        .then((ms) => { if (ms.length) return message(ms.join("\n\n"), { title: "Saved data could not be read", kind: "warning", okLabel: "OK" }); })
+        .catch(report);
+    }
     const stop = settings.subscribe(setCurrent);
-    // `report` sends the failure as a bare string, `notify` a kinded object.
-    const onLocal = (e: Event) => {
-      const detail = (e as CustomEvent<string | { text: string; kind: NoticeKind }>).detail;
-      if (typeof detail === "string") push(detail);
-      else push(detail.text, detail.kind);
-    };
-    window.addEventListener("app-notice", onLocal);
     return () => {
       unlisten.forEach((u) => void u.then((f) => f()));
       stop();
-      window.removeEventListener("app-notice", onLocal);
     };
   }, [role]);
 
-  if (!session || !current || !half) return null;
+  // Drawn from the first paint and kept across the load, keyed so the load
+  // does not remount it: a message from launch lands in a live region that
+  // already exists (NTF-05a).
+  const stack = <Notices key="notices" />;
+  if (!session || !current || !half) return stack;
   const { Body, Facts } = half;
 
   const workspaces = [...session.recent, ...session.workspaces.map((w) => w.id)]
@@ -88,62 +84,145 @@ export function App({ role }: { role: WindowRole }) {
   settings.setActivePath(active?.path ?? null);
 
   return (
-    <div className={`app app-${role}`}>
-      <Switcher session={session} role={role} onSettings={() => setShowSettings(true)} />
-      <Body session={session} openSwitcher={() => setSwitcher(true)} openSettings={() => setShowSettings(true)} />
-      <StatusBar session={session} role={role}>{active && <Facts ws={active} />}</StatusBar>
-      {switcher && (
-        <Palette
-          title="Switch workspace"
-          items={workspaces.map((w) => ({ id: w.id, label: w.name, detail: w.path }))}
-          onClose={() => setSwitcher(false)}
-          onPick={(item) => { setSwitcher(false); void api.switchWorkspace(item.id).catch(report); }}
-        />
-      )}
-      {showSettings && <SettingsDialog current={current} workspace={active} onClose={() => setShowSettings(false)} />}
-      <CredentialPrompt role={role} />
-      {notices.length > 0 && (
-        <div className="notices">
-          {notices.map((n) => (
-            <Notice key={n.id} message={n.text} kind={n.kind} onClose={() => setNotices((all) => all.filter((o) => o.id !== n.id))} />
-          ))}
-        </div>
-      )}
+    <>
+      <div className={`app app-${role}`}>
+        <Switcher session={session} role={role} onSettings={() => setShowSettings(true)} />
+        <Body session={session} openSwitcher={() => setSwitcher(true)} openSettings={() => setShowSettings(true)} />
+        <StatusBar session={session} role={role}>{active && <Facts ws={active} session={session} />}</StatusBar>
+        {switcher && (
+          <Palette
+            title="Switch workspace"
+            items={workspaces.map((w) => {
+              // A child or a worktree names the row it is listed under; a root, its path (WS-26).
+              const row = session.workspaces.find((o) => o.id === (w.childOf ?? w.worktreeOf));
+              return { id: w.id, label: w.name, detail: row ? `${row.name} › ${w.name}` : w.path };
+            })}
+            onClose={() => setSwitcher(false)}
+            onPick={(item) => { setSwitcher(false); void api.switchWorkspace(item.id).catch(report); }}
+          />
+        )}
+        {showSettings && <SettingsDialog current={current} workspace={active} root={familyRoot(session.workspaces, active)} onClose={() => setShowSettings(false)} />}
+        <CredentialPrompt role={role} />
+      </div>
+      {stack}
+    </>
+  );
+}
+
+/**
+ * The window's toasts. The stack is held as one while the pointer is on it or
+ * focus is in it, and counts only while this window has focus (NTF-02,
+ * NTF-03). That state lives here rather than in `App`, so a window gaining or
+ * losing focus re-renders the stack and not the window (ADR-018).
+ */
+function Notices() {
+  // Keyed, not indexed: a toast plays its own exit, and an index would hand
+  // that state to whichever message shifted up into its place.
+  const [notices, setNotices] = useState<{ id: number; text: string; kind: NoticeKind }[]>([]);
+  const stack = useRef<HTMLDivElement>(null);
+  /** Where in the window the pointer last moved to. */
+  const point = useRef<{ x: number; y: number } | null>(null);
+  const [pointed, setPointed] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [seen, setSeen] = useState(() => document.hasFocus());
+
+  useEffect(() => {
+    let next = 0;
+    const push = (m: string, kind: NoticeKind = "error") => setNotices((n) => [...n, { id: next++, text: m, kind }]);
+    api.takeNotices().then((ns) => ns.forEach((m) => push(m))).catch(() => {});
+    const unlisten = [events.onNotice(push), events.onInfo((m) => push(m, "info"))];
+    // `report` sends the failure as a bare string, `notify` a kinded object.
+    const onLocal = (e: Event) => {
+      const detail = (e as CustomEvent<string | { text: string; kind: NoticeKind }>).detail;
+      if (typeof detail === "string") push(detail);
+      else push(detail.text, detail.kind);
+    };
+    window.addEventListener("app-notice", onLocal);
+    return () => {
+      unlisten.forEach((u) => void u.then((f) => f()));
+      window.removeEventListener("app-notice", onLocal);
+    };
+  }, []);
+
+  useEffect(() => {
+    // Only a move says where the pointer is. One at the point of the last is
+    // the webview noting that what lies under a resting pointer changed, and
+    // a toast that appeared there has not been pointed at (NTF-02).
+    let x = NaN;
+    let y = NaN;
+    const move = (e: MouseEvent) => {
+      if (e.screenX === x && e.screenY === y) return;
+      x = e.screenX;
+      y = e.screenY;
+      point.current = { x: e.clientX, y: e.clientY };
+      setPointed(!!stack.current?.contains(e.target as Node));
+    };
+    // Out of the window, where no move follows to say it left the stack.
+    const out = (e: MouseEvent) => { if (!e.relatedTarget) setPointed(false); };
+    const focus = () => setSeen(true);
+    const blur = () => setSeen(false);
+    window.addEventListener("mousemove", move);
+    document.addEventListener("mouseout", out);
+    window.addEventListener("focus", focus);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseout", out);
+      window.removeEventListener("focus", focus);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+
+  // A toast that leaves with focus in it takes the focus along, and no blur
+  // says so. One that leaves from under a resting pointer can leave it over
+  // nothing, and no move says that either: the stack is anchored at the
+  // bottom, so the toasts below it stay put. The hold is only released here,
+  // never taken, as a toast arriving under a resting pointer has not been
+  // pointed at (NTF-02).
+  useEffect(() => {
+    if (!stack.current?.contains(document.activeElement)) setFocused(false);
+    const p = point.current;
+    if (!p || !stack.current?.contains(document.elementFromPoint(p.x, p.y))) setPointed(false);
+  }, [notices]);
+
+  // Present while empty: a live region made with its first message is not reliably announced (NTF-05a).
+  return (
+    <div
+      ref={stack}
+      className="notices"
+      role="log"
+      aria-live="polite"
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false); }}
+    >
+      {notices.map((n) => (
+        <Notice key={n.id} text={n.text} kind={n.kind} held={pointed || focused || !seen} onClose={() => setNotices((all) => all.filter((o) => o.id !== n.id))} />
+      ))}
     </div>
   );
 }
 
 /**
- * One toast. A failure never expires on a timer: the reader dismisses it, and
- * the dismissal is what plays its exit (§9, WCAG 2.2.1). An info notice asks
- * nothing of the reader, so it leaves by itself after its dwell, which pauses
- * while the pointer or the keyboard is on it and resumes where it stopped.
+ * One toast. Failures and confirmations alike leave by themselves once they
+ * have been on screen for the dwell (NTF-01), which stops while the stack is
+ * held and resumes where it stopped; the × leaves at once.
  */
-function Notice({ message, kind, onClose }: { message: string; kind: NoticeKind; onClose: () => void }) {
+function Notice({ text, kind, held, onClose }: { text: string; kind: NoticeKind; held: boolean; onClose: () => void }) {
   const [closing, dismiss] = useDismiss(onClose);
-  const [hovered, setHovered] = useState(false);
-  const [focused, setFocused] = useState(false);
-  const left = useRef(CONFIRM_DWELL_MS);
-  const held = hovered || focused;
+  const left = useRef(NOTICE_DWELL_MS);
   useEffect(() => {
-    if (kind !== "info" || held || closing) return;
+    if (held || closing) return;
     const started = performance.now();
     const timer = window.setTimeout(dismiss, left.current);
     return () => {
       window.clearTimeout(timer);
       left.current -= performance.now() - started;
     };
-  }, [kind, held, closing, dismiss]);
+  }, [held, closing, dismiss]);
   return (
-    <div
-      className={`notice${kind === "info" ? " info" : ""}${closing ? " is-closing" : ""}`}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onFocus={() => setFocused(true)}
-      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false); }}
-    >
-      <span>{message}</span>
-      <button onClick={dismiss} title="Dismiss">×</button>
+    <div className={`notice${kind === "info" ? " info" : ""}${closing ? " is-closing" : ""}`} role={kind === "error" ? "alert" : undefined}>
+      <span>{text}</span>
+      <button onClick={dismiss} title="Dismiss" aria-label="Dismiss">×</button>
     </div>
   );
 }

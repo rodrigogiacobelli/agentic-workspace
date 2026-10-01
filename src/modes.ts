@@ -23,6 +23,29 @@ export const MODES: ModeInfo[] = [
   { id: "terminal", label: "Terminal", icon: "terminal", window: "terminal", hotkey: "Ctrl+3" },
 ];
 
+/** The root of `ws`'s workspace family: `ws` for a root, the root a child was
+ *  found in, and for a worktree its row's root. */
+export function familyRoot(workspaces: Workspace[], ws: Workspace | undefined): Workspace | undefined {
+  const find = (id: string | null) => (id ? workspaces.find((w) => w.id === id) : undefined);
+  const row = find(ws?.worktreeOf ?? null) ?? ws;
+  return find(row?.childOf ?? null) ?? row;
+}
+
+/** Every entry of the family `root` heads, the root first, in session order. */
+export function familyOf(workspaces: Workspace[], root: Workspace | undefined): Workspace[] {
+  return root ? workspaces.filter((w) => familyRoot(workspaces, w)?.id === root.id) : [];
+}
+
+/** The member of `family` whose folder holds the absolute path `abs`:
+ *  `prefer` when it holds it, else the deepest (TERM-19, TERM-24). */
+export function memberHolding(family: Workspace[], abs: string, prefer?: string | null): Workspace | undefined {
+  const holding = family.filter((w) => {
+    const root = w.path.replace(/\/+$/, "");
+    return abs === root || abs.startsWith(`${root}/`);
+  });
+  return holding.find((w) => w.id === prefer) ?? holding.sort((a, b) => b.path.length - a.path.length)[0];
+}
+
 /** The mode a window is showing for a workspace. */
 export function modeOf(ws: Workspace | undefined, role: WindowRole): ModeId {
   return role === "terminal" ? "terminal" : ws?.mode ?? "editor";

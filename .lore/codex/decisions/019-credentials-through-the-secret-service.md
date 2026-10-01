@@ -5,9 +5,9 @@ summary: Why a key's passphrase is kept only in the desktop's Secret Service, wh
   the settings hold credentials and assignments without a secret, why the application's
   binary doubles as an ssh wrapper that confines ssh to one key and as an askpass
   helper that relays every prompt to the running application, why a commit identity
-  travels in the environment and never in git configuration, why a terminal carries
-  a workspace's credentials only on consent, what a worktree inherits, and where the
-  trust boundary sits.
+  travels in the environment and never in git configuration, why a family's terminals
+  carry its root's credentials only on the root's consent, what a worktree inherits,
+  and where the trust boundary sits.
 related:
 - 012-git-through-the-git-binary
 - 004-central-settings-store
@@ -15,6 +15,7 @@ related:
 - 007-workspace-is-one-directory
 - standards-linux-desktop
 - operations-running-agentic-workspace
+- 020-workspace-family
 binds:
 - src-tauri/src/credentials.rs
 - src-tauri/src/askpass.rs
@@ -102,12 +103,16 @@ it falls back to the user's own setup too.
 
 **Resolution.** `credentials::resolve` takes a workspace's own field, and for
 a field left unset on a linked worktree, its repository's. The repository is
-the open workspace on the same common git directory that is not itself a
-linked worktree (`Workspace.worktree_of`), else the main worktree git lists,
-else — for shells launch starts before any git summary is in — what
-`repository_of` reads from the `.git` files on disk. `terminalCredentials` is
-never inherited. An id that names no credential makes every git of the
-workspace fail with a message rather than run under the user's own key.
+the row the worktree is listed under (`Workspace.worktree_of`,
+`020-workspace-family`), else the main worktree git lists, else — for shells
+launch starts before any git summary is in — what `repository_of` reads from
+the `.git` files on disk. `repository_of` stops at a `.git` it cannot resolve
+rather than climb past it, and a folder that is gone is never read upwards:
+its scope takes the repository its entry last read from its own `.git`, or
+none, whose include pattern matches nothing while the folder is gone
+(TERM-26). `terminalCredentials` is never inherited. An id that names no
+credential makes every git of the workspace fail with a message rather than
+run under the user's own key.
 
 **The application's own git.** `git::repo_of` gives every git command in
 `git.rs`, reads included, the workspace's environment
@@ -201,7 +206,9 @@ request, and refuses a peer of another uid.
   git processes (`AppState.git_children`, filled by `git::run_env` for as
   long as the process runs) makes the origin *`<workspace>` (Source
   Control)*; the first that is a terminal's shell makes it *a terminal of
-  `<workspace>`*; neither makes it *an unknown process*.
+  `<workspace>`*, the workspace whose credentials that shell started with
+  (`Live.credentials`), or for a shell that started with none, the family
+  root holding its tab; neither makes it *an unknown process*.
 - **Classification compares whole prompts, byte for byte.** The credential's
   own passphrase prompt is exactly `Enter passphrase for key '` plus the first
   100 bytes of its key path plus `': `. A prompt starting `The authenticity of
@@ -211,16 +218,20 @@ request, and refuses a peer of another uid.
   and is shown as a secret request naming the server, never taken for one of
   ssh's own. A prompt ending `(yes/no)? ` or `(yes/no): `, or carrying the
   hint `confirm`, is a yes-or-no question. The hint `none` — a security key
-  waiting for a touch — becomes an information notice answered with nothing.
+  waiting for a touch — becomes an information notice answered with nothing,
+  which leaves as every notice does, after two seconds unless the pointer or
+  focus holds it (NTF-01, NTF-02).
   Anything else is a secret request.
 - **The wallet answers only when every condition holds**: the key's
   passphrase is saved; the prompt is that key's; the asking ssh's command line
   carries exactly the wrapper's `IdentityFile=` argument for it; the origin is
   the application's git or a terminal of a workspace that resolves to that
   key now; and for a terminal, that workspace's terminal option is on. A
-  second passphrase prompt from the same ssh within ten minutes of a wallet
-  answer raises the notice `The passphrase saved for <name> no longer opens
-  it.` and asks the user. A wallet that stays locked, answers nothing or fails
+  shell that joined a family from a worktree that was a root of its own
+  (TERM-25) is judged by that worktree, whose include it still carries, until
+  it is restarted. A second passphrase prompt from the same ssh within ten
+  minutes of a wallet answer raises the notice `The passphrase saved for
+  <name> no longer opens it.` and asks the user. A wallet that stays locked, answers nothing or fails
   gives ssh a message saying the passphrase was not read. Any failed
   condition asks the user.
 - **Asking the user.** The relay puts a `CredentialPrompt` in the window of
@@ -244,18 +255,26 @@ has the first focus, *Trust* is never the Enter default, and every button but
 the one that declines, and the secret field, ignore input for 700 ms after
 each new prompt appears, so keystrokes meant for a shell do not answer it.
 
-**Terminals carry credentials only on consent.** With a workspace's own
-`terminalCredentials` off, its shells start with nothing added (CRED-06). With
-it on (CRED-07), `credentials::terminal_env` appends git configuration
-entries through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and
-`GIT_CONFIG_VALUE_<n>` after any the application inherited, and records `n` in
+**Terminals carry credentials only on consent.** Every shell of a workspace
+family starts with its root's terminal environment (CRED-14,
+`020-workspace-family`). With the root's own `terminalCredentials` off, the
+family's shells start with nothing added (CRED-06). With it on (CRED-07),
+`credentials::terminal_env` appends git configuration entries through
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` after
+any the application inherited, and records `n` in
 `AGENTIC_WORKSPACE_GIT_CONFIG`. The entries are `includeIf.gitdir:<pattern>.path`
 for two patterns — the repository's common git directory, and that directory
 followed by `/worktrees/*` — with every `*`, `?`, `[` and `\` of the path
 escaped, since a pattern is a glob. `*` stops at a slash, so a submodule's git
 directory under `modules/`, another repository, stays out. A workspace outside
 any repository gets one pattern, its own path followed by `/`, which git
-widens to every repository under it. The value is
+widens to every repository under it. So a repository root's family shells
+carry its credentials in its repository and its worktrees, and git inside one
+of its children keeps the user's own setup; a plain-folder root's reach every
+repository under it, its children included (CRED-15). A member's own terminal
+option, key and identity reach no shell of the family: its Workspace page
+reads `Terminals of <root>'s family start with <root>'s credentials.` in place
+of the toggle and the stale list (CRED-16). The value is
 `terminal-<workspace id>.gitconfig` in the runtime directory: `core.sshCommand`
 set to the wrapper, `ssh.variant = ssh`, and the identity under `user`,
 `author` and `committer`, since `author.*` and `committer.*` beat `user.*`
@@ -265,9 +284,12 @@ removed. It runs at launch, again once the git summaries are in, when a
 workspace is activated and its summary changed, and after every credential or
 assignment change. Git skips an include whose file is gone, so a shell already
 running follows every change at once. A shell started while the option was off
-carries no include; the Workspace page lists those shells, each labelled
+carries no include, and a shell that joined the family from a worktree root
+carries that worktree's; the root's Workspace page lists every shell of the
+family that did not start with the root's credentials, each labelled
 `<name> (tab N)` — the tab's name, else its directory's, and its place in the
-tab strip — and *Restart shell* replaces one in place (`002-backend-owned-terminal-sessions`).
+tab strip — and *Restart shell* replaces one in place, with the root's
+environment (`002-backend-owned-terminal-sessions`).
 `credentials::forget_inherited_env` runs first in `run` and takes those entries
 and every `AGENTIC_WORKSPACE_*` variable out of the application's own
 environment, so an application started from an opted-in shell hands nothing on.
@@ -316,14 +338,15 @@ application's git then gets no askpass variables — and the wrapper exits 255.
 | **Loading the keys into ssh-agent** | ssh already talks to it, and the agent then holds every account's key for any ssh the user runs, which is the crossing this decision exists to stop. |
 | **`git config user.name` and `core.sshCommand` in the repository** | Survives outside the application, and writes into a repository the user may not own (`004-central-settings-store`). |
 | **`GIT_SSH_COMMAND` exported into opted-in shells** | Simpler than an include, and follows the shell into every other repository it `cd`s into, and cannot be withdrawn from a running shell. |
+| **Each member's own terminal credentials inside a family shell** | Git in a child would push as the child, and it needs a per-tab record of the environment and an askpass rule by working directory; a family's shells carry the root's alone (`020-workspace-family`). |
 | **A KWallet-native path** | KWallet answers the Secret Service like the others; a second code path buys nothing. |
 
 ## Consequences
 
 **Easier:**
 - A workspace pushes, pulls and fetches as its own account, and two accounts
-  on one host never cross, from Source Control and, on consent, from its
-  terminals.
+  on one host never cross, from Source Control and, on a root's consent, from
+  its family's terminals.
 - A new worktree pushes and commits as its repository with nothing assigned.
 - An unknown host key, a passphrase and a server's question reach a dialog in
   the right window instead of failing.
@@ -349,8 +372,11 @@ application's git then gets no askpass variables — and the wrapper exits 255.
 - A git a synchronous command runs cannot ask the user anything.
 - The jump host of a `proxyjump` connects with the user's own setup, never the
   assigned key.
-- A shell started before its workspace's terminal option was turned on keeps
-  the user's setup until it is restarted.
+- A shell started before its root's terminal option was turned on keeps the
+  user's setup, and a shell that joined a family from a worktree root keeps
+  that worktree's credentials, until it is restarted.
+- In a family shell, git inside a child of a repository root runs with the
+  user's own setup, whatever the child has assigned.
 - `openssh` is a runtime dependency: the wrapper runs `ssh` and the key checks
   run `ssh-keygen`.
 
@@ -367,8 +393,9 @@ application's git then gets no askpass variables — and the wrapper exits 255.
 - **Every wallet operation matches both `application` and `credential`.**
 - **The relay derives the origin and never trusts the request's credential**;
   the wallet answers only the exact passphrase prompt of that credential's key.
-- **A terminal carries a workspace's credentials only when that workspace's
-  own option is on**, and only inside its repository.
+- **A family's terminals carry its root's credentials only when the root's
+  own option is on**, and only inside the root's repository — for a
+  plain-folder root, inside every repository under it.
 - **The wrapper keeps the user's host-key policy, known-hosts files and jump
   hosts**, and replaces only what decides which key is offered.
 - **The runtime directory has no fallback.** Without a private

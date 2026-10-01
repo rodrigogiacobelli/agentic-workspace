@@ -27,8 +27,12 @@
   /* Above the overlays: a dropdown inside a dialog opens over the dialog. A
      menu closes on any press outside it, so it cannot trap what is below. */
   --z-menu: 250;
+  /* Above the menus and dialogs, whose own scrollers need a bar, and under the
+     notices: the bars share one window-wide layer, so any higher and the bar
+     of a scroller beneath a toast draws through the toast and takes its
+     clicks. No notice scrolls, so none needs a bar of its own. */
+  --z-scrollbar: 275;
   --z-notice: 300;
-  --z-scrollbar: 350;
   --z-tooltip: 400;
 
   /* Motion. One scale of durations, one of easings, chosen by interaction
@@ -177,21 +181,21 @@ input:focus { border-color: var(--accent); }
 .switcher-path { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon { flex: none; vertical-align: -3px; }
 .row-menu { display: flex; flex-direction: column; max-width: 560px; }
-.row { position: relative; display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 26px; border-radius: 4px; cursor: pointer; }
+/* Each level of a workspace family steps in by one disclosure's width. */
+.row { position: relative; display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px calc(26px + var(--depth, 0) * 18px); border-radius: 4px; cursor: pointer; }
 .row:hover { background: var(--bg-hover); }
 .row.selected .row-name { color: var(--accent); }
-/* The disclosure a repository's worktrees hang from. It sits in the row's
-   left margin rather than in the flow, so a repository that has worktrees and
-   one that has none start their names at the same place. */
+/* The disclosure a row's worktrees and repositories hang from. It sits in the
+   row's left margin rather than in the flow, so a row that has some and one
+   that has none start their names at the same place. */
 .row-disclose {
-  position: absolute; left: 6px; top: 0; bottom: 0; width: 14px;
+  position: absolute; left: calc(6px + var(--depth, 0) * 18px); top: 0; bottom: 0; width: 14px;
   display: flex; align-items: center; justify-content: center;
   padding: 0; border: none; background: transparent;
   color: var(--fg-dim); font-size: 10px;
 }
 button.row-disclose:hover { color: var(--fg); background: transparent; }
 .row-disclose.open, .row-disclose.open:active { transform: rotate(90deg); }
-.row-nested { padding-left: 44px; }
 .row-nested .row-name { font-weight: 500; }
 .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -207,8 +211,10 @@ button.row-disclose:hover { color: var(--fg); background: transparent; }
 
 
 /* A dragged workspace lands before the row it is dropped on (WS-11), marked as
-   a tree row is. A still frame: `box-shadow` is not animated. */
+   a tree row is, or after the last of a root's children when dropped on its
+   lower half (WS-18). A still frame: `box-shadow` is not animated. */
 .row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 /* Dropped on the footer, it lands last: the rule over the footer takes the
    same 2 px line, the pixel above drawn by a shadow so nothing moves. */
 .menu hr.drop-at { border-top-color: var(--accent); box-shadow: 0 -1px 0 var(--accent); }
@@ -311,6 +317,9 @@ main { flex: 1; display: flex; min-height: 0; }
 .tab:hover { background: var(--bg-hover); }
 .tab.active { color: var(--fg); background: var(--bg); }
 .tab-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Which member of the family a terminal's shell is in, after its name
+   (TERM-19). The name gives way first; a long member name is cut short. */
+.tab-where { flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; color: var(--fg-dim); font-size: 11px; }
 /* The close button is room a narrowed tab needs for its name, so it is drawn
    only where it can be used. A dirty tab keeps a dot in its place (TAB-06). */
 .tab-close { margin-left: auto; padding: 0 4px; color: var(--fg-faint); line-height: 1; opacity: 0; pointer-events: none; }
@@ -427,8 +436,20 @@ main { flex: 1; display: flex; min-height: 0; }
 :root:not([data-tabs="icons"]) .tab-count::before { content: "("; }
 :root:not([data-tabs="icons"]) .tab-count::after { content: ")"; }
 .media-view { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; overflow: auto; background: var(--bg); }
-.media-view img, .media-view video { max-width: 100%; max-height: 100%; object-fit: contain; }
+.media-view video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .media-view audio { width: min(560px, 100%); }
+/* The image viewer (IMG-01 to IMG-12) scrolls, so the wheel's glide and the
+   app-drawn scrollbars pan it. ImageView sizes the stage to at least the
+   view, places the picture's turned box on it and sizes the picture, all in
+   pixels. */
+.image-view { flex: 1; min-height: 0; position: relative; overflow: auto; background: var(--bg); }
+.image-view.pannable { cursor: grab; }
+.image-view.grabbing { cursor: grabbing; }
+.image-stage { position: relative; }
+.image-frame { position: absolute; }
+.image-frame > img { position: absolute; display: block; max-width: none; }
+/* Enlarged, each pixel shows as the square it is. */
+.image-view.enlarged img { image-rendering: pixelated; }
 .sidebar-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .tree-filter { margin: 6px; }
 .tree-head { display: flex; gap: 4px; align-items: center; padding: 6px 6px 0; }
@@ -448,7 +469,8 @@ main { flex: 1; display: flex; min-height: 0; }
   position: relative;
   outline: none;
 }
-.tree:focus .tree-row.selected { box-shadow: inset 2px 0 0 var(--accent); }
+/* The row the keyboard is on, among however many are selected (TREE-24e). */
+.tree:focus .tree-row.lead { box-shadow: inset 2px 0 0 var(--accent); }
 /* Not one native scrollbar anywhere: WebKitGTK draws its overlay bar above
    every layer and at whatever size it likes. src/scrollbars.ts draws them all
    instead (SCR-01). */
@@ -524,7 +546,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .menu button { display: flex; align-items: center; gap: 4px; text-align: left; padding: 4px 10px; }
 
 .editor-area { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.editor-group { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.editor-group { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
 .tabs-spacer { flex: 1; }
 .editor-host { flex: 1; min-height: 0; position: relative; }
@@ -563,7 +585,16 @@ main { flex: 1; display: flex; min-height: 0; }
    their width, and the row folds instead. */
 .breadcrumbs .crumb.fit { display: flex; min-width: 0; overflow: hidden; }
 .breadcrumbs .crumb.fit > span { overflow: hidden; text-overflow: ellipsis; }
+/* Whole at the row's left end, whatever folds (ED-60). */
+.breadcrumbs .crumb-locate { flex: none; display: flex; align-items: center; height: 18px; padding: 0 3px; margin-right: 4px; color: var(--fg-dim); }
+.breadcrumbs .crumb-locate:hover { color: var(--fg); }
 .mode-switch { margin-left: auto; display: flex; gap: 2px; }
+/* An image's controls hold the mode switch's place. The zoom's figure keeps
+   one width, so the row folds on the group's width alone (IMG-12). */
+.image-tools { margin-left: auto; flex: none; display: flex; align-items: center; gap: 1px; }
+.image-tools button { display: flex; align-items: center; height: 18px; padding: 0 3px; font-size: 11px; color: var(--fg-dim); }
+.image-tools button:hover { color: var(--fg); }
+.image-zoom { min-width: 5.5ch; text-align: center; font-size: 11px; font-variant-numeric: tabular-nums; }
 .mode-switch button { padding: 0 8px; font-size: 11px; color: var(--fg-dim); text-transform: capitalize; }
 .mode-switch button.active { color: var(--fg); background: var(--bg-hover); }
 
@@ -756,12 +787,15 @@ main { flex: 1; display: flex; min-height: 0; }
 .cm-lp-style-1 { font-size: 1.35em; }
 .cm-lp-style-2 { font-size: 1.2em; }
 .cm-lp-style-3 { font-size: 1.05em; }
-/* The link popover (RICH-09), under the text it links. */
-.cm-editor.cm-lp .cm-tooltip.cm-lp-linkpop { display: flex; flex-direction: column; gap: 6px; width: min(320px, calc(100vw - 32px)); padding: 8px; font-family: var(--ui); font-size: 12px; color: var(--fg); background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+/* The link popover (RICH-09), under the text it links. Absolute inside its
+   editor, which its group clips, so `toolbar.ts` places it 8 px in from
+   either side and it is never wider than the room between. Its buttons wrap
+   rather than run past its edge in the narrowest group. */
+.cm-editor.cm-lp .cm-tooltip.cm-lp-linkpop { display: flex; flex-direction: column; gap: 6px; width: min(320px, calc(100% - 16px)); padding: 8px; font-family: var(--ui); font-size: 12px; color: var(--fg); background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
 .cm-lp-linkpop-field { display: flex; align-items: center; gap: 8px; }
 .cm-lp-linkpop-field > span { flex: none; width: 44px; color: var(--fg-dim); }
 .cm-lp-linkpop-field input { flex: 1; min-width: 0; padding: 3px 6px; border-radius: 4px; }
-.cm-lp-linkpop-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.cm-lp-linkpop-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .cm-lp-linkpop-actions button { border-color: var(--border); }
 .cm-lp-linkpop-apply { color: var(--accent); }
 
@@ -822,6 +856,8 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 /* A confirmation, not a failure: it asks nothing, so it does not wear the error's colour. */
 .notice.info { border-color: var(--border); }
+/* A theme import's report and an error's chain come a line per item (NTF-05). */
+.notice > span { white-space: pre-line; }
 
 /* Git */
 .attention-badge { color: var(--accent); font-size: 10px; }
@@ -994,7 +1030,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .panel-bar > .remote-op[aria-busy="true"] { color: var(--fg); background: var(--bg-hover); }
 
 /* Git's whole report of the last fetch, pull or push (GIT-17). A toast would
-   show one line of it, and a failure is read in full or not at all, so it
+   leave after two seconds, and a failure is read in full or not at all, so it
    stays until dismissed and scrolls past a few lines. The rule on the left
    is always there and only coloured on failure, so the text does not move
    when the outcome lands. Selectable, so the error can be copied out. */
@@ -1124,7 +1160,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .credential-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .credential-actions button { border-color: var(--border); padding: 3px 14px; }
 
-/* The app's own confirmation: a question, at most one choice, two answers. */
+/* The app's own confirmation: a question, at most one choice, two or three answers. */
 .dialog.confirm { width: min(460px, 92vw); padding: 12px 16px 14px; }
 .dialog.confirm:focus-visible { outline: none; }
 .confirm-message { margin: 10px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1391,9 +1427,10 @@ input, textarea {
 
 /* --- Toasts (§9, §11.10) ------------------------------------------------- */
 
-/* An error notice stays until the reader dismisses it (WCAG 2.2.1); an info
-   notice leaves by itself after its dwell, which `Notice` in App.tsx times.
-   Both arrive from the corner they live in and leave the same way. */
+/* Every notice leaves by itself after its dwell, which `Notice` in App.tsx
+   times from a number rather than a token, so reduced motion shortens its
+   exit and never its reading time. Each arrives from the corner it lives in
+   and leaves the same way. */
 .notice {
   transition:
     opacity   var(--d-enter) var(--e-out),

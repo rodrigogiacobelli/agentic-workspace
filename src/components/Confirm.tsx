@@ -10,19 +10,24 @@ interface Props {
   checkbox?: { label: string; detail?: string };
   ok: string;
   cancel: string;
-  /** `ok` is false for every way of declining; `checked` is the box, false without one. */
-  onClose: (ok: boolean, checked: boolean) => void;
+  /** A third answer, between the two: Keep both beside Replace (TREE-27). */
+  alt?: string;
+  /**
+   * `ok` is false for every way of declining; `checked` is the box, false
+   * without one; `alt` says the third answer was picked, with `ok` false.
+   */
+  onClose: (ok: boolean, checked: boolean, alt: boolean) => void;
 }
 
 /**
  * A question with a yes and a no, drawn by the app because the platform's
  * dialog holds two buttons and nothing else, and some questions carry a
- * choice of their own (GIT-22).
+ * choice of their own (GIT-22, SET-05a) or a third answer (TREE-27).
  */
-export function Confirm({ title, message, checkbox, ok, cancel, onClose }: Props) {
+export function Confirm({ title, message, checkbox, ok, cancel, alt, onClose }: Props) {
   const [checked, setChecked] = useState(false);
   const dialog = useRef<HTMLDivElement>(null);
-  const [closing, dismiss] = useDismiss(() => onClose(false, false));
+  const [closing, dismiss] = useDismiss(() => onClose(false, false, false));
   const id = useId();
   useModal(dialog, closing ? undefined : dismiss);
   // On the body: a panel's region is a size container, and that would make it
@@ -54,7 +59,8 @@ export function Confirm({ title, message, checkbox, ok, cancel, onClose }: Props
           {/* The keyboard starts on the way out: Enter on a question that
               deletes something keeps it. */}
           <button autoFocus onClick={dismiss}>{cancel}</button>
-          <button className="confirm-ok" onClick={() => { if (!closing) onClose(true, checked); }}>{ok}</button>
+          {alt && <button onClick={() => { if (!closing) onClose(false, checked, true); }}>{alt}</button>}
+          <button className="confirm-ok" onClick={() => { if (!closing) onClose(true, checked, false); }}>{ok}</button>
         </div>
       </div>
     </div>,

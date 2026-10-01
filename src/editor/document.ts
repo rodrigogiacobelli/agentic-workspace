@@ -13,6 +13,7 @@ import { diff, unifiedMergeView } from "@codemirror/merge";
 import { tags as t } from "@lezer/highlight";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api } from "../api";
+import { NOTICE_DWELL_MS } from "../notice";
 import * as settings from "../settings";
 import { languageExtension, type LanguageId } from "./languages";
 import type { BlameLine, StoredAsset, Workspace } from "../types";
@@ -30,10 +31,12 @@ const forwarded = Annotation.define<boolean>();
 export const external = Annotation.define<boolean>();
 
 export interface DocHooks {
-  /** Follow a link to a file inside the workspace. */
-  openFile(relPath: string): void;
+  /** Follow a link or a chip to a file inside the workspace. */
+  openFile(relPath: string, preview: boolean): void;
   /** Open a file in another open workspace, switching to it (CITE-17). */
-  openIn(workspaceId: string, relPath: string): void;
+  openIn(workspaceId: string, relPath: string, preview: boolean): void;
+  /** Show a folder in the Explorer of the open workspace holding it, as Show in Explorer does (CITE-22c). */
+  reveal(workspaceId: string, relPath: string): void;
   /** The open workspaces as last published: whose worktree family a path reaches, and which one holds a file. */
   workspaces(): Workspace[];
   notice(message: string): void;
@@ -105,6 +108,12 @@ function normalize(parts: string[]): string[] | null {
     else if (out.pop() === undefined) return null;
   }
   return out;
+}
+
+/** Where a file opens: a workspace, and the path inside it. */
+interface Home {
+  workspaceId: string;
+  rel: string;
 }
 
 /** Whether the absolute path `abs` is `dir` or lies under it. */
@@ -274,11 +283,11 @@ export class Doc {
       // other scheme as outside, so none reaches the system opener.
       openLink: (href) => {
         if (/^(https?|mailto|tel):/i.test(href)) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(href)).catch((e) => this.hooks.notice(String(e)));
-        else this.open(this.resolve(href, true));
+        else this.open(this.resolve(href, true), false);
       },
       citation: {
         exists: (path) => this.exists(this.resolve(path, false)),
-        open: (path) => this.open(this.resolve(path, false)),
+        open: (path) => this.open(this.resolve(path, false), true),
         resolve: (path) => this.resolve(path, false),
       },
     };
@@ -658,7 +667,8 @@ export class Doc {
       this.applyExternal(disk);
       this.reloadedAt = Date.now();
       this.emit();
-      window.setTimeout(() => { if (Date.now() - this.reloadedAt >= 3900) { this.reloadedAt = 0; this.emit(); } }, 4000);
+      // A later reload restarts the time; this timer then finds it not yet up.
+      window.setTimeout(() => { if (Date.now() - this.reloadedAt >= NOTICE_DWELL_MS - 100) { this.reloadedAt = 0; this.emit(); } }, NOTICE_DWELL_MS);
     } else {
       this.conflict = disk;
       this.emit();
@@ -867,17 +877,48 @@ export class Doc {
 
   /**
    * Opens a resolved file where it lives: here, or, for a file in the
-   * worktree family, in the open workspace that holds it (CITE-17).
+   * worktree family, in the open workspace that holds it (CITE-17). A chip
+   * turns the note permanent first (CITE-22a) and opens a permanent tab
+   * (CITE-22). A link opens a preview tab, and turns the note permanent only
+   * when that preview opens in this workspace, where it would take the note's
+   * slot (CITE-22d). A chip for a folder shows it in the Explorer, one for a
+   * file that is not there says so, and neither opens a tab (CITE-22c).
    */
-  private open(target: Resolved): void {
-    if (target.rel !== null) return this.hooks.openFile(target.rel);
+  private open(target: Resolved, chip: boolean): void {
     const file = target.file;
     if (!file) return this.hooks.notice(`${target.written} is outside the workspace.`);
+    const show = async (at: Home) => {
+      const here = at.workspaceId === this.workspaceId;
+      if (chip || here) await api.pinEditor(this.workspaceId, this.id);
+      if (here) this.hooks.openFile(at.rel, !chip);
+      else this.hooks.openIn(at.workspaceId, at.rel, !chip);
+    };
+    const failed = (e: unknown) => this.hooks.notice(String(e));
+    if (!chip) {
+      const at = this.home(target, file);
+      if (at) show(at).catch(failed);
+      return;
+    }
+    // Asked on the click rather than read from the drawing: the chip's answer
+    // may not have landed, and a folder cited without its slash reads as a file.
+    api.statEntries(this.workspaceId, [target.rel ?? file]).then(([entry]) => {
+      if (!entry || entry.missing) return this.hooks.notice(`${target.written} does not exist`);
+      const at = this.home(target, file);
+      if (!at) return;
+      if (entry.isDir) return this.hooks.reveal(at.workspaceId, at.rel);
+      return show(at);
+    }).catch(failed);
+  }
+
+  /** The open workspace a resolved file lives in and its path there, or null, said as a notice, when none holds it. */
+  private home(target: Resolved, file: string): Home | null {
+    if (target.rel !== null) return { workspaceId: this.workspaceId, rel: target.rel };
     const owner = this.hooks.workspaces()
       .filter((w) => w.id !== this.workspaceId && under(w.path, file))
       .sort((a, b) => b.path.length - a.path.length)[0];
-    if (owner) this.hooks.openIn(owner.id, file.slice(owner.path.length + 1));
-    else this.hooks.notice(`${file} is in no open workspace.`);
+    if (owner) return { workspaceId: owner.id, rel: file.slice(owner.path.length + 1) };
+    this.hooks.notice(`${file} is in no open workspace.`);
+    return null;
   }
 
   /**

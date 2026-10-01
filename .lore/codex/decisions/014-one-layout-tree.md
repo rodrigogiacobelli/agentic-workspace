@@ -19,6 +19,7 @@ binds:
 - src/components/EditorArea.tsx
 - src/components/tabs.tsx
 - src/dropRoute.ts
+- src/editor/document.ts
 ---
 
 # ADR-014: One layout tree serves the editor groups and the panels
@@ -135,14 +136,24 @@ Editor, where the centre writes a reference to each dragged entry at the drop
 point and draws no centre overlay, the document's drop cursor showing where
 it lands (`015-views-and-citations`).
 
-**Preview tabs.** `EditorTab.preview` marks a tab opened by a single click.
-`place_tab` puts a preview tab in the group's existing preview slot rather than
-appending, so a group holds one (ED-29, ED-30, ED-34). `pin_editor` clears the
-mark when the file is edited, double-clicked or dragged (ED-31, ED-32, ED-33),
-and the mark is a field of the tab, so it survives a restart (ED-35). A preview
-tab's label is italic. In Source Control's working area a diff opened from the
-Commit panel's status list is a preview tab; a diff opened from a commit is
-permanent.
+**Preview tabs.** `EditorTab.preview` marks a tab opened by a single click or
+by a link. `place_tab` puts a preview tab in the group's existing preview slot
+rather than appending, so a group holds one (ED-29, ED-30, ED-34). `pin_editor`
+clears the mark when the file is edited, double-clicked or dragged (ED-31,
+ED-32, ED-33), when a chip in the tab opens a file (CITE-22a), and when a
+Markdown link in the tab opens a preview in the tab's own workspace, where
+that preview would take the tab's slot (CITE-22d); `Doc.open` in
+`src/editor/document.ts` pins the note before it opens the file, and a link
+that opens in another workspace leaves the note a preview. A chip opens its
+file as a permanent tab in the group it was clicked in (CITE-22).
+`open_file` asked for a permanent tab of a
+file the active group already shows brings that tab forward and clears its
+mark, so a chip for a file open there as the preview makes it permanent
+(CITE-22b). A chip for a folder, or for a file that is not there, opens no tab
+and pins nothing (CITE-22c). The mark is a field of the tab, so it survives a
+restart (ED-35). A preview tab's label is italic. In Source Control's working
+area a diff opened from the Commit panel's status list is a preview tab; a
+diff opened from a commit is permanent.
 
 ## Rationale
 
@@ -157,6 +168,11 @@ permanent.
   change with no backend type to follow it.
 - A preview mark on the tab needs no second store and no reconciliation: it is
   saved, restored and published with everything else about the tab.
+- A note is read beside the files it cites. Pinning the note before a chip
+  opens a file, or before a link opens a preview in the note's own workspace,
+  keeps the note in its group rather than handing its preview slot to the file
+  it cites; a chip's file opening as a permanent tab lets a reader open a
+  note's chips one after another.
 
 ## Alternatives considered
 
@@ -186,6 +202,9 @@ permanent.
   `normalize` in the frontend or not at all.
 - The work leaf is a special case in the panel tree, exempt from the removal,
   tabbing and hiding every region is subject to.
+- Opening a note's chips leaves a permanent tab for each file, which the
+  reader closes by hand; within a note, only a Markdown link keeps the one-tab
+  browsing a preview gives.
 
 ## Constraints imposed
 

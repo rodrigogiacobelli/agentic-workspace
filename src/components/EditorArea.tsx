@@ -6,11 +6,12 @@ import * as editors from "../editors";
 import { MODES, type Mode } from "../editor/document";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Live, keep, peek } from "../live";
-import { notify, report } from "../notice";
+import { NOTICE_DWELL_MS, notify, report } from "../notice";
 import type { AreaId, EditorGroup, EditorTab, LayoutGroup, PanelId, WorkArea, Workspace } from "../types";
 import { DiffView } from "./DiffView";
 import { panelInfo } from "./dock";
 import { Icon } from "./icons";
+import { ImageTools, ImageView } from "./ImageView";
 import { ContextMenu } from "./Menu";
 import { PANEL_MIME, SplitTree, useDropZone, zoneAt, type Zone } from "./SplitTree";
 import { dragTab, settleTabDrag, TabOverflow, useTabStrip, type TabZone } from "./tabs";
@@ -288,7 +289,7 @@ function GroupView({ ws, area, group, active, panels, settled, tabZone, onTabZon
             <div
               key={t.id}
               data-tab={t.id}
-              className={`tab${t.id === activeId && !shownPanel ? " active" : ""}${editors.doc(t.id)?.detached ? " detached" : ""}${t.preview ? " preview" : ""}`}
+              className={`tab${t.id === activeId && !shownPanel ? " active" : ""}${editors.detached(t.id) ? " detached" : ""}${t.preview ? " preview" : ""}`}
               onPointerDown={(e) => dragEditor(e, t.id)}
               onDragOver={(e) => acceptsFile(e, i)}
               onClick={() => pickTab(t.id)}
@@ -330,7 +331,14 @@ function GroupView({ ws, area, group, active, panels, settled, tabZone, onTabZon
             <DiffView key={tab.id} ws={ws} tab={tab} onClose={() => void closeTab(ws, tab.id)} onOpenInEditor={() => onOpenInEditor(tab.path)} />
           ) : (
             <>
-              {tab && <Breadcrumbs ws={ws} path={tab.path} doc={doc} />}
+              {tab && (
+                <Breadcrumbs
+                  ws={ws}
+                  path={tab.path}
+                  doc={doc}
+                  tools={media === "image" ? (folded) => <ImageTools workspaceId={ws.id} tabId={tab.id} folded={folded} /> : undefined}
+                />
+              )}
               {doc && <Banner doc={doc} />}
               <div className="editor-host" ref={host} hidden={!!media || area === "review"}>
                 {group.editors.length === 0 && area === "editor" && <div className="empty">Open a file from the tree, or press Ctrl+P.</div>}
@@ -338,7 +346,9 @@ function GroupView({ ws, area, group, active, panels, settled, tabZone, onTabZon
               {group.editors.length === 0 && area === "review" && (
                 <div className="empty">Pick a change in Commit, or a file of a commit in History, to see its diff here.</div>
               )}
-              {media && tab && <MediaView ws={ws} path={tab.path} kind={media} />}
+              {entry && "media" in entry && tab && (entry.media === "image"
+                ? <ImageView key={tab.id} ws={ws} tab={tab} stamp={entry.stamp} />
+                : <MediaView ws={ws} path={tab.path} kind={entry.media} />)}
               {entry && "binary" in entry && tab && (
                 <div className="binary-notice">
                   <p>{tab.path} is not a text file.</p>
@@ -359,31 +369,31 @@ function editorTabs(strip: HTMLElement): HTMLElement[] {
   return Array.from(strip.querySelectorAll<HTMLElement>(":scope > [data-tab]:not(.panel-tab)"));
 }
 
-/** An image, an audio file or a video opened from the tree, shown as itself. */
-function MediaView({ ws, path, kind }: { ws: Workspace; path: string; kind: "image" | "audio" | "video" }) {
+/** An audio file or a video opened from the tree, played as itself. */
+function MediaView({ ws, path, kind }: { ws: Workspace; path: string; kind: "audio" | "video" }) {
   const url = convertFileSrc(`${ws.path}/${path}`);
   return (
     <div className="media-view">
-      {kind === "image" && <img src={url} alt={path} title={path} />}
       {kind === "audio" && <audio src={url} controls title={path} />}
       {kind === "video" && <video src={url} controls title={path} />}
     </div>
   );
 }
 
-/** Cut shorter than this, the deepest heading says nothing, and the trail goes. */
+/** Cut shorter than this, the deepest heading or the file's name says nothing, and the row folds further. */
 const HEADING_FLOOR = 48;
 
 /**
  * Whether the header row shows all it holds: its last item — the mode switch,
- * or the last crumb — ends inside the row's padding, and the deepest heading,
- * when it is cut short, still shows a few letters.
+ * an image's controls, or the last crumb — ends inside the row's padding, and
+ * the crumb that shortens, the deepest heading or the file's name, when it is
+ * cut short, still shows a few letters.
  */
 function fits(row: HTMLElement): boolean {
   const end = row.getBoundingClientRect().right - parseFloat(getComputedStyle(row).paddingRight);
   if ((row.lastElementChild?.getBoundingClientRect().right ?? 0) > end + 0.5) return false;
-  const deepest = row.querySelector<HTMLElement>(".heading.fit > span");
-  return !deepest || deepest.scrollWidth <= deepest.clientWidth || deepest.clientWidth >= HEADING_FLOOR;
+  const cut = row.querySelector<HTMLElement>(".crumb.fit > span");
+  return !cut || cut.scrollWidth <= cut.clientWidth || cut.clientWidth >= HEADING_FLOOR;
 }
 
 /**
@@ -393,15 +403,26 @@ function fits(row: HTMLElement): boolean {
  * whole (ED-47); the workspace's own crumb, whose relative path is empty,
  * copies the absolute root. A heading crumb jumps to its heading.
  *
+ * *Show in Explorer* at the row's left end shows the file in the Explorer,
+ * as a crumb's *Reveal in Explorer* does (ED-59), and never folds (ED-60).
+ *
  * A row too narrow for all of it keeps the mode switch whole at its right and
  * gives way a step at a time (ED-56): the deepest heading shortens, then the
  * heading trail goes (level 1); the folders fold into one `…` crumb (2), which
  * the workspace joins (3); last, the file name shortens. `…` opens a menu of
  * the crumbs it holds, whose rows act as the crumbs themselves do — a click
  * copies, a right-click opens the crumb's menu in the list's place — and a
- * crumb's tooltip carries its full text (ED-57).
+ * crumb's tooltip carries its full text (ED-57). An image's controls hold the
+ * right end in the mode switch's place, and once the file name is cut to a
+ * few letters all but the zoom fold into their own menu (4, IMG-12).
  */
-function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: import("../editor/document").Doc }) {
+function Breadcrumbs({ ws, path, doc, tools }: {
+  ws: Workspace;
+  path: string;
+  doc?: import("../editor/document").Doc;
+  /** An image's controls, whole or folded. */
+  tools?: (folded: boolean) => ReactNode;
+}) {
   // One menu at a time: the list `…` opens, which has no `path`, or a crumb's.
   const [menu, setMenu] = useState<{ x: number; y: number; path?: string } | null>(null);
   const row = useRef<HTMLDivElement>(null);
@@ -414,12 +435,12 @@ function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: imp
   // A change to what the row holds, or to its width, starts over from nothing
   // folded; each step is laid out and measured before the paint. A keystroke
   // that leaves the heading trail as it was measures nothing.
-  const shape = [width, ws.name, path, !!doc?.isMarkdown, ...trail.map((h) => h.text)].join("\n");
+  const shape = [width, ws.name, path, !!doc?.isMarkdown, !!tools, ...trail.map((h) => h.text)].join("\n");
   const [fold, setFold] = useState({ shape, level: 0 });
   const level = fold.shape === shape ? fold.level : 0;
   useLayoutEffect(() => {
-    if (level < 3 && row.current && !fits(row.current)) setFold({ shape, level: level + 1 });
-  }, [shape, level]);
+    if (level < (tools ? 4 : 3) && row.current && !fits(row.current)) setFold({ shape, level: level + 1 });
+  }, [shape, level]); // eslint-disable-line react-hooks/exhaustive-deps
   // The group is resized by a divider as often as by the window.
   useEffect(() => {
     const el = row.current;
@@ -435,9 +456,18 @@ function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: imp
   useEffect(() => { if (listed && folded.length === 0) setMenu(null); }, [listed, folded.length]);
   return (
     // WebKitGTK gives a button the focus when it is clicked; a press on a
-    // crumb, or on a row of its menus, leaves it, and so the cursor, in the
-    // text, and no autosave runs on the blur.
-    <div ref={row} className="breadcrumbs" onMouseDown={(e) => { if ((e.target as Element).closest(".crumb, .menu")) e.preventDefault(); }}>
+    // crumb, on an image's controls, or on a row of their menus, leaves it,
+    // and so the cursor, in the text, and the keys with the image viewer
+    // (IMG-11b), and no autosave runs on the blur.
+    <div ref={row} className="breadcrumbs" onMouseDown={(e) => { if ((e.target as Element).closest(".crumb, .crumb-locate, .image-tools, .menu")) e.preventDefault(); }}>
+      <button
+        className="crumb-locate"
+        title="Show in Explorer"
+        aria-label="Show in Explorer"
+        onClick={() => window.dispatchEvent(new CustomEvent("tree-reveal", { detail: { workspaceId: ws.id, path } }))}
+      >
+        <Icon name="locate" size={14} />
+      </button>
       {crumbs.map((c, i) => folded.includes(c) ? c === folded[0] && (
         <button
           key="folded"
@@ -455,7 +485,7 @@ function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: imp
       ) : (
         <button
           key={i}
-          className={`crumb${level === 3 && i === crumbs.length - 1 ? " fit" : ""}`}
+          className={`crumb${level >= 3 && i === crumbs.length - 1 ? " fit" : ""}`}
           title={`Copy ${c.rel || ws.path}`}
           onClick={() => copy(c.rel || ws.path)}
           onContextMenu={crumbMenu(c.rel)}
@@ -475,6 +505,7 @@ function Breadcrumbs({ ws, path, doc }: { ws: Workspace; path: string; doc?: imp
           ))}
         </span>
       )}
+      {tools?.(level === 4)}
       {menu && (menu.path !== undefined || folded.length > 0) && (
         <ContextMenu x={menu.x} y={menu.y} anchor={menu} onClose={() => setMenu(null)}>
           {menu.path === undefined ? folded.map((f) => (
@@ -517,7 +548,8 @@ function Banner({ doc }: { doc: import("../editor/document").Doc }) {
   if (doc.detached) {
     return <div className="banner warn"><span>{doc.path} was deleted or moved on disk. Saving recreates it.</span></div>;
   }
-  if (doc.reloadedAt && Date.now() - doc.reloadedAt < 4000) {
+  // It leaves as a toast does (NTF-06).
+  if (doc.reloadedAt && Date.now() - doc.reloadedAt < NOTICE_DWELL_MS) {
     return <div className="banner info"><span>Reloaded from disk.</span></div>;
   }
   return null;

@@ -8,13 +8,15 @@ summary: The Arch, KDE and Wayland rules this application complies with — the
   and max-width, the query container that moves a scroller back as it is
   redrawn, the wheel event each animated on its own, window placement limits, the focus that
   gates a clipboard read, global shortcut binding through the portal, overlay
-  scrollbars over app-drawn menus, the main loop a synchronous command blocks,
-  the scheduling class an auto-nice daemon hands down, the identity a development
-  build carries so it runs beside an installed one, the X11 backend an AppImage
-  is handed and gives back, the environment every child process is cleaned of, what WebKitGTK
-  does to a drag and to Shift+Tab, the directories the asset protocol serves
-  and the hidden ones it refuses, the AppImage strip flag and the Cargo version
-  floor. Each fails silently when broken.
+  scrollbars over app-drawn menus, the Safari path CodeMirror takes for its
+  tooltips and the group edge that clips one, the main loop a synchronous command
+  blocks, the trash one gio process per entry reaches and the workspace folder it
+  never takes, the scheduling class an auto-nice daemon hands down, the identity a
+  development build carries so it runs beside an installed one, the X11 backend an
+  AppImage is handed and gives back, the environment every child process is cleaned
+  of, what WebKitGTK does to a drag and to Shift+Tab, the directories the asset
+  protocol serves, the hidden ones it refuses and the query it ignores, the AppImage
+  strip flag and the Cargo version floor. Each fails silently when broken.
 related:
   - 008-tauri-v2-on-arch-kde
   - standards-motion
@@ -31,6 +33,8 @@ binds:
   - src-tauri/tauri.conf.json
   - src-tauri/src/tree.rs
   - src/styles.css
+  - src/editor/toolbar.ts
+  - src/components/ImageView.tsx
 rites:
   - check-layering
 ---
@@ -272,8 +276,10 @@ The application therefore draws every scrollbar itself. `src/scrollbars.ts`
 turns the native bars off across the document with `scrollbar-width: none` and
 draws a thumb over the trailing edge of whichever surface is being scrolled or
 hovered, one at a time; while a menu or a dialog is open, only a scroller
-inside one gets a bar. An app-drawn bar takes no layout space either, so
-nothing shifts when it appears.
+inside one gets a bar. The bars sit on the layering scale above menus and
+dialogs and below notices, so a toast covers the bar of the surface it floats
+over. An app-drawn bar takes no layout space either, so nothing shifts when it
+appears.
 
 Layering is one scale of custom properties at the top of the stylesheet, from
 `--z-drop` to `--z-tooltip`, and every floating layer sits above the window's
@@ -296,6 +302,39 @@ already holds its gutters). The `check-layering` rite audits every stylesheet
 the page loads against this rule and probes each floating layer over each
 library surface; run it when a floating layer, a library or a library's
 extension is added.
+
+## CodeMirror places its tooltips on WebKitGTK as it would on Safari
+
+WebKitGTK reports `navigator.vendor` as `Apple Computer, Inc.`, and
+`@codemirror/view` reads that as Safari. Its tooltip layer then checks every
+measure the Safari way: while a tooltip is `position: fixed`, CodeMirror reads
+its box and, when the box is not where it parks a tooltip before placing it
+(`top: -10000px`), takes fixed positioning to be broken by a transformed
+ancestor. A tooltip that has been placed once, or that plays an arrival
+transform, fails that check on the first or second measure, and CodeMirror
+switches every tooltip of that editor to `position: absolute` inside the
+editor, for as long as the editor lives. Inside the editor a tooltip is cut at
+its editor group's edge, which `.split-child` clips with `overflow: hidden`,
+whatever its `z-index`, and past that edge the neighbouring group or panel
+takes its clicks. Nothing reports it: the tooltip draws, cut short, and a
+check that never opens a CodeMirror tooltip near a group's edge passes.
+
+A CodeMirror tooltip therefore stays inside its editor's box. The rich view's
+link popover in `src/editor/toolbar.ts` is configured with
+`tooltips({ position: "absolute", tooltipSpace })`, where the space is the
+editor's own rectangle 8 px in at the sides, and `styles.css` caps its width
+at the editor's width less 16 px, so it shows whole in the narrowest group
+(FIX-21). It starts absolute so WebKitGTK and other engines take the same
+path, and a width cap given as a share is a share of the editor, not of the
+window.
+
+Parenting a tooltip to `document.body` (`tooltips({ parent })`) is not the
+way out. CodeMirror gives the body-level container the editor's theme
+classes, so the editor theme's root rules (`height: 100%`, the background)
+make it an in-flow box as tall as the window under `#root`, and the page
+scrolls. A tooltip in the body also outlives its editor's DOM: a mode switch
+detaches the view without destroying it, and the tooltip keeps keyboard focus
+while nothing shows it.
 
 ## An auto-nice daemon demotes the whole application
 
@@ -331,6 +370,17 @@ filesystem or start a process carry `#[tauri::command(async)]`, which runs
 them on the async runtime instead. Commands whose order matters — a write to
 a file, a keystroke to a pseudoterminal, a mutation of the session — stay
 synchronous, because two spawned tasks can finish in either order.
+
+## The trash is one `gio` process per entry
+
+`tree::trash` moves a path to the desktop trash with `gio trash`. On a
+failure gio names the file twice before its reason, and `trash` keeps the
+reason alone. `tree::trash_entries` carries `#[tauri::command(async)]`, since
+every entry it takes starts a process, and answers each failure as
+`<path>: <reason>`, which the tree shows as one notice, a line each. It
+refuses any path that resolves to the workspace's own folder: `tree::resolve`
+reads the empty path, `.` and `./` as the root, and `gio trash` given the root
+moves the whole workspace to the trash and reports success.
 
 ## Window position belongs to the compositor
 
@@ -478,6 +528,14 @@ and the request is refused with a 403. An image reached through a relative
 symlink therefore never loads, in a document or in its own tab, although the
 Files panel lists it and a citation of it is drawn as present. A symlink with
 an absolute target loads when that target lies inside a served directory.
+
+The protocol's handler in Tauri 2.11 serves the file its request's path names
+and ignores the query. The webview caches by the whole address, so a picture
+rewritten on disk at the same path is drawn from the cache. The image viewer
+therefore loads `<asset address>?v=<stamp>`, where the stamp is the file's
+inode, length and modification time from `files::file_stamp`: a rewritten or
+replaced file gets a new address, which the webview fetches afresh, and the
+handler serves the same path (IMG-09).
 
 ## The AppImage target needs `NO_STRIP=1`
 

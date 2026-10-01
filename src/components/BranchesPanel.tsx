@@ -30,7 +30,7 @@ const VERB: Record<Remote, { running: string; done: string }> = {
  * Local and remote branches, and the operations that move them between the
  * two. Fetch, pull and push live here since Remote stopped being a panel of
  * its own, and git's whole output of the last one stays under them until it
- * is dismissed — a toast would show one line of it (GIT-17). The lists, the
+ * is dismissed — a toast would leave after two seconds (GIT-17). The lists, the
  * filter and an operation's progress and output are kept, so one still running
  * when the panel is taken down shows how it ended when the panel is back.
  */

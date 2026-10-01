@@ -10,6 +10,7 @@ related:
 - 002-backend-owned-terminal-sessions
 - 007-workspace-is-one-directory
 - 006-no-language-intelligence
+- 020-workspace-family
 binds:
 - README.md
 ---
@@ -39,18 +40,24 @@ sight of work that continues without supervision.
 
 ## The shape that answers it
 
-**A workspace is one directory**, and it owns the whole arrangement for that
-project — file tree, open documents, terminals, git context. Switching workspace
-swaps all of it in one action.
+**A workspace is one directory**, and it owns the arrangement for that
+project — file tree, open documents, git context. A workspace the user adds is
+the root of a workspace family: the repositories directly inside its folder,
+and the worktrees of the root or of those repositories that are open, are
+workspaces of their own listed under it, and the family owns one list of terminals (`020-workspace-family`). Switching
+workspace swaps the tree, the documents and the git context in one action;
+switching between members of one family keeps the same terminals on screen,
+so an agent working at the root stays in view while its output is read in a
+worktree.
 
-**Terminals outlive the switch.** A workspace moved to the background keeps its
+**Terminals outlive the switch.** A family moved to the background keeps its
 processes running and keeps collecting their output. Returning to it shows the
 terminals as they would have been had they stayed on screen.
 
-**The application reports unsupervised work.** A background workspace whose
-terminal produces output is marked, and a background terminal that goes quiet
-after being busy raises a notification — the two observable signs that an agent
-has finished or is waiting for an answer.
+**The application reports unsupervised work.** A background family whose
+terminal produces output is marked on its root, and a background terminal that
+goes quiet after being busy raises a notification — the two observable signs
+that an agent has finished or is waiting for an answer.
 
 **Documents are the primary surface.** Most of the work is reading and writing
 markdown — specifications, notes, agent instructions, project documentation —

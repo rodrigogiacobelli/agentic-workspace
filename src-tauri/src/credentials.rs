@@ -162,7 +162,7 @@ pub struct Scope {
 /// workspace's shells first — the repository is read from the files git
 /// keeps.
 pub fn scope(state: &AppState, workspace_id: &str) -> Option<Scope> {
-    let (path, repository, summary) = {
+    let (path, repository, summary, facts) = {
         let session = state.session.lock();
         let ws = session.workspace(workspace_id)?;
         let repository = ws.worktree_of.as_deref().and_then(|r| session.workspace(r)).map(|r| r.path.clone());
@@ -170,15 +170,20 @@ pub fn scope(state: &AppState, workspace_id: &str) -> Option<Scope> {
             let main = g.worktrees.iter().find(|w| w.is_main).map(|w| PathBuf::from(&w.path));
             (g.is_repo, g.is_worktree, g.common_dir.clone(), main)
         });
-        (ws.path.clone(), repository, summary)
+        (ws.path.clone(), repository, summary, ws.repository.clone())
     };
     // A worktree whose repository is not open falls back to the main
     // worktree: the one git lists first, as the Workspace page reads it, or
-    // before the summary is in, the directory holding the common `.git`.
+    // before the summary is in, the directory holding the common `.git`. A
+    // folder that is gone has no summary and is never read upwards: the walk
+    // would land in whatever repository holds it, and a family's terminal
+    // credentials would apply there (TERM-26). Its own `.git` as the entry
+    // last read it stands in, or nothing, whose pattern matches nothing
+    // while the folder is gone.
     let (linked, common_dir, main) = match summary {
         Some((true, linked, Some(common), main)) => (linked, Some(common), main),
         Some((false, ..)) => (false, None, None),
-        _ => repository_of(&path).map_or((false, None, None), |r| {
+        _ => (if path.is_dir() { repository_of(&path) } else { facts }).map_or((false, None, None), |r| {
             let main = r.common_dir.parent().filter(|_| r.common_dir.file_name() == Some(OsStr::new(".git"))).map(Path::to_path_buf);
             (r.linked, Some(r.common_dir), main)
         }),
@@ -187,36 +192,63 @@ pub fn scope(state: &AppState, workspace_id: &str) -> Option<Scope> {
     Some(Scope { path, repository, common_dir })
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct Repository {
     pub common_dir: PathBuf,
     /// A linked worktree rather than the repository's own working tree.
     pub linked: bool,
 }
 
+/// What the files git keeps say about one directory's own top.
+pub enum Top {
+    /// No `.git` here and not a bare repository: a plain folder, a
+    /// subdirectory of a repository, or a folder that is gone.
+    Plain,
+    Repository(Repository),
+    /// A `.git` that names nothing readable: a file that cannot be read or
+    /// holds no `gitdir:`, or a `gitdir:` whose directory is not there — a
+    /// linked worktree whose repository folder is away.
+    Unresolved,
+}
+
+/// The repository whose top is exactly `dir`: its `.git` directory, a
+/// `gitdir:` file with the linked worktree's `commondir`, or a bare
+/// repository. Nothing above `dir` is read.
+pub fn repository_at(dir: &Path) -> Top {
+    let dot = dir.join(".git");
+    match std::fs::metadata(&dot) {
+        Ok(meta) if meta.is_dir() => Top::Repository(Repository { common_dir: dot, linked: false }),
+        Ok(_) => {
+            let text = std::fs::read_to_string(&dot).unwrap_or_default();
+            let Some(target) = text.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim) else { return Top::Unresolved };
+            let git_dir = lexical(&dir.join(target));
+            if !git_dir.is_dir() {
+                return Top::Unresolved;
+            }
+            Top::Repository(match std::fs::read_to_string(git_dir.join("commondir")) {
+                Ok(common) => Repository { common_dir: lexical(&git_dir.join(common.trim_end_matches(['\n', '\r']))), linked: true },
+                // A submodule's `.git` names a git directory of its own.
+                Err(_) => Repository { common_dir: git_dir, linked: false },
+            })
+        }
+        Err(_) if dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir() => {
+            Top::Repository(Repository { common_dir: dir.to_path_buf(), linked: false })
+        }
+        Err(_) => Top::Plain,
+    }
+}
+
 /// The repository `dir` is in, from the files git keeps: the first `.git`
-/// above it, a directory or a `gitdir:` file, and the linked worktree's
-/// `commondir`. A bare repository is its own common directory. Git answers
-/// the same through `rev-parse`; this exists for the shells launch starts
-/// before any summary is in.
+/// above it. Git answers the same through `rev-parse`; this exists for the
+/// shells launch starts before any summary is in. A `.git` that cannot be
+/// resolved ends the walk, rather than let it reach an unrelated repository
+/// further up.
 pub fn repository_of(dir: &Path) -> Option<Repository> {
     for d in dir.ancestors() {
-        let dot = d.join(".git");
-        match std::fs::metadata(&dot) {
-            Ok(meta) if meta.is_dir() => return Some(Repository { common_dir: dot, linked: false }),
-            Ok(_) => {
-                let text = std::fs::read_to_string(&dot).ok()?;
-                let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
-                let git_dir = lexical(&d.join(target));
-                return Some(match std::fs::read_to_string(git_dir.join("commondir")) {
-                    Ok(common) => Repository { common_dir: lexical(&git_dir.join(common.trim_end_matches(['\n', '\r']))), linked: true },
-                    // A submodule's `.git` names a git directory of its own.
-                    Err(_) => Repository { common_dir: git_dir, linked: false },
-                });
-            }
-            Err(_) if d.join("HEAD").is_file() && d.join("objects").is_dir() && d.join("refs").is_dir() => {
-                return Some(Repository { common_dir: d.to_path_buf(), linked: false });
-            }
-            Err(_) => {}
+        match repository_at(d) {
+            Top::Plain => {}
+            Top::Repository(r) => return Some(r),
+            Top::Unresolved => return None,
         }
     }
     None
@@ -958,6 +990,13 @@ mod tests {
         write("bare.git/HEAD", "ref: refs/heads/main\n");
         let found = repository_of(&root.join("bare.git")).unwrap();
         assert_eq!((found.common_dir, found.linked), (root.join("bare.git"), false));
+
+        // A worktree whose repository folder is away is neither a repository
+        // of its own nor a way up into the one above it.
+        mk("away/sub");
+        write("away/.git", &format!("gitdir: {}\n", root.join("gone/.git/worktrees/away").display()));
+        assert!(matches!(repository_at(&root.join("away")), Top::Unresolved));
+        assert!(repository_of(&root.join("away/sub")).is_none());
 
         mk("plain");
         assert!(repository_of(&root.join("plain")).is_none_or(|r| !r.common_dir.starts_with(&root)));

@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, events } from "../api";
 import { installDropRoute, nativeSession, takeDrop } from "../dropRoute";
 import * as editors from "../editors";
 import { actionFor } from "../hotkeys";
-import { Live, retainKept } from "../live";
+import { Live, keep, peek, retainKept } from "../live";
 import { modalOpen } from "../modal";
-import { pick } from "../modes";
+import { familyOf, familyRoot, pick } from "../modes";
 import { report } from "../notice";
 import * as repo from "../repo";
 import * as settings from "../settings";
@@ -15,7 +15,7 @@ import { BranchesPanel } from "./BranchesPanel";
 import { CommitPanel } from "./CommitPanel";
 import { dropPanel, hidePanel, leafKey, normalizeAll, panelInfo, placePanel, resizeSplit, setActivePanel, showPanel, type DockLeaf } from "./dock";
 import { EditorArea, activeGroupOf, areaOf, closeTab, groupOrder } from "./EditorArea";
-import { FileTree, externalDrop, externalOver } from "./FileTree";
+import { FileTree, externalDrop, externalOver, followFront, revealInTree, treeLead } from "./FileTree";
 import { HistoryPanel, showCommit } from "./HistoryPanel";
 import { Icon } from "./icons";
 import { ContextMenu } from "./Menu";
@@ -50,8 +50,6 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
   const sessionRef = useRef(session);
   sessionRef.current = session;
   const [quickOpen, setQuickOpen] = useState<PaletteItem[] | null>(null);
-  /** The path each workspace's tree has selected, for the copy-path key. */
-  const selection = useRef(new Map<string, string | null>());
 
   // The dock trees are the application's, kept with the settings; the
   // settings dialog can reset them or show a hidden panel from any window.
@@ -98,22 +96,50 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
     editors.refreshFamilies();
   }, [session]);
 
-  // Links inside documents open files here; notices surface here.
+  // A folder chip in another workspace is shown once that workspace is on
+  // screen, after this commit's effects: the Explorer's handler then answers
+  // for the workspace the switch brought forward.
+  const revealing = useRef<{ workspaceId: string; path: string } | null>(null);
   useEffect(() => {
+    const detail = revealing.current;
+    if (detail?.workspaceId !== session.active) return;
+    revealing.current = null;
+    queueMicrotask(() => window.dispatchEvent(new CustomEvent("tree-reveal", { detail })));
+  }, [session.active]);
+
+  // Links inside documents open files here; notices surface here. Set as the
+  // groups mount their documents, not after: a document keeps the hooks it
+  // was built with, and one whose read landed before a passive effect ran
+  // would keep the no-ops, or those of the workspace on screen before.
+  useLayoutEffect(() => {
     editors.setHooks({
-      openFile: (rel) => { if (ws) void openFile(ws, rel, true).catch(report); },
-      // A document keeps the hooks it was built with, so these two read the
+      openFile: (rel, preview) => { if (ws) void openFile(ws, rel, preview).catch(report); },
+      // A document keeps the hooks it was built with, so these read the
       // session as it is now rather than as it was then.
-      openIn: (id, rel) => {
+      openIn: (id, rel, preview) => {
         const target = sessionRef.current.workspaces.find((w) => w.id === id);
-        if (target) void api.switchWorkspace(id).then(() => openFile(target, rel, true)).catch(report);
+        if (target) void api.switchWorkspace(id).then(() => openFile(target, rel, preview)).catch(report);
       },
-      workspaces: () => sessionRef.current.workspaces,
+      // The family on screen first: where two entries hold a file — a child
+      // and the owner's own entry on one folder — a chip opens it in this
+      // family's, the resolver keeping this order among equals (CITE-23).
+      workspaces: () => {
+        const { workspaces, active } = sessionRef.current;
+        const mine = familyOf(workspaces, familyRoot(workspaces, workspaces.find((w) => w.id === active)));
+        return [...mine, ...workspaces.filter((w) => !mine.includes(w))];
+      },
       notice: (m) => report(m),
       showCommit: (hash) => {
         if (!ws) return;
         focusPanel("history");
         showCommit(ws.id, hash);
+      },
+      reveal: (id, path) => {
+        if (id === sessionRef.current.active) window.dispatchEvent(new CustomEvent("tree-reveal", { detail: { workspaceId: id, path } }));
+        else {
+          revealing.current = { workspaceId: id, path };
+          void api.switchWorkspace(id).catch((e) => { revealing.current = null; report(e); });
+        }
       },
     });
   }, [ws, focusPanel, openFile]);
@@ -220,7 +246,7 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
         case "prev-tab": cycle(ws, area, -1); break;
         case "copy-relative-path": {
           // The tree's selection is on screen only in the Editor.
-          const tree = ws?.mode === "editor" ? selection.current.get(ws.id) : null;
+          const tree = ws?.mode === "editor" ? treeLead(ws.id) : null;
           const path = tree ?? (ws && activeId ? activeGroupOf(ws, area)?.editors.find((t) => t.id === activeId)?.path : undefined);
           if (path) void api.copyText(path);
           break;
@@ -247,7 +273,6 @@ export function WorkspaceWindow({ session, openSwitcher, openSettings }: Props) 
           front={front}
           openFile={openFile}
           focusPanel={focusPanel}
-          selection={selection.current}
         />
       ) : (
         <div className="empty">Add a folder to start.</div>
@@ -272,7 +297,6 @@ interface ViewProps {
   front: (mode: DockedMode) => void;
   openFile: (ws: Workspace, path: string, preview: boolean) => Promise<string>;
   focusPanel: (id: PanelId) => void;
-  selection: Map<string, string | null>;
 }
 
 /**
@@ -283,32 +307,42 @@ interface ViewProps {
  * diffs are kept in `src/live.ts`, so a rebuilt view paints from them at once
  * and re-reads after.
  */
-function WorkspaceView({ ws, session, layouts, update, front, openFile, focusPanel, selection }: ViewProps) {
-  const [selected, setSelected] = useState<string | null>(() => selection.get(ws.id) ?? null);
-  const select = (path: string | null) => { selection.set(ws.id, path); setSelected(path); };
+function WorkspaceView({ ws, session, layouts, update, front, openFile, focusPanel }: ViewProps) {
   const { status } = repo.useRepo(ws.id);
 
-  // A breadcrumb's Reveal in Explorer (ED-47): the path is selected and the
-  // Explorer comes forward, and every folder above the path opens, in order,
-  // so each unfolds as the tree draws it. The tree scrolls to the row once it
-  // is drawn.
+  // Show in Explorer and a breadcrumb's Reveal in Explorer (ED-59, ED-59b):
+  // the Explorer selects the path alone, dropping a filter that hides it, comes
+  // forward — shown again where it was last docked when hidden (ED-59a) — and
+  // takes the keyboard, and every folder above the path opens in one change.
+  // The tree scrolls to the row once it is drawn.
   useEffect(() => {
     const onReveal = (e: Event) => {
       const { workspaceId, path } = (e as CustomEvent<{ workspaceId: string; path: string }>).detail;
       if (workspaceId !== ws.id) return;
-      select(path);
+      revealInTree(ws.id, path);
       focusPanel("explorer");
       const parts = path.split("/");
-      void (async () => {
-        for (let i = 1; i < parts.length; i++) {
-          const dir = parts.slice(0, i).join("/");
-          if (!ws.expanded.includes(dir)) await api.setExpanded(ws.id, dir, true);
-        }
-      })().catch(report);
+      const shut = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/")).filter((d) => !ws.expanded.includes(d));
+      if (shut.length) void api.setExpanded(ws.id, shut, true).catch(report);
     };
     window.addEventListener("tree-reveal", onReveal);
     return () => window.removeEventListener("tree-reveal", onReveal);
   });
+
+  // The trees follow the document in front (TREE-18), when its tab changes: a
+  // move keeps the tab and is not followed (TREE-18a). The tab followed is kept,
+  // so a view rebuilt by a workspace switch follows only a change made while it
+  // was away, and leaves the selection the reader left otherwise. With no
+  // document left in front, a follow still waiting is dropped.
+  const group = activeGroupOf(ws, "editor");
+  const inFront = group?.editors.find((t) => t.id === group.activeEditor) ?? null;
+  useEffect(() => {
+    const key = `${ws.id}:tree:front`;
+    const was = peek<string | null>(key);
+    const id = inFront?.id ?? null;
+    keep(key, id);
+    if (was !== undefined && id !== was) followFront(ws, inFront?.path ?? null, !!inFront && editors.detached(inFront.id));
+  }, [inFront?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openAt = (path: string, line: number, column: number) => {
     openFile(ws, path, true).then((id) => editors.revealLine(id, line, column)).catch(report);
@@ -320,7 +354,7 @@ function WorkspaceView({ ws, session, layouts, update, front, openFile, focusPan
   const openFromTree = (path: string, preview: boolean) => {
     front("editor");
     if (!preview) (document.activeElement as HTMLElement | null)?.blur();
-    api.openFile(ws.id, path, preview).then((id) => { if (!preview) editors.doc(id)?.focus(); }).catch(report);
+    api.openFile(ws.id, path, preview).then((id) => { if (!preview) editors.focus(id); }).catch(report);
   };
 
   // Quote to AI: a citation into the active document, whatever the link setting (CITE-01, CITE-05).
@@ -337,8 +371,8 @@ function WorkspaceView({ ws, session, layouts, update, front, openFile, focusPan
   const renderPanel = (id: PanelId) => {
     if (!ws.available) return <div className="tree-loading">The directory {ws.path} is missing.</div>;
     switch (id) {
-      case "explorer": return <FileTree key="explorer" kind="explorer" ws={ws} selected={selected} onSelect={select} onOpen={openFromTree} onQuote={quote} gitStatus={status} />;
-      case "custom": return <FileTree key="custom" kind="custom" ws={ws} selected={selected} onSelect={select} onOpen={openFromTree} onQuote={quote} gitStatus={status} />;
+      case "explorer": return <FileTree key="explorer" kind="explorer" ws={ws} onOpen={openFromTree} onQuote={quote} gitStatus={status} />;
+      case "custom": return <FileTree key="custom" kind="custom" ws={ws} onOpen={openFromTree} onQuote={quote} gitStatus={status} />;
       case "search": return <SearchPanel ws={ws} onOpen={openAt} />;
       case "outline": return <Outline ws={ws} />;
       case "commit": return <CommitPanel ws={ws} onDiff={onDiff} onOpenFile={onOpenFile} />;

@@ -79,7 +79,10 @@ export function installTooltips(): void {
     if (hoverable(to)) return;
     hide();
   });
-  document.addEventListener("mousedown", (e) => { clicked = hoverable(e.target); hide(); }, true);
-  for (const type of ["keydown", "wheel", "dragstart"]) document.addEventListener(type, hide, true);
+  // On the window, capturing, and added before any view mounts, so these run
+  // first: a menu's Escape and a window's shortcuts stop the key there, and
+  // a tip inside a menu that closes would stay drawn with nothing under it.
+  window.addEventListener("mousedown", (e) => { clicked = hoverable(e.target); hide(); }, true);
+  for (const type of ["keydown", "wheel", "dragstart"]) window.addEventListener(type, hide, true);
   window.addEventListener("blur", hide);
 }

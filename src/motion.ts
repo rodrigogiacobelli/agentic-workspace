@@ -14,6 +14,11 @@ export function duration(token: string): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+/** An easing token's curve, for an animation run from script. */
+export function easing(token: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+}
+
 /**
  * Holds a dismissible surface open for its exit. Returns whether the exit is
  * playing — the caller puts `is-closing` on the element — and the dismiss to

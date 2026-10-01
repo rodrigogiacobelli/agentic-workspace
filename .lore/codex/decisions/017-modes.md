@@ -11,6 +11,7 @@ related:
 - 014-one-layout-tree
 - 012-git-through-the-git-binary
 - 018-mount-what-is-on-screen
+- 020-workspace-family
 - standards-code
 binds:
 - src/modes.ts
@@ -19,6 +20,7 @@ binds:
 - src/components/WorkspaceWindow.tsx
 - src/components/Switcher.tsx
 - src/components/StatusBar.tsx
+- src/components/TerminalWindow.tsx
 - src/components/CommitPanel.tsx
 - src/components/HistoryPanel.tsx
 - src/components/BranchesPanel.tsx
@@ -71,9 +73,12 @@ The mode selector sits at the middle of the window, not of the space the two
 ends leave, and its three buttons share one width. `modes::pick` sets a docked
 mode on the workspace, and raises the other window when the mode picked is
 drawn there: Terminal from the Workspace window, Editor or Source Control from
-the Terminal window. The Terminal button carries a dot while a shell runs in
-the active workspace, lit when one printed out of view. `Ctrl+1`, `Ctrl+2` and
-`Ctrl+3` pick the three modes in either window.
+the Terminal window. The Terminal button carries a dot while the active
+workspace's family (`020-workspace-family`) holds a terminal, and its tooltip
+counts them: the dot reads the list the family's root holds and every member
+shows (TERM-16), whichever member is on screen. It is lit when one of those
+terminals printed out of view (AGT-10). `Ctrl+1`, `Ctrl+2` and `Ctrl+3` pick
+the three modes in either window.
 
 **Labels or icons.** `Settings.tabDisplay` is `labels` or `icons`, never both.
 `settings::apply` writes it to `data-tabs` on the document root; every mode
@@ -88,7 +93,11 @@ staged, changed and untracked files and the stashes, with the commit box at
 its foot (GIT-18). Branches carries fetch, pull and push, the local and remote
 branches, and git's whole output of the last remote operation (GIT-17).
 Explorer is the workspace's tree; Custom shows one of the workspace's views
-(`015-views-and-citations`).
+(`015-views-and-citations`). Each of the two keeps its own selection — its
+selected rows, its lead row and the anchor a range starts from — so a click,
+a key or a follow of the document in front in one leaves the other's
+selection as it was, and each panel's actions take only the rows that panel
+draws and highlights (TREE-20, TREE-22a).
 
 **One dock tree per mode.** `Settings.panelLayout` holds `{ editor, scm }`,
 each a `PanelLayout` of the kind `014-one-layout-tree` describes, and each the
@@ -135,12 +144,17 @@ same copy.
 
 **The application's status bar.** `src/components/StatusBar.tsx` sits below
 the body in both windows. The mode on screen fills its left: the cursor, the
-markdown mode, blame and the language in the Editor; the changed, staged,
-conflict and stash counts in Source Control; the shell, its directory and the
-tab count in Terminal. Each window's half supplies those facts —
+markdown mode, blame and the language in the Editor, or for an image its size
+and zoom (IMG-08); the changed, staged, conflict and stash counts in Source
+Control; in Terminal, the facts of the family's list — the shell in front,
+its directory and the tab count. The directory reads relative to the folder
+of the family member holding it, after the mark the tab strip gives the tab:
+a child's name, `⑂` and a worktree's name, or nothing in the root's own folder
+(TERM-19). Each window's half supplies those facts —
 `src/components/WorkspaceFacts.tsx` and `TerminalFacts` in
-`src/components/TerminalWindow.tsx` — so the bar itself loads neither half. The workspace name and the branch with its ahead and
-behind counts hold the right end, and the branch picks Source Control.
+`src/components/TerminalWindow.tsx` — so the bar itself loads neither half.
+The name of the workspace on screen and its branch with the ahead and behind
+counts hold the right end, and the branch picks Source Control.
 
 ## Rationale
 

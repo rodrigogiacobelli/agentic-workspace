@@ -29,9 +29,11 @@ pub type Activities = Mutex<HashMap<String, Activity>>;
 
 /// Called from the output thread of every terminal, after each chunk. This is
 /// the hot path: a full-screen program redraws on every keystroke, so it runs
-/// as often as the user types. It takes no lock that `session::persist` holds,
-/// and it reaches the session at all only on the first chunk a background
-/// terminal prints after being noticed (PERF-04).
+/// as often as the user types. It takes `foreground`, and for a background
+/// terminal `attention` and `seen`, which `session::persist` holds only while
+/// it swaps or copies them, never across its walk over the workspaces. It
+/// reaches the session at all only on the first chunk a background terminal
+/// prints after being noticed (PERF-04).
 pub fn on_output(app: &AppHandle, terminal_id: &str) {
     let state = app.state::<AppState>();
     let foreground = state.foreground.lock().as_deref() == Some(terminal_id);
@@ -40,8 +42,8 @@ pub fn on_output(app: &AppHandle, terminal_id: &str) {
         let activity = activities.entry(terminal_id.to_string()).or_default();
         activity.last_output = Some(Instant::now());
         // `quiet_loop` is what decides whether a notification is due, and it
-        // already drops every terminal in the workspace on screen (AGT-05),
-        // so arming this needs no reading of the session here.
+        // already drops every terminal of the family on screen (AGT-05,
+        // AGT-10), so arming this needs no reading of the session here.
         if !foreground {
             activity.busy = true;
         }
@@ -49,9 +51,12 @@ pub fn on_output(app: &AppHandle, terminal_id: &str) {
     if foreground {
         return;
     }
-    // The badge goes up once per quiet period. This is the only branch that
-    // reaches the session, and output alone never takes it there.
-    if state.attention.lock().insert(terminal_id.to_string()) {
+    // The badge goes up once per quiet period, and once more for a tab its
+    // family was shown since (AGT-11). This is the only branch that reaches
+    // the session, and output alone never takes it there.
+    let fresh = state.attention.lock().insert(terminal_id.to_string());
+    let unseen = state.seen.lock().remove(terminal_id);
+    if fresh || unseen {
         session::publish(app);
     }
 }
@@ -88,6 +93,10 @@ pub fn quiet_loop(app: AppHandle) {
         let mut due: Vec<(String, String, String, String, Option<u32>)> = Vec::new();
         {
             let session = state.session.lock();
+            // A tab belongs to its family's root, so the family on screen is
+            // its root's id, and the root's setting and name are the ones a
+            // notification follows (AGT-10, AGT-12).
+            let home = session.active.as_deref().and_then(|a| session.family_root(a)).map(|r| r.id.clone());
             let mut activities = state.activities.lock();
             for (id, activity) in activities.iter_mut() {
                 if !activity.busy {
@@ -98,7 +107,7 @@ pub fn quiet_loop(app: AppHandle) {
                     continue;
                 }
                 let Some(ws) = session.workspace_of_terminal_mut_ref(id) else { continue };
-                if session.active.as_deref() == Some(&ws.id) {
+                if home.as_deref() == Some(&ws.id) {
                     activity.busy = false;
                     continue;
                 }
@@ -187,19 +196,24 @@ fn notify(app: AppHandle, terminal_id: String, ws_id: String, ws_name: String, t
     }
 }
 
-/// Switches to the workspace and terminal a notification named, and raises
-/// the Terminal window.
+/// Switches to the family a notification named, with the terminal that went
+/// quiet in front, and raises the Terminal window. The member of the family
+/// last on screen comes back, or its root when none was (AGT-13).
 fn activate(app: &AppHandle, ws_id: &str, terminal_id: &str) {
     let state = app.state::<AppState>();
-    {
+    let target = {
         let mut session = state.session.lock();
-        if let Some(ws) = session.workspace_mut(ws_id) {
+        // The tab's root now: a family it joined since the notice is where it is.
+        let owner = session.workspace_of_terminal_mut_ref(terminal_id).map_or_else(|| ws_id.to_string(), |w| w.id.clone());
+        if let Some(ws) = session.workspace_mut(&owner) {
             if ws.terminals.iter().any(|t| t.id == terminal_id) {
                 ws.active_terminal = Some(terminal_id.to_string());
             }
         }
-    }
-    if let Err(e) = crate::session::activate(app, ws_id) {
+        let last = session.recent.iter().find(|r| session.family_root(r).is_some_and(|f| f.id == owner)).cloned();
+        last.unwrap_or(owner)
+    };
+    if let Err(e) = crate::session::activate(app, &target) {
         session::notice(app, format!("{e:#}"));
     }
     session::publish(app);

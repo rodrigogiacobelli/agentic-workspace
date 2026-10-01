@@ -6,7 +6,7 @@
 //! last-focused window.
 
 use crate::desktop::APP_NAME;
-use crate::state::AppState;
+use crate::state::{AppState, Workspace};
 use crate::windows;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -67,11 +67,16 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
             crate::session::notice(app, format!("{e:#}"));
         }
     } else if let Some(ws) = id.strip_prefix("ws:") {
-        if let Err(e) = crate::session::activate(app, ws) {
-            crate::session::notice(app, format!("{e:#}"));
-        }
-        crate::session::publish(app);
-        windows::raise_last_focused(app);
+        // Off the main thread, as a pick in the selector is: bringing a
+        // workspace on screen runs git and a scan and may start shells.
+        let (app, ws) = (app.clone(), ws.to_string());
+        std::thread::spawn(move || {
+            if let Err(e) = crate::session::activate(&app, &ws) {
+                crate::session::notice(&app, format!("{e:#}"));
+            }
+            crate::session::publish(&app);
+            windows::raise_last_focused(&app);
+        });
     } else if id == "quit" {
         // The workspace window owns the unsaved-buffer prompt; it has to be
         // on screen for the dialog to have a parent.
@@ -101,19 +106,34 @@ fn apply(app: &AppHandle) {
     let Some(tray): Option<TrayIcon> = app.tray_by_id(ID) else { return };
     let (workspaces, attention) = {
         let session = state.session.lock();
-        let attention_set = state.attention.lock();
-        let row = |w: &crate::state::Workspace, nested: bool| {
-            let wants = w.terminals.iter().any(|t| attention_set.contains(&t.id));
-            (w.id.clone(), w.name.clone(), session.active.as_deref() == Some(&w.id), wants, nested)
+        // A family's terminals are its root's, so its dot sits on the root's
+        // row alone, and not while any member is on screen (AGT-10, AGT-11).
+        // `session::persist` sets the root's flag, which a tab its family was
+        // shown since no longer raises.
+        let home = session.active.as_deref().and_then(|a| session.family_root(a)).map(|r| r.id.clone());
+        let row = |w: &Workspace, mark: &str| {
+            let wants = home.as_deref() != Some(w.id.as_str()) && w.attention;
+            Row { id: format!("ws:{}", w.id), text: format!("{mark}{}", w.name), active: session.active.as_deref() == Some(&w.id), wants, enabled: true }
         };
-        // As the switcher lists them: each workspace that is not a linked
-        // worktree, followed by the open worktrees of its repository.
+        let under = |id: &str, of: fn(&Workspace) -> &Option<String>| session.workspaces.iter().filter(|w| of(w).as_deref() == Some(id)).collect::<Vec<_>>();
+        // As the selector lists them (TRAY-08): each root, its worktrees —
+        // under a label when it has children as well — then each child
+        // followed by the child's worktrees.
         let mut list = Vec::new();
-        for top in session.workspaces.iter().filter(|w| w.worktree_of.is_none()) {
-            list.push(row(top, false));
-            list.extend(session.workspaces.iter().filter(|w| w.worktree_of.as_deref() == Some(&top.id)).map(|w| row(w, true)));
+        for root in session.workspaces.iter().filter(|w| w.worktree_of.is_none() && w.child_of.is_none()) {
+            list.push(row(root, ""));
+            let worktrees = under(&root.id, |w| &w.worktree_of);
+            let children = under(&root.id, |w| &w.child_of);
+            if !worktrees.is_empty() && !children.is_empty() {
+                list.push(Row { id: format!("wtgroup:{}", root.id), text: "Worktrees".into(), active: false, wants: false, enabled: false });
+            }
+            list.extend(worktrees.into_iter().map(|w| row(w, "⑂ ")));
+            for child in children {
+                list.push(row(child, "› "));
+                list.extend(under(&child.id, |w| &w.worktree_of).into_iter().map(|w| row(w, "› ⑂ ")));
+            }
         }
-        let any = list.iter().any(|(_, _, active, wants, _)| *wants && !*active);
+        let any = list.iter().any(|r| r.wants);
         (list, any)
     };
     let visible: Vec<bool> = windows::LABELS.iter().map(|l| windows::is_visible(app, l)).collect();
@@ -140,7 +160,18 @@ fn apply(app: &AppHandle) {
     }
 }
 
-fn menu(app: &AppHandle, workspaces: &[(String, String, bool, bool, bool)], visible: &[bool]) -> Result<Menu<tauri::Wry>> {
+/// One workspace row of the menu, or the disabled label a repository's
+/// worktrees sit under.
+#[derive(Debug)]
+struct Row {
+    id: String,
+    text: String,
+    active: bool,
+    wants: bool,
+    enabled: bool,
+}
+
+fn menu(app: &AppHandle, workspaces: &[Row], visible: &[bool]) -> Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     menu.append(&MenuItem::with_id(app, "show", format!("Show {APP_NAME}"), true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -149,10 +180,13 @@ fn menu(app: &AppHandle, workspaces: &[(String, String, bool, bool, bool)], visi
     }
     if !workspaces.is_empty() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
-        for (id, name, active, wants, nested) in workspaces {
-            let name = if *nested { format!("⑂ {name}") } else { name.clone() };
-            let text = if *wants && !*active { format!("● {name}") } else { name };
-            menu.append(&CheckMenuItem::with_id(app, format!("ws:{id}"), text, true, *active, None::<&str>)?)?;
+        for row in workspaces {
+            if !row.enabled {
+                menu.append(&MenuItem::with_id(app, &row.id, &row.text, false, None::<&str>)?)?;
+                continue;
+            }
+            let text = if row.wants { format!("● {}", row.text) } else { row.text.clone() };
+            menu.append(&CheckMenuItem::with_id(app, &row.id, text, true, row.active, None::<&str>)?)?;
         }
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;

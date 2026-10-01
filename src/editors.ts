@@ -22,13 +22,26 @@ export function allTabIds(workspaces: Workspace[]): Set<string> {
   return new Set(workspaces.flatMap((w) => [...w.groups, ...w.review.groups].flatMap((g) => g.editors.map((e) => e.id))));
 }
 
+/**
+ * A file shown as itself. `stamp` names the version of the file on disk,
+ * which a viewer draws, and is null while no file is there (IMG-09, IMG-09a).
+ */
+export interface Media {
+  media: "image" | "audio" | "video";
+  workspaceId: string;
+  path: string;
+  stamp: string | null;
+}
+
 /** An open tab: a text document, media shown as itself, or a file the editor declines. */
-export type Entry = { doc: Doc } | { binary: string } | { media: "image" | "audio" | "video" };
+export type Entry = { doc: Doc } | { binary: string } | Media;
 
 const registry = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const pending = new Map<string, { line: number; column: number }>();
-let hooks: DocHooks = { openFile: () => {}, openIn: () => {}, workspaces: () => [], notice: () => {}, showCommit: () => {} };
+/** Media tabs a mount gave the keyboard, for their viewers to take once drawn. */
+const owedFocus = new Set<string>();
+let hooks: DocHooks = { openFile: () => {}, openIn: () => {}, reveal: () => {}, workspaces: () => [], notice: () => {}, showCommit: () => {} };
 
 export function setHooks(h: DocHooks): void {
   hooks = h;
@@ -52,6 +65,29 @@ export function doc(id: string): Doc | undefined {
   return e && "doc" in e ? e.doc : undefined;
 }
 
+function media(id: string): Media | undefined {
+  const e = registry.get(id);
+  return e && "media" in e ? e : undefined;
+}
+
+/** Whether a tab's file was deleted or moved on disk: its label is struck through (ED-22, IMG-09a). */
+export function detached(id: string): boolean {
+  const e = registry.get(id);
+  return !!e && ("doc" in e ? e.doc.detached : "media" in e && e.stamp === null);
+}
+
+/** Gives the keyboard to a tab's document, or to its viewer when that is drawn. */
+export function focus(id: string): void {
+  const d = doc(id);
+  if (d) d.focus();
+  else document.querySelector<HTMLElement>(`[data-viewer="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+}
+
+/** Whether the last mount of a media tab gave it the keyboard; asked once, by its viewer. */
+export function takeFocus(id: string): boolean {
+  return owedFocus.delete(id);
+}
+
 export function isDirty(id: string): boolean {
   return doc(id)?.dirty ?? false;
 }
@@ -65,14 +101,22 @@ export function dirtyCount(): number {
 /** Shows a tab's document in `container`, opening it first if needed; `focus` false leaves focus where it is. */
 export async function mount(ws: Workspace, tab: EditorTab, container: HTMLElement, focus = true): Promise<Entry> {
   let entry = registry.get(tab.id);
+  const kind = mediaKind(tab.path);
+  if (!entry && kind !== "file") {
+    // Asked first, so the first picture drawn is already of this version. A
+    // stat that fails leaves it to the picture to load or not.
+    const stamp = await api.fileStamp(ws.id, tab.path).catch(() => "");
+    entry = { media: kind, workspaceId: ws.id, path: tab.path, stamp };
+    registry.set(tab.id, entry);
+    notify();
+  }
+  if (entry && "media" in entry) {
+    // As a document takes it (Doc.mount), once its viewer is drawn.
+    if (focus && !modalOpen() && !document.activeElement?.closest(".tree")) owedFocus.add(tab.id);
+    else owedFocus.delete(tab.id);
+    return entry;
+  }
   if (!entry) {
-    const kind = mediaKind(tab.path);
-    if (kind !== "file") {
-      entry = { media: kind };
-      registry.set(tab.id, entry);
-      notify();
-      return entry;
-    }
     let text: string;
     try {
       text = await api.readFile(ws.id, tab.path);
@@ -128,12 +172,17 @@ export function dispose(id: string): void {
   const entry = registry.get(id);
   if (!entry) return;
   registry.delete(id);
+  owedFocus.delete(id);
   if ("doc" in entry) entry.doc.dispose();
   notify();
 }
 
 export function retain(ids: Set<string>): void {
   for (const id of [...registry.keys()]) if (!ids.has(id)) dispose(id);
+}
+
+function dirOf(path: string): string {
+  return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 }
 
 function extensionOf(path: string): string {
@@ -152,6 +201,15 @@ export function follow(workspaces: Workspace[]): void {
     for (const group of ws.groups) {
       for (const tab of group.editors) {
         const entry = registry.get(tab.id);
+        if (entry && "media" in entry && entry.path !== tab.path) {
+          // Shown as what its new name says it is.
+          if (mediaKind(tab.path) !== entry.media) dispose(tab.id);
+          else {
+            registry.set(tab.id, { ...entry, path: tab.path });
+            void checkMedia(tab.id);
+          }
+          continue;
+        }
         if (!entry || !("doc" in entry) || entry.doc.path === tab.path) continue;
         // The extension decides the language, the mode and the comment token
         // Ctrl+/ inserts, and all three are fixed when the document is built.
@@ -182,16 +240,35 @@ export function revealLine(id: string, line: number, column = 0): void {
 
 /**
  * A directory changed on disk: every open document inside it re-reads its
- * file, and every document of the workspace looks its citations up again.
+ * file, every media tab there asks whether its file changed or went, and
+ * every document of the workspace looks its citations up again.
  */
 export function checkDisk(workspaceId: string, dirs: string[]): void {
   const inTree = dirs.some((d) => d !== ".git" && !d.startsWith(".git/"));
-  for (const entry of registry.values()) {
+  for (const [id, entry] of registry) {
+    if ("media" in entry) {
+      if (entry.workspaceId === workspaceId && dirs.includes(dirOf(entry.path))) void checkMedia(id);
+      continue;
+    }
     if (!("doc" in entry) || entry.doc.workspaceId !== workspaceId) continue;
     if (inTree) entry.doc.invalidateExistence();
-    const dir = entry.doc.path.includes("/") ? entry.doc.path.slice(0, entry.doc.path.lastIndexOf("/")) : "";
-    if (dirs.includes(dir)) void entry.doc.checkDisk();
+    if (dirs.includes(dirOf(entry.doc.path))) void entry.doc.checkDisk();
   }
+}
+
+/**
+ * A media tab's file as it is now. A new stamp is a rewritten, replaced or
+ * recreated file, which its viewer draws again; none is a deleted one. An
+ * unanswered question leaves the tab as it was.
+ */
+async function checkMedia(id: string): Promise<void> {
+  const asked = media(id);
+  if (!asked) return;
+  const stamp = await api.fileStamp(asked.workspaceId, asked.path).catch(() => asked.stamp);
+  const now = media(id);
+  if (!now || now.path !== asked.path || now.stamp === stamp) return;
+  registry.set(id, { ...now, stamp });
+  notify();
 }
 
 /**

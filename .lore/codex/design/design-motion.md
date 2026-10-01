@@ -4,9 +4,10 @@ title: Motion design
 summary: What motion in this application is allowed to be — the duration scale and
   which interaction takes which token, what each easing curve means, why an exit
   is shorter than its entry, the two properties that may animate, how motion
-  yields to input, the delays before anything starts, the thresholds a loading
-  indicator obeys, how long a message stays, and the accessibility floor under
-  all of it.
+  yields to input and which changes follow the hand with no animation at all, the
+  delays before anything starts, the thresholds a loading indicator obeys, how long
+  a message stays and why every toast here leaves after two seconds, and the
+  accessibility floor under all of it.
 related:
   - standards-motion
 ---
@@ -36,6 +37,7 @@ Which token an interaction takes:
 | Toggle, checkbox, icon rotation | 150 ms |
 | Dropdown, popover, small expand | 200 ms |
 | Accordion, tab switch, inline reveal | 250 ms |
+| Image zoom step, fit, actual size or quarter turn | 250 ms |
 | Dialog or toast entering | 300 ms |
 | Dialog or toast leaving | 225 ms |
 | Backdrop dim | 300 ms |
@@ -96,6 +98,23 @@ transition. A CSS transition retargets by itself; an animation driven from
 script is cancelled and restarted from the value it had reached, never awaited
 before the next event is accepted.
 
+## Direct input
+
+A change the reader drives continuously follows the input frame by frame and
+never animates: an animation behind a drag or a turning wheel lags the hand
+that drives it. A change asked for in one step — a button, a key, a
+double-click — animates from how the thing looked to how it is, on the scale
+above. A change the layout makes by itself, such as a picture fitted again as
+a divider moves, lands at once.
+
+The image viewer has all three. A zoom step, *Fit*, *1:1* or a quarter turn
+from its buttons, its keys or a double-click animates for 250 ms on the
+ease-in-out curve, since the picture starts and ends on screen. Under reduced
+motion it lands at once: a scale and a spin are what the preference turns off
+(Accessibility). A `Ctrl`+wheel zoom and a
+drag follow the input directly. A plain wheel pans with the glide every wheel
+scroll in the application has. A mirror flip lands at once.
+
 ## Delays
 
 A delay is a different clock from a duration — how long before anything starts
@@ -146,6 +165,11 @@ The timer pauses on hover and on keyboard focus, and resumes on leave or blur.
 Nothing carrying an action the reader must take expires on its own (WCAG
 2.2.1).
 
+A message that reports data already lost is not a toast. When launch finds
+`session.json` or `settings.json` unreadable and moves it aside, the
+Workspace window says so in a dialog that names the moved file and what
+started empty, and the dialog stays until the reader presses *OK* (NTF-04).
+
 ## Accessibility
 
 `prefers-reduced-motion: reduce` is honoured by replacing movement with a
@@ -166,10 +190,38 @@ still frame.
 An animation on a path the reader crosses dozens of times a day is dropped
 rather than tuned.
 
-## Four rules answered differently here
+## Six rules answered differently here
 
 Each of these contradicts a general rule above, and each holds for a reason
 this application carries.
+
+**Every toast leaves two seconds after it is seen, an error included.** A
+failure, a confirmation and the prompt to touch a security key all get the
+same two seconds, where the dwell table gives four to ten seconds by what a
+message carries and an error no limit at all. The two seconds count only
+while the toast's window has focus, so a toast raised while the Terminal
+window has focus, or while the Workspace window is hidden in the tray, waits
+to be seen (NTF-03). While the pointer rests on the stack or keyboard focus is in it,
+every toast in that window holds, and each leaves after the time it had left
+once the pointer or focus goes; a toast that appears under a pointer that has
+not moved counts down (NTF-01, NTF-02). The × leaves at once. The time is
+fixed, not a setting, and reduced motion shortens a toast's exit and never
+its reading time.
+
+This departs from WCAG 2.2.1, which asks that a time limit can be turned
+off, adjusted or extended before it runs out; the hold is the one extension
+here. It is the owner's call. A toast that stays until dismissed piles up in
+the corner of a window shared with agents that fail and succeed all day, and
+most toasts here are guidance read at a glance, such as "Type a commit message
+first." What cannot be read at a glance is not a toast: data lost at launch is
+the dialog Dwell describes, and git's full report of a fetch, pull or push
+stays in the Branches panel until it is dismissed.
+
+**An animated image plays with no pause control.** The image viewer draws
+the file with the webview's own image element, which offers none, where
+Accessibility asks for one on anything that plays by itself past five
+seconds (WCAG 2.2.2). An animation in a workspace is there because the owner
+or an agent put it there to be looked at, and the file is the thing shown.
 
 **A menu closes at once when a row is picked.** The exit plays for a dismissal
 — Escape, a click outside — and not for an activation, which is how a platform

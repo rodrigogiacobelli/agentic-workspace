@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { useChanged, useKept, useKeptScroll } from "../live";
+import { familyRoot } from "../modes";
 import { notify, report } from "../notice";
 import * as repo from "../repo";
 import type { Session, Unmerged, Workspace, WorktreeEntry } from "../types";
@@ -18,10 +19,16 @@ interface Removal {
   message: string;
   /** The branch the confirmation offers to delete too, and the commits it counted as lost with it. */
   branch: { name: string; unique: Unmerged; detail?: string } | null;
+  /** The terminal tabs the confirmation named as closing with it (TERM-22). */
+  shells: string[];
 }
 
 /** `lore (wt: refactor)`: the parent project's own name, never a worktree's, then the branch (BR-08). */
 const worktreeName = (ws: Workspace, label: string) => `${ws.name.replace(/ \(wt: .*\)$/, "")} (wt: ${label})`;
+
+/** The repository row a worktree opened from Source Control goes under: the
+ *  workspace on screen, or its row when it is a worktree itself (assumption 4). */
+const rowOf = (ws: Workspace) => ws.worktreeOf ?? ws.id;
 
 /**
  * Adds a worktree and offers to open it as a workspace. The workspace is
@@ -31,7 +38,7 @@ const worktreeName = (ws: Workspace, label: string) => `${ws.name.replace(/ \(wt
 export async function addWorktree(ws: Workspace, path: string, branch: string, create: boolean): Promise<void> {
   await api.gitAddWorktree(ws.id, path, branch, create);
   const openIt = await ask(`Worktree created at ${path}. Open it as a workspace?`, { title: "Worktree", okLabel: "Open as workspace", cancelLabel: "Not now" });
-  if (openIt) await api.addWorkspace(path, worktreeName(ws, branch), true).catch(report);
+  if (openIt) await api.addWorkspace(path, worktreeName(ws, branch), true, rowOf(ws)).catch(report);
 }
 
 /**
@@ -57,17 +64,34 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
 
   /** This list and every surface reading the repository store see the change. */
   const changed = () => { void load(); void repo.refresh(ws.id); };
-  const workspaceAt = (path: string) => session.workspaces.find((w) => w.path === path);
+  /** The workspace open on a path; on a folder open twice — a repository the
+   *  owner added and a child on it — the one of this family (assumption 3). */
+  const workspaceAt = (path: string) => {
+    const home = familyRoot(session.workspaces, ws)?.id;
+    const on = session.workspaces.filter((w) => w.path === path);
+    return on.find((w) => familyRoot(session.workspaces, w)?.id === home) ?? on[0];
+  };
 
   const openAsWorkspace = (wt: WorktreeEntry) =>
-    void api.addWorkspace(wt.path, worktreeName(ws, wt.branch ?? wt.head ?? "detached"), true).catch(report);
+    void api.addWorkspace(wt.path, worktreeName(ws, wt.branch ?? wt.head ?? "detached"), true, rowOf(ws)).catch(report);
 
   const remove = async (wt: WorktreeEntry) => {
     const open = workspaceAt(wt.path);
     const dirty = await api.gitWorktreeDirty(wt.path).catch(() => []);
+    // Every shell inside the worktree, of any family, by the directory
+    // `/proc` gives now: reading the session reads each one again. A
+    // worktree open as a root of its own holds a list of its own, wherever
+    // its shells are, and its removal closes all of them (TERM-22).
+    const fresh = await api.getSession().catch(() => session);
+    const root = wt.path.replace(/\/+$/, "");
+    const shells = fresh.workspaces.flatMap((w) => w.terminals
+      .filter((t) => w.id === open?.id || t.cwd === root || t.cwd.startsWith(`${root}/`))
+      .map((t) => ({ id: t.id, label: `${t.name ?? t.cwd.slice(t.cwd.lastIndexOf("/") + 1)} (${w.name})` })));
     const parts: string[] = [];
-    if (open) {
-      parts.push(`The workspace "${open.name}" is open in it${open.terminals.length ? ` with ${open.terminals.length} running terminal${open.terminals.length === 1 ? "" : "s"}` : ""}; it will be removed and its processes terminated.`);
+    if (open) parts.push(`The workspace "${open.name}" is open in it; it will be removed.`);
+    if (shells.length) {
+      const one = shells.length === 1;
+      parts.push(`${one ? "This terminal" : `These ${shells.length} terminals`} will be closed and ${one ? "its process" : "their processes"} terminated:\n${shells.map((s) => s.label).join("\n")}`);
     }
     if (dirty.length) parts.push(`It has ${dirty.length} uncommitted change${dirty.length === 1 ? "" : "s"}:\n${dirty.slice(0, 10).join("\n")}${dirty.length > 10 ? "\n…" : ""}`);
     // The branch goes too only if nothing else has it checked out — git would
@@ -82,18 +106,20 @@ export function WorktreesPanel({ ws, session }: { ws: Workspace; session: Sessio
       branch: name && unique
         ? { name, unique, detail: unique.count > 0 ? `${name} has ${unique.count} commit${unique.count === 1 ? "" : "s"} no other branch holds. Deleting it loses them.` : undefined }
         : null,
+      shells: shells.map((s) => s.id),
     });
   };
 
-  // The workspace, its processes and the worktree go together, and git's
+  // The shells named, the workspace and the worktree go together, and git's
   // refusal is surfaced rather than overridden (BR-10). The workspace is the
   // one open on the worktree now: the Terminal window's switcher can open or
   // remove one while the question is up. The branch is deleted only once the
   // worktree is gone, and forced, but only over the commits the confirmation
   // counted: a shell in the worktree kept running while it was asked, and a
   // commit made meanwhile keeps the branch.
-  const removeConfirmed = async ({ wt, force, branch }: Removal, withBranch: boolean) => {
+  const removeConfirmed = async ({ wt, force, branch, shells }: Removal, withBranch: boolean) => {
     try {
+      for (const id of shells) await api.terminalClose(id);
       const open = workspaceAt(wt.path);
       if (open) await api.removeWorkspace(open.id);
       await api.gitRemoveWorktree(ws.id, wt.path, force);

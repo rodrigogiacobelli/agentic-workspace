@@ -593,7 +593,8 @@ enum Who {
     /// The application's own git for this workspace, and whether the main
     /// thread started it.
     App(String, bool),
-    /// A shell in one of this workspace's terminals, or something under it.
+    /// A terminal's shell, or something under it, and the workspace whose
+    /// terminal credentials it started with.
     Terminal(String),
     Unknown,
 }
@@ -635,15 +636,21 @@ fn asker(state: &AppState, helper: u32) -> Asker {
         }
     }
     let children = state.git_children.lock().clone();
-    let shells: std::collections::HashMap<u32, String> = state.ptys.lock().iter().filter_map(|(id, live)| live.pid.map(|p| (p, id.clone()))).collect();
+    let shells: std::collections::HashMap<u32, (String, Option<String>)> =
+        state.ptys.lock().iter().filter_map(|(id, live)| live.pid.map(|p| (p, (id.clone(), live.credentials.clone())))).collect();
     let who = chain
         .iter()
         .find_map(|p| {
             if let Some((workspace, main)) = children.get(p) {
                 return Some(Who::App(workspace.clone(), *main));
             }
-            let tab = shells.get(p)?;
-            let workspace = state.session.lock().workspace_of_terminal_mut_ref(tab).map(|w| w.id.clone());
+            // A shell is judged by the workspace whose credentials it started
+            // with, which its include still names: a shell that joined a
+            // family from a worktree of its own keeps that worktree's until
+            // it is restarted (assumption 10). One that started with none
+            // falls to the root holding its tab.
+            let (tab, started) = shells.get(p)?;
+            let workspace = started.clone().or_else(|| state.session.lock().workspace_of_terminal_mut_ref(tab).map(|w| w.id.clone()));
             Some(workspace.map_or(Who::Unknown, Who::Terminal))
         })
         .unwrap_or(Who::Unknown);

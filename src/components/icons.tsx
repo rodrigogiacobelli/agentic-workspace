@@ -41,6 +41,14 @@ const PATHS = {
   checklist: "M2 2.5h3.5v3.5H2z M2 10h3.5v3.5H2z M2.8 11.8l.8.8 1.4-1.7 M8 4.25h6 M8 11.75h6",
   quote: "M3 3v10 M6 4.5h7.5 M6 8h7.5 M6 11.5h5",
   codeBlock: "M2 2.5h12v11H2z M6.5 6l-2 2 2 2 M9.5 6l2 2-2 2",
+  locate: "M8 3.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9z M8 1v2.5 M8 12.5V15 M1 8h2.5 M12.5 8H15 M8 8h.01",
+  zoomIn: "M3.5 8h9 M8 3.5v9",
+  zoomOut: "M3.5 8h9",
+  fit: "M2 5.5V2h3.5 M10.5 2H14v3.5 M14 10.5V14h-3.5 M5.5 14H2v-3.5",
+  rotateLeft: "M3.67 5.5A5 5 0 1 1 3 8.4 M3.67 2v3.5h3.5",
+  rotateRight: "M12.33 5.5A5 5 0 1 0 13 8.4 M12.33 2v3.5h-3.5",
+  flipH: "M8 1.5v2 M8 6v4 M8 12.5v2 M5.5 4.5L1.5 8l4 3.5z M10.5 4.5l4 3.5-4 3.5z",
+  flipV: "M1.5 8h2 M6 8h4 M12.5 8h2 M4.5 5.5L8 1.5l3.5 4z M4.5 10.5L8 14.5l3.5-4z",
 } as const;
 
 export type IconName = keyof typeof PATHS;

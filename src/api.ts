@@ -27,9 +27,12 @@ export interface OpenAt {
 export const api = {
   getSession: () => invoke<Session>("get_session"),
   takeNotices: () => invoke<string[]>("take_notices"),
-  /** Opens a folder, or switches to the workspace already on it. */
-  addWorkspace: (path: string, name?: string, fromWorktree = false) =>
-    invoke<string>("add_workspace", { path, name: name ?? null, fromWorktree }),
+  /** What launch moved aside as unreadable, once; only the Workspace window asks (NTF-04). */
+  takeSetAside: () => invoke<string[]>("take_set_aside"),
+  /** Opens a folder, or switches to the workspace already on it. A linked
+   *  worktree goes under `openedUnder` when that is a row on its repository. */
+  addWorkspace: (path: string, name?: string, fromWorktree = false, openedUnder?: string) =>
+    invoke<string>("add_workspace", { path, name: name ?? null, fromWorktree, openedUnder: openedUnder ?? null }),
   switchWorkspace: (id: string) => invoke<void>("switch_workspace", { id }),
   removeWorkspace: (id: string) => invoke<void>("remove_workspace", { id }),
   renameWorkspace: (id: string, name: string) => invoke<void>("rename_workspace", { id, name }),
@@ -37,8 +40,9 @@ export const api = {
   reorderWorkspaces: (ids: string[]) => invoke<void>("reorder_workspaces", { ids }),
   /** Which mode the Workspace window shows for a workspace. */
   setMode: (workspaceId: string, mode: DockedMode) => invoke<void>("set_mode", { workspaceId, mode }),
-  setExpanded: (workspaceId: string, path: string, expanded: boolean) =>
-    invoke<void>("set_expanded", { workspaceId, path, expanded }),
+  /** Opens or folds each folder named, in one session change: in the Explorer, or in the view `view` (TREE-20). */
+  setExpanded: (workspaceId: string, paths: string[], expanded: boolean, view: string | null = null) =>
+    invoke<void>("set_expanded", { workspaceId, view, paths, expanded }),
   /** A preview open reuses the group's preview tab; a permanent one keeps its own. */
   openFile: (workspaceId: string, path: string, preview: boolean) =>
     invoke<string>("open_file", { workspaceId, path, preview }),
@@ -159,8 +163,8 @@ export const api = {
   viewCreate: (workspaceId: string, name: string) => invoke<string>("view_create", { workspaceId, name }),
   viewRename: (workspaceId: string, viewId: string, name: string) => invoke<void>("view_rename", { workspaceId, viewId, name }),
   viewDelete: (workspaceId: string, viewId: string) => invoke<void>("view_delete", { workspaceId, viewId }),
-  viewAdd: (workspaceId: string, viewId: string, path: string) => invoke<void>("view_add", { workspaceId, viewId, path }),
-  viewRemove: (workspaceId: string, viewId: string, path: string) => invoke<void>("view_remove", { workspaceId, viewId, path }),
+  viewAdd: (workspaceId: string, viewId: string, paths: string[]) => invoke<void>("view_add", { workspaceId, viewId, paths }),
+  viewRemove: (workspaceId: string, viewId: string, paths: string[]) => invoke<void>("view_remove", { workspaceId, viewId, paths }),
   viewReorder: (workspaceId: string, viewId: string, paths: string[]) => invoke<void>("view_reorder", { workspaceId, viewId, paths }),
   setActiveView: (workspaceId: string, viewId: string | null) => invoke<void>("set_active_view", { workspaceId, viewId }),
   createEntry: (workspaceId: string, path: string, isDir: boolean) =>
@@ -169,8 +173,9 @@ export const api = {
     invoke<void>("rename_entry", { workspaceId, from, to }),
   duplicateEntry: (workspaceId: string, path: string) =>
     invoke<string>("duplicate_entry", { workspaceId, path }),
-  trashEntry: (workspaceId: string, path: string) =>
-    invoke<void>("trash_entry", { workspaceId, path }),
+  /** Moves each path to the desktop's trash; answers the failures, one `<path>: <reason>` each. */
+  trashEntries: (workspaceId: string, paths: string[]) =>
+    invoke<string[]>("trash_entries", { workspaceId, paths }),
   /** Copies, or moves when `cut`, an absolute path into a workspace directory.
    *  Under `ask` a taken name comes back as `exists`, with nothing done; under
    *  null a copy takes a free name and a move onto a taken one fails. */
@@ -189,6 +194,9 @@ export const api = {
     invoke<SearchHit[]>("search_project", { workspaceId, query, includeIgnored }),
   readFile: (workspaceId: string, path: string) =>
     invoke<string>("read_file", { workspaceId, path }),
+  /** Which version of the file is on disk, or null when none is (IMG-09). */
+  fileStamp: (workspaceId: string, path: string) =>
+    invoke<string | null>("file_stamp", { workspaceId, path }),
   writeFile: (workspaceId: string, path: string, content: string) =>
     invoke<void>("write_file", { workspaceId, path, content }),
 

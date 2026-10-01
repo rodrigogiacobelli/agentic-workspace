@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import * as editors from "../editors";
 import { LANGUAGES, languageFor } from "../editor/languages";
+import { mediaKind } from "../editor/preview";
 import { report } from "../notice";
 import * as repo from "../repo";
 import * as settings from "../settings";
 import type { Workspace } from "../types";
+import { percent, useImage } from "./ImageView";
 import { Dropdown } from "./Menu";
 
 /**
@@ -26,6 +28,16 @@ function EditorFacts({ ws }: { ws: Workspace }) {
   const doc = id ? editors.doc(id) : undefined;
   const unsaved = editors.dirtyCount();
   if (!tab || !id) return unsaved ? <span>{unsaved} unsaved</span> : null;
+  // Media has no encoding, line ending or language to show.
+  const media = mediaKind(tab.path);
+  if (media !== "file") {
+    return (
+      <>
+        {media === "image" && <ImageFacts workspaceId={ws.id} tabId={id} />}
+        {unsaved > 0 && <span>{unsaved} unsaved</span>}
+      </>
+    );
+  }
   const cursor = doc?.cursor();
   const s = settings.get();
   const abs = `${ws.path}/${tab.path}`;
@@ -61,6 +73,18 @@ function EditorFacts({ ws }: { ws: Workspace }) {
       <span>LF</span>
       <Dropdown className="statusbar-language" value={language} options={LANGUAGES.map((l) => ({ id: l.id, label: l.name }))} onChange={(l) => void setLanguage(l)} title="Language for this file" />
       {unsaved > 0 && <span>{unsaved} unsaved</span>}
+    </>
+  );
+}
+
+/** An image's own size, and the zoom it is drawn at (IMG-08). */
+function ImageFacts({ workspaceId, tabId }: { workspaceId: string; tabId: string }) {
+  const [view] = useImage(workspaceId, tabId);
+  if (!view.width) return null;
+  return (
+    <>
+      <span>{view.width} × {view.height}</span>
+      <span>{percent(view.scale)}</span>
     </>
   );
 }

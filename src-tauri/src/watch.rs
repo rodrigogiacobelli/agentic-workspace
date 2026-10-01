@@ -1,7 +1,8 @@
 //! Filesystem watches on exactly the directories the active workspace shows:
 //! its root, its expanded directories and the directories of its tabs, each
-//! non-recursively, plus the git directories of every workspace. An ignored
-//! subtree is never watched unless the user expands it.
+//! non-recursively, plus the root folder of its family and the git
+//! directories of every workspace. An ignored subtree is never watched unless
+//! the user expands it.
 
 use crate::session;
 use crate::state::{AppState, Workspace};
@@ -209,7 +210,7 @@ fn emit(app: &AppHandle, paths: HashSet<PathBuf>) {
     let state = app.state::<AppState>();
     let unwatched = state.watcher.lock().heal(&paths);
     let dirs: HashSet<PathBuf> = paths.iter().map(|p| dir_of(p)).collect();
-    let (roots, open) = {
+    let (roots, open, family, active) = {
         let session = state.session.lock();
         let roots: Vec<(String, PathBuf)> = session.workspaces.iter().map(|w| (w.id.clone(), w.path.clone())).collect();
         let open: HashSet<PathBuf> = session
@@ -218,7 +219,17 @@ fn emit(app: &AppHandle, paths: HashSet<PathBuf>) {
             .and_then(|id| session.workspace(id))
             .map(|ws| tab_dirs(ws).map(|d| ws.path.join(d)).collect())
             .unwrap_or_default();
-        (roots, open)
+        let family = scanning_root(&session).map(|r| (r.id.clone(), r.path.clone()));
+        (roots, open, family, session.active.clone())
+    };
+    // The folder of a root out of sight is watched for the family scan alone
+    // (assumption 27): a change to it, or to an entry directly in it, reaches
+    // only the workspace on screen, which may be a worktree kept in there.
+    // Told of it, the root would check the links of every document it has
+    // open, which is a `git check-ignore` (ADR-018); `catch_up` tells it
+    // everything when it comes back.
+    let scan_only = |dir: &Path| {
+        family.as_ref().is_some_and(|(id, root)| active.as_ref() != Some(id) && (dir == root || dir.parent() == Some(root.as_path())))
     };
     let repos: Vec<Repo> = state
         .git
@@ -241,6 +252,9 @@ fn emit(app: &AppHandle, paths: HashSet<PathBuf>) {
         // A directory may sit inside several workspaces (a worktree inside its
         // parent project); the deepest root claims it, and any others as well.
         for (id, root) in &roots {
+            if active.as_ref() != Some(id) && scan_only(&dir) {
+                continue;
+            }
             if let Ok(rel) = dir.strip_prefix(root) {
                 per_workspace
                     .entry(id.clone())
@@ -265,6 +279,23 @@ fn emit(app: &AppHandle, paths: HashSet<PathBuf>) {
             touched.extend(repos.iter().filter(|r| r.common_dir == repo.common_dir).map(|r| r.id.clone()));
         }
     }
+    // A folder made, moved or removed directly inside the root of the family
+    // on screen may be a repository arriving or leaving: `git clone` makes its
+    // `.git` well inside one settle (WS-16, WS-16a). A file written there is
+    // neither, nor is a hidden entry, and those cost no listing.
+    let mut listed = false;
+    if let Some((root_id, root)) = &family {
+        let candidate = |p: &PathBuf| p.parent() == Some(root.as_path()) && !p.file_name().is_some_and(|n| n.as_encoded_bytes().starts_with(b".")) && !p.is_file();
+        if paths.iter().any(candidate) {
+            let found = crate::family::scan(app, root_id);
+            listed = found.changed || !found.pending.is_empty();
+            for id in found.pending {
+                if crate::git::refresh_summary(app, &id) {
+                    refreshed.insert(id);
+                }
+            }
+        }
+    }
     for id in &refreshed {
         let _ = app.emit(EVENT_GIT_CHANGED, id);
     }
@@ -280,10 +311,10 @@ fn emit(app: &AppHandle, paths: HashSet<PathBuf>) {
     if changed {
         session::prune_worktrees(app);
     }
-    if !refreshed.is_empty() || unwatched {
+    if !refreshed.is_empty() || unwatched || listed {
         sync(app);
     }
-    if changed {
+    if changed || listed {
         session::publish(app);
     }
     for (workspace_id, dirs) in per_workspace {
@@ -305,8 +336,13 @@ pub fn sync(app: &AppHandle) {
         let mut wanted = HashSet::new();
         if let Some(ws) = session.active.as_deref().and_then(|id| session.workspace(id)).filter(|ws| ws.path.is_dir()) {
             wanted.insert(ws.path.clone());
-            wanted.extend(ws.expanded.iter().map(|rel| ws.path.join(rel)));
+            wanted.extend(ws.expanded.iter().chain(ws.views.iter().flat_map(|v| &v.expanded)).map(|rel| ws.path.join(rel)));
             wanted.extend(tab_dirs(ws).map(|d| ws.path.join(d)));
+        }
+        // The root folder of the family on screen, where a repository
+        // cloned beside the member shown appears (WS-16).
+        if let Some(root) = scanning_root(&session) {
+            wanted.insert(root.path.clone());
         }
         // HEAD, the index and the refs of every workspace's repository, so
         // the branch shown follows a checkout made in the terminal and the
@@ -332,6 +368,12 @@ pub fn sync(app: &AppHandle) {
         wanted.into_iter().filter(|p| p.is_dir()).collect()
     };
     watcher.apply(wanted, app);
+}
+
+/// The root of the family on screen, when it lists the repositories inside
+/// its folder.
+fn scanning_root(session: &crate::state::Session) -> Option<&Workspace> {
+    session.active.as_deref().and_then(|id| session.family_root(id)).filter(|r| crate::family::scans(r))
 }
 
 /// Tells the frontend that everything it shows of a workspace may have
