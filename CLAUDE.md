@@ -139,20 +139,15 @@ A native Linux desktop app for running several agent-driven projects at once.
 Two OS windows — a file tree and markdown editor, and a tabbed terminal — over a
 workspace switcher that keeps every project's terminals alive in the background.
 
-Eight milestones run. The first three: workspaces, both windows, backend-owned
-terminals, the file tree, session restore, the three-mode markdown editor with
-clipboard assets and external-change handling, git with branches and worktrees,
-and the two agent signals. The next four: app-drawn window chrome over a
-tray-resident process, preview tabs, the layout tree that drives both editor
-splits and panel docking, custom views, `@` citations with *Quote to AI*, the
-typing helpers, and the operations document. The eighth: modes — Editor and
-Source Control in the Workspace window, Terminal in its own — each owning its
-panels, its working area and its dock tree (`017-modes`). The Rust backend is
-`src-tauri/src/`, the React frontend is `src/`, the editor is `src/editor/`.
-Mermaid, the grammar importer and HTML preview are not built; treat any claim
-about them as false until you have read the code. The second in-flight
-specification is `working/acceptance-criteria-2.md`: the first one is frozen and
-the ids continue its groups, so a citation of `ED-07` or `BR-08` still resolves.
+The application is at v0.5.0. A workspace added by hand is the root of a
+family — the repositories directly inside its folder and the worktrees of each
+— that shares one list of terminals (`020-workspace-family`). The Workspace
+window shows the Editor or Source Control, and the Terminal window the third
+mode (`017-modes`). The codex records how each part behaves; read it rather
+than a summary here. The Rust backend is `src-tauri/src/`, the React frontend
+is `src/`, the editor is `src/editor/`. Mermaid, the grammar importer and HTML
+preview are not built; treat any claim about them as false until you have read
+the code.
 
 ## Where things are
 
@@ -165,16 +160,24 @@ the ids continue its groups, so a citation of `ED-07` or `BR-08` still resolves.
 | `src/` | React frontend: the two window shells, terminal and editor registries |
 | `README.md` | The outward-facing description, build steps and key bindings |
 | `CLAUDE.md` | This file. How to work here |
-| `working/` | Throwaway, git-ignored. Holds `acceptance-criteria.md` and `acceptance-criteria-2.md`, the in-flight specs |
+| `working/` | Throwaway, git-ignored. The spec of a round in flight, and the headless harness (`working/harness/`) |
 
 **Documentation goes to the codex. Everything else is throwaway and goes to
 `working/`.** There is no `docs/` directory and no third location.
 
-`working/acceptance-criteria.md` and `working/acceptance-criteria-2.md` are the
-in-flight specifications: every behaviour as Given/When/Then with an id and a
-P0/P1/P2 priority. Cite ids (`ED-07`, `DOCK-08`) when you discuss behaviour.
-Neither is version controlled — as behaviour is built, its facts move into
-codex documents, which are.
+A round of work is specified in `working/acceptance-criteria-<n>.md` while it
+is in flight: every behaviour as Given/When/Then with an id and a P0/P1/P2
+priority (`lore artifact show acceptance-criteria`). Cite ids (`ED-07`,
+`DOCK-08`) when you discuss behaviour. Ids continue across rounds and are
+never reused; the code and the codex cite them, so grep both for a group's
+highest id before adding one. The spec is not version controlled — as
+behaviour is built, its facts move into codex documents, and the spec goes
+when the round ships.
+
+`working/harness/` runs a build in a nested virtual KWin on a private bus,
+never on the owner's screen, and drives it through WebKit's inspector. Its
+README gives the usage and the traps; the `run-the-app-headless` rite says what
+any headless run must keep private.
 
 `.lore/codex/conceptual/` and `.lore/codex/technical/` are deliberately empty.
 The codex records what is true today, and no system exists yet. Write those
