@@ -18,16 +18,38 @@ do: |
   3. To count the git processes the application starts, put a `git` script
      first on its PATH that appends the time and its arguments to a log and
      then execs `/usr/bin/git`.
-  4. Launch:
+  4. Launch with private data, cache, config and runtime directories:
 
          XDG_DATA_HOME=<scratch>/xdg XDG_CACHE_HOME=<scratch>/cache \
+         XDG_CONFIG_HOME=<scratch>/config XDG_RUNTIME_DIR=<scratch>/rt \
+         WAYLAND_DISPLAY=wl-headless-<label> \
          WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:<port> \
-         dbus-run-session -- kwin_wayland --virtual --no-lockscreen \
+         setsid dbus-run-session -- kwin_wayland --virtual --no-lockscreen \
            --no-global-shortcuts --socket wl-headless-<label> \
            --width 1920 --height 1080 --exit-with-session <binary>
 
      The private bus keeps the single-instance name, the tray and the hotkey
-     portal away from the owner's session.
+     portal away from the owner's session. Each of the other variables closes
+     a leak into it:
+     - `XDG_RUNTIME_DIR` (a fresh directory, mode 0700): with the owner's, the
+       nested `xdg-document-portal` mounts over `/run/user/<uid>/doc` and the
+       owner's document portal exits with status 21. The read-only call
+       `busctl --user call org.freedesktop.portal.Documents
+       /org/freedesktop/portal/documents org.freedesktop.portal.Documents
+       GetMountPoint` brings the owner's back.
+     - `XDG_CONFIG_HOME` (seeded with copies of `kdeglobals`, `gtk-3.0`,
+       `gtk-4.0` and `fontconfig`): with the owner's, the nested KWin writes
+       `kwinoutputconfig.json`, `kwinrc` and `kglobalshortcutsrc` there.
+     - `WAYLAND_DISPLAY`: services the private bus starts inherit no display,
+       and the desktop portals fall back to `wayland-0`, the owner's screen.
+     Unset `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` and the AppImage variables
+     (`APPDIR`, `LD_LIBRARY_PATH`, `GDK_BACKEND`, `GTK_THEME`). A fixture that
+     sits inside this checkout also needs `GIT_CEILING_DIRECTORIES` set to it,
+     or git run there finds this project's repository.
+
+     `working/harness/` holds scripts that do all of this — `run-headless.sh`,
+     `eval.mjs`, `shot.sh`, `cleanup.sh` and `fixture.sh`, with a README —
+     when they have not been cleaned out of `working/`.
   5. Find the application's pid by `readlink /proc/<pid>/exe`, never with
      `pgrep -f` or `pkill -f`: a pattern also matches the calling shell and
      kills it. A binary rebuilt while it runs reads `<path> (deleted)`. Its
@@ -44,8 +66,14 @@ do: |
      `Heap.gc` forces a collection and `Memory.startTracking` reports the
      JavaScript heap apart from the rest.
 
+  Connect to the inspector no sooner than about 15 seconds after the launch:
+  an earlier connection kills the application silently.
+
   Report the application pid, the inspector port and the log path. Stop the
   instance by killing that pid; the nested KWin exits with it. Then kill every
   process whose `/proc/<pid>/environ` carries that run's `XDG_DATA_HOME`:
   the services the private bus started — the desktop portal, `ksecretd`, the
-  accessibility bus — outlive it, one set per launch.
+  accessibility bus — outlive it, one set per launch. `kwin_wayland` carries
+  `cap_sys_nice`, so its `environ` and `exe` cannot be read: find it by its
+  exact `--socket wl-headless-<label>` argument and its parent
+  `dbus-run-session`.
